@@ -51,10 +51,12 @@ class SkillTrigger(str, Enum):
     ON_DEMAND = "on_demand"  # 人工/事件触发，不在固定位点
 
 class ModelTier(str, Enum):
-    """成本分层：硬原则 10 —— Opus 只留正文与冲突复核。"""
-    HAIKU  = "haiku"    # 抽取/去重/连续性初筛/格式化
-    SONNET = "sonnet"   # 中等：beat sheet、风格改写、对白
-    OPUS   = "opus"     # 正文创作、冲突复核
+    """成本分层：硬原则 10 —— Opus 只留正文与冲突复核。
+    注：第 14 节把档抽象为厂商无关的语义档 FAST/MID/STRONG，并保留
+    HAIKU/SONNET/OPUS 为同值别名（不破坏本契约）；多供应商的档→模型映射详见第 14 节。"""
+    HAIKU  = "haiku"    # 抽取/去重/连续性初筛/格式化（语义档 FAST）
+    SONNET = "sonnet"   # 中等：beat sheet、风格改写、对白（语义档 MID）
+    OPUS   = "opus"     # 正文创作、冲突复核（语义档 STRONG）
 
 class IOSpec(BaseModel):
     """单个输入/输出端口的形状声明，绑定到 Pydantic 模型类名。"""
@@ -119,6 +121,8 @@ class Skill(Protocol):
     contract: SkillContract
     def run(self, ctx: SkillContext, **inputs: BaseModel) -> SkillResult: ...
 ```
+
+> Draft/Check 类 Skill 的 `run()` 内部并非单次 LLM 调用，而是在受限只读工具集上做有界 ReAct（最多 K 步、按需补取上下文）——**Skill 内部受限工具循环详见第 12 节**（`ToolRegistry`/`ToolLoop`/`tool_call_log`）。其余 Skill 仍是单轮调用。
 
 **DoD 是一等公民**：`run()` 返回前由 `Skill Registry` 强制对 `contract.dod` 逐条执行 `predicate_ref`，任一 `blocker` 不过 → `SkillResult.ok=False`。这把"Skill 算不算干完了"从口头约定变成可单测的程序断言，是 7.7 中"无 blocker 才放行"的微观基础。
 
@@ -381,6 +385,8 @@ class CircuitBreaker:
 | 429 / 5xx 退避 | `LLMGateway` 内置 | 指数退避重试，重试耗时计入会话预算 |
 
 #### 7.6.2 LLM 网关：退避与缓存验证
+
+> 本小节给出的是单供应商（Anthropic）网关结构；**多供应商扩展详见第 14 节**（厂商无关 `LLMProvider` 抽象、跨厂商 `tool_calls`/结构化输出归一化、能力降级与回退链），本处 `LLMGateway` 在第 14 节被归并为多供应商版的薄包装。
 
 ```python
 # control_plane/llm_gateway.py
