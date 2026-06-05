@@ -6,7 +6,7 @@
 
 ### 8.1 设计总纲：HTTP 边界与三平面映射
 
-NovelForge 是本地优先单进程服务，但所有跨平面调用都走显式 HTTP 契约（即使 Memory Core 当前是进程内 Python 包，也保留 FastAPI 边界——见 8.6 选型说明，呼应硬原则 11 "保留 FastAPI 边界以便未来拆分"）。端点按三平面归类：
+NovelForge 是本地优先单进程服务，但所有跨平面调用都走显式 HTTP 契约（即使 Memory Core 当前是进程内 Python 包，也保留 FastAPI 边界——见 8.6 选型说明，呼应硬原则 11 "保留 FastAPI 边界以便未来拆分"）。本节定义的 REST 端点即四种交互形态（CLI/Web 审校台/对话式 Chat/REST）共用的唯一脊柱——**交互形态、会话/turn 模型与 SSE 流式详见第 13 节**（CLI/Web/Chat 均为本节端点的客户端，不绕过治理）。端点按三平面归类：
 
 | 平面 | 端点前缀 | 职责 |
 |---|---|---|
@@ -824,7 +824,7 @@ def backup(conn: sqlite3.Connection, dst: str) -> None:
 | **实体/关系/时间线** | **SQLite 唯一真相源** + **networkx 查询期内存视图** | 知情者图、travel 图等关系数据持久化在 `entities`/`knowledge_edges`/`travel_edges` 等表；查询/校验时由 `graph_view.py` 实时 build networkx 图跑算法（路径、可达、环检测），跑完即弃不持久化（硬原则 1、11）。避免引入图数据库，避免双写漂移。 |
 | **持久化/备份** | **WAL + 在线 `.backup`** | WAL 支持读写并发（起草同时校验/检索）；`conn.backup()` 在线热备不阻塞写。索引（FTS5/vec0）与渲染产物可丢，从 L0/L1 重放重建。 |
 | **Memory Core 形态** | **先做进程内 Python 包，保留 FastAPI 边界** | 单人开发期 Memory Core 直接 import 调用（零网络开销）；但所有跨平面交互按 8.2 的 HTTP 契约设计，`memory/` 模块函数签名与 `/capture`/`/recall`/`/state` 一一对应。未来若需多进程/分布式，只需把进程内调用换成 HTTP client，业务层无感（硬原则 11、架构改动第 11 项）。 |
-| **正文/校验模型分层** | Opus 4.8 正文+冲突复核；Sonnet 4.6 软 judge；Haiku 4.5 抽取/去重/初筛 | 成本生死线（硬原则 10）。Opus 只留给创作与冲突复核；批量校验替代 per-claim fan-out。稳定前缀 1h prompt cache，用 `usage.cache_read_input_tokens` 验证命中。 |
+| **正文/校验模型分层** | Opus 4.8 正文+冲突复核；Sonnet 4.6 软 judge；Haiku 4.5 抽取/去重/初筛 | 成本生死线（硬原则 10）。Opus 只留给创作与冲突复核；批量校验替代 per-claim fan-out。稳定前缀 1h prompt cache，用 `usage.cache_read_input_tokens` 验证命中。**LLM 多供应商接入（Anthropic / OpenAI 兼容 / 本地 ollama·llama.cpp 的厂商无关 Provider 抽象、语义档 FAST/MID/STRONG 映射、能力降级与回退链）详见第 14 节**；本节 `models` 段为默认供应商的档别名，多供应商部署用第 14 节 `config.providers` 段。 |
 
 ---
 
