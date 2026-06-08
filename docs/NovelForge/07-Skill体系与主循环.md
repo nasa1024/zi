@@ -308,10 +308,11 @@ def generate_chapter(project_id: str, n: int, cfg: CanonGovernance) -> ChapterOu
     # ============ 6. GATE（PromotionPolicy 按模式分叉，见 7.7）============
     proposals = draft.outputs["bible_change_proposals"]   # 结构化 fact diff
     state_changes = draft.outputs["state_transitions"]    # 草稿声明的状态迁移
-    gate = PromotionPolicy(cfg).decide(
-        proposals=proposals, state_changes=state_changes,
-        evidence=draft.evidence(), unresolved=unresolved, world_as_of=world,
-    )   # → 每个变更得到 route: commit_canon / enqueue_review / hold_staging / reject
+    gate = decide_batch(
+        candidates=proposals + state_changes,
+        world=world, config=cfg,
+        evidence=draft.evidence(), unresolved=unresolved,
+    )   # → 每个候选得到 route: COMMIT / REVIEW / HOLD / REJECT（纯函数 decide() 逐候选调用）
 
     # ============ 7. COMMIT（L0 落盘 + 异步 pipeline）============
     chapter_path = ws.write_draft(n, draft.outputs["text"])   # L0 落文件，表里只存路径
@@ -466,48 +467,45 @@ class Route(str, Enum):
     HOLD      = "hold_staging"     # 留 staging 待证据积累（候选停留 proposed）
     REJECT    = "reject"           # 拒（候选 rejected）
 
-class PromotionPolicy:
-    def __init__(self, cfg: CanonGovernance): self.cfg = cfg
+def decide(cand: FactCandidate, world: WorldState,
+           config: CanonGovernanceConfig) -> Route:
+    """纯函数：对单个候选决定路由，无副作用。由 decide_batch() 或 GatePlanner 批量调用。"""
+    # —— 步骤 1：高风险强制人审（硬原则 5/8）——
+    if cand.fact_type in config.require_human_for:
+        return Route.REVIEW
 
-    def decide(self, *, proposals, state_changes, evidence,
-               unresolved, world_as_of) -> GateDecision:
-        decisions = []
-        for ch in (proposals + state_changes):
-            # —— 步骤 1：所有变更先落 staging（status=proposed）——
-            stage_candidate(ch)                      # 写 fact_candidates
+    # —— 步骤 2：有未决硬冲突的相关变更不放行 ——
+    if _touched_by_unresolved(cand, config.unresolved):
+        return Route.HOLD
 
-            # —— 步骤 2：高风险强制人审（硬原则 5/8）——
-            if self._is_high_risk(ch):
-                decisions.append(Decision(ch, Route.REVIEW, "high_risk_require_human"))
-                continue
+    # —— 步骤 3：按模式分叉 ——
+    if config.mode == "human_gate":
+        return Route.REVIEW
+    elif config.mode == "auto_promote":
+        # 晋升依据 = evidence_strength（可验，权重最高）+ 无冲突 + 非高风险
+        if _evidence_strong(cand, config.evidence) and not _conflicts(cand, world):
+            return Route.COMMIT
+        else:
+            return Route.REVIEW
+    else:  # hybrid：低风险软记忆 auto，其余人审
+        return Route.COMMIT if _is_low_risk_soft(cand) else Route.REVIEW
 
-            # —— 步骤 3：有未决硬冲突的相关变更不放行 ——
-            if self._touched_by_unresolved(ch, unresolved):
-                decisions.append(Decision(ch, Route.HOLD, "blocked_by_unresolved"))
-                continue
 
-            # —— 步骤 4：按模式分叉 ——
-            if self.cfg.mode == "human_gate":
-                decisions.append(Decision(ch, Route.REVIEW, "mode_human_gate"))
-            elif self.cfg.mode == "auto_promote":
-                # 晋升依据 = evidence_strength（可验，权重最高）+ 无冲突 + 非高风险
-                if self._evidence_strong(ch, evidence) and not self._conflicts(ch, world_as_of):
-                    decisions.append(Decision(ch, Route.COMMIT, "auto_evidence_strong"))
-                else:
-                    decisions.append(Decision(ch, Route.REVIEW, "auto_low_evidence"))
-            else:  # hybrid：低风险软记忆 auto，其余人审
-                route = Route.COMMIT if self._is_low_risk_soft(ch) else Route.REVIEW
-                decisions.append(Decision(ch, route, "hybrid_split"))
-        return GateDecision(decisions)
+def decide_batch(candidates: list[FactCandidate], world: WorldState,
+                 config: CanonGovernanceConfig, **kw) -> GateDecision:
+    """批量入口：对每个候选先落 staging，再调 decide() 逐候选路由，汇总为 GateDecision。"""
+    decisions = []
+    for cand in candidates:
+        # —— 所有变更先落 staging（status=proposed）——
+        stage_candidate(cand)                        # 写 fact_candidates
+        route = decide(cand, world, config)
+        decisions.append(Decision(cand, route, _reason(route, cand, config)))
+    return GateDecision(decisions)
 
-    def _is_high_risk(self, ch) -> bool:
-        # require_human_for：world_rule / power_system / character_death /
-        # foreshadow_payoff / knowledge_edges 变更 —— auto 模式下仍强制人审
-        return ch.target_type in self.cfg.require_human_for
 
-    def _evidence_strong(self, ch, evidence) -> bool:
-        # confidence 不作晋升闸门、只作排序；晋升看 evidence_strength（出处可验）
-        return evidence.strength_of(ch) >= self.cfg.auto_promote_threshold
+def _evidence_strong(cand: FactCandidate, evidence) -> bool:
+    # confidence 不作晋升闸门、只作排序；晋升看 evidence_strength（出处可验）
+    return evidence.strength_of(cand) >= evidence.auto_promote_threshold
 ```
 
 执行决策时（`apply_gate_routes`）：

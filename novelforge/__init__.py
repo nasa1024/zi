@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "4"  # +§10 R12/B2/B4/§12.5: beats.value_axis/arc_id + pacing_cursor + tool_call_log

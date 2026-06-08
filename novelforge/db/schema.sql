@@ -107,13 +107,16 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     location_id     TEXT,
     participants    TEXT,
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(location_id) REFERENCES geo_locations(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id),
     CHECK(story_time_end >= story_time_start),
     CHECK(participants IS NULL OR json_valid(participants))
 );
 CREATE INDEX IF NOT EXISTS idx_tl_time    ON timeline_events(story_time_start, story_time_end);
 CREATE INDEX IF NOT EXISTS idx_tl_chapter ON timeline_events(chapter);
+CREATE INDEX IF NOT EXISTS idx_tl_srcfact ON timeline_events(source_fact_id);
 
 -- 5) canon ledger: facts + fact_revisions ------------------------------------
 CREATE TABLE IF NOT EXISTS facts (
@@ -196,13 +199,16 @@ CREATE TABLE IF NOT EXISTS knowledge_edges (
     secrecy_level   TEXT
                         CHECK(secrecy_level IS NULL OR secrecy_level IN ('public','open_secret','secret','top_secret')),
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(knower_entity_id) REFERENCES entities(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id),
     UNIQUE(knower_entity_id, secret_key, learned_chapter)
 );
 CREATE INDEX IF NOT EXISTS idx_know_knower ON knowledge_edges(knower_entity_id, secret_key, learned_chapter);
 CREATE INDEX IF NOT EXISTS idx_know_secret ON knowledge_edges(secret_key);
 CREATE INDEX IF NOT EXISTS idx_know_public ON knowledge_edges(secret_key, public_from_chapter);
+CREATE INDEX IF NOT EXISTS idx_know_srcfact ON knowledge_edges(source_fact_id);
 
 CREATE TABLE IF NOT EXISTS item_ownership (
     id              TEXT PRIMARY KEY,
@@ -227,10 +233,13 @@ CREATE TABLE IF NOT EXISTS item_log (
     change_type     TEXT NOT NULL
                         CHECK(change_type IN ('acquire','transfer','consume','destroy','craft','lose')),
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY(item_entity_id) REFERENCES entities(id)
+    FOREIGN KEY(item_entity_id) REFERENCES entities(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_itemlog_item ON item_log(item_entity_id, change_chapter);
+CREATE INDEX IF NOT EXISTS idx_itemlog_srcfact ON item_log(source_fact_id);
 
 CREATE TABLE IF NOT EXISTS gimmick_rules (
     id              TEXT PRIMARY KEY,
@@ -243,10 +252,13 @@ CREATE TABLE IF NOT EXISTS gimmick_rules (
     constraint_json TEXT,
     valid_from_chapter INTEGER NOT NULL,
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     FOREIGN KEY(owner_entity_id) REFERENCES entities(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id),
     CHECK(cost_json IS NULL OR json_valid(cost_json)),
     CHECK(constraint_json IS NULL OR json_valid(constraint_json))
 );
+CREATE INDEX IF NOT EXISTS idx_gimrule_srcfact ON gimmick_rules(source_fact_id);
 
 CREATE TABLE IF NOT EXISTS gimmick_usage_log (
     id              TEXT PRIMARY KEY,
@@ -257,12 +269,15 @@ CREATE TABLE IF NOT EXISTS gimmick_usage_log (
     outcome         TEXT,
     paid_cost_json  TEXT,
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(gimmick_id)     REFERENCES gimmick_rules(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id),
     FOREIGN KEY(user_entity_id) REFERENCES entities(id),
     CHECK(paid_cost_json IS NULL OR json_valid(paid_cost_json))
 );
 CREATE INDEX IF NOT EXISTS idx_gimuse_gimmick ON gimmick_usage_log(gimmick_id, use_chapter);
+CREATE INDEX IF NOT EXISTS idx_gimuse_srcfact ON gimmick_usage_log(source_fact_id);
 
 CREATE TABLE IF NOT EXISTS numeric_facts (
     id              TEXT PRIMARY KEY,
@@ -276,10 +291,13 @@ CREATE TABLE IF NOT EXISTS numeric_facts (
     monotonic       TEXT NOT NULL DEFAULT 'none'
                         CHECK(monotonic IN ('none','non_decreasing','non_increasing')),
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §16/A4: 投影来源 canon fact（retcon 级联 / 重投影）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY(entity_id) REFERENCES entities(id)
+    FOREIGN KEY(entity_id) REFERENCES entities(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_numf_entity ON numeric_facts(entity_id, metric_key, as_of_chapter);
+CREATE INDEX IF NOT EXISTS idx_numf_srcfact ON numeric_facts(source_fact_id);
 
 -- 7) craft layer: foreshadow + beats + cards + pacing ------------------------
 CREATE TABLE IF NOT EXISTS foreshadow (
@@ -309,6 +327,8 @@ CREATE TABLE IF NOT EXISTS beats (
     summary         TEXT NOT NULL,
     value_start     TEXT,
     value_end       TEXT,
+    value_axis      TEXT,                          -- §10 R12/B6: 价值轴标签(如"认可 vs 轻视")
+    arc_id          TEXT,                          -- §10 R12/B2: 所属情节弧线 ID
     tension_level   INTEGER,
     related_foreshadow_id TEXT,
     status          TEXT NOT NULL DEFAULT 'planned'
@@ -360,6 +380,16 @@ CREATE TABLE IF NOT EXISTS pacing_state (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_pacing_chapter ON pacing_state(chapter);
+
+-- pacing_cursor: 单行累积态(PacingController 游标); pacing_state 保留逐章快照(§10 R12/B4)
+CREATE TABLE IF NOT EXISTS pacing_cursor (
+    id                        INTEGER PRIMARY KEY CHECK(id = 1),   -- 单作品单行
+    chapters_since_big_payoff INTEGER NOT NULL DEFAULT 0,
+    kchars_since_small_payoff REAL    NOT NULL DEFAULT 0,
+    buildup                   INTEGER NOT NULL DEFAULT 0,           -- 蓄力值
+    recent_high_streak        INTEGER NOT NULL DEFAULT 0,
+    updated_at                TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 
 -- 8) L0 draft index + L1/L2 source tables ------------------------------------
 CREATE TABLE IF NOT EXISTS draft_index (
@@ -486,6 +516,26 @@ CREATE TABLE IF NOT EXISTS review_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_rq_status    ON review_queue(status, priority);
 CREATE INDEX IF NOT EXISTS idx_rq_candidate ON review_queue(candidate_id);
+
+-- 9b) 工具调用审计(§12.5,append-only 证据链) --------------------------------
+CREATE TABLE IF NOT EXISTS tool_call_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         TEXT    NOT NULL,        -- = skill_run_log.run_id
+    chapter        INTEGER NOT NULL,
+    skill          TEXT    NOT NULL,        -- skill_name@version
+    step           INTEGER NOT NULL,        -- ReAct 第几步(1..max_tool_steps)
+    tool_name      TEXT    NOT NULL,
+    args_json      TEXT    NOT NULL,        -- 归一化入参(json_valid CHECK)
+    result_digest  TEXT    NOT NULL,        -- content sha256 前 16
+    latency_ms     INTEGER NOT NULL,
+    provider       TEXT,                    -- 本步 LLM 供应商
+    model          TEXT,                    -- 本步模型 ID
+    note           TEXT,                    -- fresh / cache_hit / empty / degraded
+    ts             TEXT    NOT NULL DEFAULT (datetime('now')),
+    CHECK (json_valid(args_json))
+);
+CREATE INDEX IF NOT EXISTS idx_tcl_run    ON tool_call_log(run_id, step);
+CREATE INDEX IF NOT EXISTS idx_tcl_chap   ON tool_call_log(chapter, tool_name);
 
 -- 10) consistency engine: author exemptions (§4.5) ---------------------------
 CREATE TABLE IF NOT EXISTS consistency_exemptions (
