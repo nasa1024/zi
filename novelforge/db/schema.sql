@@ -60,9 +60,11 @@ CREATE TABLE IF NOT EXISTS character_power_log (
     change_type     TEXT NOT NULL
                         CHECK(change_type IN ('breakthrough','injury_drop','seal','unseal','init')),
     fact_id         TEXT,
+    source_fact_id  TEXT,                          -- §10 R12/A4: canon-fact origin (retcon cascade / reproject)
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(entity_id) REFERENCES entities(id),
-    FOREIGN KEY(rank_id)   REFERENCES power_ranks(id)
+    FOREIGN KEY(rank_id)   REFERENCES power_ranks(id),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_cpl_entity ON character_power_log(entity_id, change_chapter);
 
@@ -130,13 +132,17 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence      REAL,
     risk_tier       TEXT NOT NULL DEFAULT 'low'
                         CHECK(risk_tier IN ('low','medium','high')),
+    version         INTEGER NOT NULL DEFAULT 0,    -- §10 R12/B5: optimistic-lock cursor (§11.7)
+    injection_mode  TEXT NOT NULL DEFAULT 'detected'
+                        CHECK(injection_mode IN ('always','detected','never')),  -- §03.8 / R14
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(entity_id) REFERENCES entities(id),
     CHECK(detail_json IS NULL OR json_valid(detail_json)),
     CHECK(fact_type IN (
         'world_rule','power_system','character_trait','relationship',
-        'knowledge','event','item','location','numeric','style','misc'))
+        'knowledge','event','item','location','numeric','style','misc',
+        'constraint'))                              -- §10 R14/G3: always-on global taboo
 );
 CREATE INDEX IF NOT EXISTS idx_facts_entity     ON facts(entity_id);
 CREATE INDEX IF NOT EXISTS idx_facts_status     ON facts(status);
