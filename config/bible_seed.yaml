@@ -1,0 +1,80 @@
+# NovelForge bible_seed.yaml — 冷启动种子文件
+# 每个条目对应一条 BibleChangeProposal，经 seed_loader 导入为 facts。
+# op: add | update | deprecate | retcon
+# fact_type: world_rule | power_system | character_trait | relationship |
+#             knowledge | event | item | location | numeric | style | misc | constraint
+
+meta:
+  project: example_novel
+  author: nasa1024
+  created_at: "2026-06-08"
+
+proposals:
+  - op: add
+    entity: "世界"
+    fact_type: world_rule
+    new:
+      rule: "修炼体系：炼气→筑基→金丹→元婴→化神"
+    reason: "核心修炼体系设定"
+    evidence_refs: ["seed:world_rule:001"]
+    valid_from_chapter: 0
+    risk_class: world_rule
+
+  - op: add
+    entity: "叶凡"
+    fact_type: power_system
+    new:
+      system_name: "练气体系"
+      rank_name: "炼气·初期"
+      rank_order: 101
+    reason: "主角初始境界"
+    evidence_refs: ["seed:power:001"]
+    valid_from_chapter: 1
+    risk_class: power_system
+
+  - op: add
+    entity: "叶凡"
+    fact_type: character_trait
+    new:
+      trait: "坚韧"
+      description: "面对困境不放弃，意志力超常"
+    reason: "主角核心性格"
+    evidence_refs: ["seed:trait:001"]
+    valid_from_chapter: 1
+    risk_class: soft
+
+  - op: add
+    entity: "世界"
+    fact_type: constraint
+    new:
+      constraint: "20章前不得暴露反派真实身份"
+    reason: "叙事节奏要求，保留悬念"
+    evidence_refs: ["seed:constraint:001"]
+    valid_from_chapter: 0
+    risk_class: world_rule
+
+power_ranks:
+  - system_name: "练气体系"
+    ranks:
+      - name: "炼气·初期"
+        order: 101
+      - name: "炼气·中期"
+        order: 102
+      - name: "炼气·后期"
+        order: 103
+      - name: "筑基·初期"
+        order: 201
+      - name: "筑基·中期"
+        order: 202
+      - name: "筑基·后期"
+        order: 203
+      - name: "金丹·初期"
+        order: 301
+      - name: "金丹·中期"
+        order: 302
+      - name: "金丹·后期"
+        order: 303
+      - name: "元婴·初期"
+        order: 401
+      - name: "化神·初期"
+        order: 501

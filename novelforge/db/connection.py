@@ -37,6 +37,17 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def init_db_from_conn(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """建库：对已有连接执行 schema.sql，适用于 :memory: 测试 fixture。
+    调用方负责 connect() + PRAGMA 设置；本函数只执行 DDL + 元数据写入。"""
+    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    _load_user_terms(conn)
+    set_meta(conn, "schema_version", SCHEMA_VERSION)
+    set_meta(conn, "tokenizer_version", tokenizer_version())
+    conn.commit()
+    return conn
+
+
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute(
         "INSERT INTO meta_kv(key, value) VALUES(?, ?) "
