@@ -5,6 +5,8 @@
 import type {
   ApproveRequest,
   ApproveResponse,
+  AutopilotSessionInfo,
+  AutopilotStartRequest,
   BibleRenderResponse,
   HealthResponse,
   NextChapterSuggestion,
@@ -215,6 +217,28 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  autopilotStart(id: string, req: AutopilotStartRequest): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/start`,
+      req,
+    );
+  },
+
+  autopilotStatus(id: string): Promise<AutopilotSessionInfo[]> {
+    return request<AutopilotSessionInfo[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/autopilot/status`,
+    );
+  },
+
+  autopilotCancel(id: string, sessionId: string): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/cancel`,
+    );
   },
 
   pipelineNext(id: string): Promise<NextChapterSuggestion> {

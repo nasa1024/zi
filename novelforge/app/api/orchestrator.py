@@ -212,80 +212,18 @@ def pipeline_next(
     目标按优先级拼装：本章章节卡 → 上一章钩子 → 所属卷大纲 → 到期伏笔 → 已计划节拍。
     节拍器（pacing）建议由 generate_chapter 内部自动追加，此处不重复。
     """
+    from ..chapter_suggest import assemble_chapter_goal, next_chapter_no
+
     if registry.get(project_id) is None:
         raise HTTPException(404, f"项目不存在: {project_id}")
     conn = registry.open_conn(project_id)
     try:
-        row = conn.execute(
-            "SELECT MAX(chapter) AS c FROM pipeline_run"
-            " WHERE project_id=? AND status='completed'",
-            (project_id,),
-        ).fetchone()
-        last = row["c"] if row and row["c"] is not None else 0
-        # draft_index 兜底：autopilot / 历史数据可能只登记了草稿
-        row = conn.execute("SELECT MAX(chapter) AS c FROM draft_index").fetchone()
-        if row and row["c"] is not None and row["c"] > last:
-            last = row["c"]
-        nxt = last + 1
-
-        goal_parts: list[str] = []
-        sources: list[str] = []
-
-        card = conn.execute(
-            "SELECT title, goal, summary FROM chapter_cards WHERE chapter=?", (nxt,)
-        ).fetchone()
-        if card and (card["goal"] or card["summary"]):
-            prefix = f"本章《{card['title']}》：" if card["title"] else "本章目标："
-            goal_parts.append(prefix + (card["goal"] or card["summary"]))
-            sources.append("chapter_card")
-
-        if last > 0:
-            prev = conn.execute(
-                "SELECT hook_text FROM chapter_cards WHERE chapter=?", (last,)
-            ).fetchone()
-            if prev and prev["hook_text"]:
-                goal_parts.append(f"承接上一章钩子：{prev['hook_text']}")
-                sources.append("prev_hook")
-
-        vol = conn.execute(
-            "SELECT title, synopsis FROM volumes"
-            " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
-            "   AND (end_chapter IS NULL OR end_chapter>=?)"
-            " ORDER BY volume_no LIMIT 1",
-            (nxt, nxt),
-        ).fetchone()
-        if vol and vol["synopsis"]:
-            goal_parts.append(f"本卷《{vol['title']}》主线：{vol['synopsis']}")
-            sources.append("volume")
-
-        fs_rows = conn.execute(
-            "SELECT label, due_chapter FROM foreshadow"
-            " WHERE state IN ('planted','reinforced','misled','overdue')"
-            "   AND due_chapter IS NOT NULL AND due_chapter<=?"
-            " ORDER BY due_chapter LIMIT 5",
-            (nxt + 2,),
-        ).fetchall()
-        if fs_rows:
-            labels = "、".join(
-                f"{r['label']}（第{r['due_chapter']}章到期）" for r in fs_rows
-            )
-            goal_parts.append(f"需要推进/回收的伏笔：{labels}")
-            sources.append("foreshadow")
-
-        beat_rows = conn.execute(
-            "SELECT beat_type, summary FROM beats"
-            " WHERE chapter=? AND status='planned' ORDER BY seq LIMIT 8",
-            (nxt,),
-        ).fetchall()
-        if beat_rows:
-            beats_txt = "；".join(f"[{r['beat_type']}] {r['summary']}" for r in beat_rows)
-            goal_parts.append(f"本章已计划节拍：{beats_txt}")
-            sources.append("beats")
-
+        nxt, last = next_chapter_no(conn, project_id)
+        goal, sources = assemble_chapter_goal(conn, nxt)
         return NextChapterSuggestion(
             next_chapter=nxt,
             last_completed_chapter=last,
-            suggested_goal="\n".join(goal_parts),
+            suggested_goal=goal,
             sources=sources,
         )
     finally:
