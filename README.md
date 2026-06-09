@@ -59,6 +59,34 @@ cd web && npm install && npm run dev
 实时引擎健康徽章读 `GET /health`。详见 [`web/README.md`](web/README.md)。
 后端已配 CORS（允许 `:5173/:4173`）；生产可经 `NOVELFORGE_CORS_ORIGINS` 覆盖、`VITE_API_BASE` 指定 API 地址。
 
+## 配置 LLM Provider Key（生成章节用）
+
+确定性核心（seed / bible / state / search / 审核）**无需 LLM**。只有「生成章节」
+（`pipeline/run`）需要 LLM provider key，否则后端默认回退到 `anthropic` 且无 key，
+会报 *"Could not resolve authentication method"*。
+
+在项目根建 `.env`（已被 `.gitignore` 忽略，密钥不入库）：
+
+```ini
+# DeepSeek（推荐，OpenAI 兼容）
+DEEPSEEK_API_KEY=sk-你的key
+NOVELFORGE_PROVIDER=deepseek
+```
+
+然后用启动脚本（自动读 `.env`）拉起后端：
+
+```powershell
+.\run-backend.ps1          # Windows PowerShell
+```
+
+```bash
+set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
+```
+
+> ⚠️ **不要**把 LLM key 放进 `NOVELFORGE_API_KEY`——那个变量是 **REST 鉴权** 用的，
+> 一旦设置，所有 `/v1/*` 请求都会要求 Bearer token，前端会收到 401。
+> LLM key 用 `DEEPSEEK_API_KEY`（或 `ANTHROPIC_API_KEY` + `NOVELFORGE_PROVIDER=anthropic`）。
+
 ## 代码结构（`novelforge/`，MVP 已全量实现）
 
 | 模块 | 说明 |
