@@ -1,18 +1,13 @@
-// Nav — restores <nav class="nav"> from design-reference.html.
-// The hero-tag style status dot is repurposed into a live health badge via useHealth().
-// See SHARED CONTRACT.
-
+import { Link } from 'react-router-dom';
 import { useHealth } from '../api/hooks';
 
 export interface NavProps {
   onStart: () => void;
-  onOpenStudio: () => void;
 }
 
-export default function Nav({ onStart, onOpenStudio }: NavProps) {
+export default function Nav({ onStart }: NavProps) {
   const { online, version } = useHealth();
 
-  // online===null → 连接中 (grey) · true → 引擎在线 vX.Y (lime) · false → 引擎离线 (orange)
   let dotColor: string;
   let label: string;
   if (online === null) {
@@ -48,15 +43,7 @@ export default function Nav({ onStart, onOpenStudio }: NavProps) {
           <a href="#pillars">三大支柱</a>
           <a href="#pipeline">写作流水线</a>
           <a href="#genres">题材覆盖</a>
-          <a
-            href="#studio"
-            onClick={(e) => {
-              e.preventDefault();
-              onOpenStudio();
-            }}
-          >
-            工作台
-          </a>
+          <Link to="/studio">工作台</Link>
           <a href="#docs">文档</a>
         </div>
         <div className="hero-tag" style={{ marginBottom: 0 }}>
@@ -73,15 +60,9 @@ export default function Nav({ onStart, onOpenStudio }: NavProps) {
         >
           开始创作 →
         </a>
-        <button
-          className="burger"
-          aria-label="menu"
-          onClick={() => {
-            document.querySelector('#studio')?.scrollIntoView({ behavior: 'smooth' });
-          }}
-        >
+        <Link to="/studio" className="burger" aria-label="进入工作台">
           ☰
-        </button>
+        </Link>
       </div>
     </nav>
   );
