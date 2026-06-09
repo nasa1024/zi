@@ -27,13 +27,23 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(db_path: str | Path) -> sqlite3.Connection:
-    """建库：执行 schema.sql，写入版本元数据，返回连接。"""
+    """建库或升级现有库：执行 schema.sql（新建库），或运行迁移（已有库）。"""
+    db_path = Path(db_path)
+    is_new = not db_path.exists() or db_path.stat().st_size == 0
     conn = connect(db_path)
-    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-    _load_user_terms(conn)
-    set_meta(conn, "schema_version", SCHEMA_VERSION)
-    set_meta(conn, "tokenizer_version", tokenizer_version())
-    conn.commit()
+    if is_new:
+        conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        _load_user_terms(conn)
+        set_meta(conn, "schema_version", SCHEMA_VERSION)
+        set_meta(conn, "tokenizer_version", tokenizer_version())
+        conn.commit()
+    else:
+        from .migrations import check_and_migrate
+        check_and_migrate(conn)
+        # 启动期 sweep：清理崩溃写入残留（F6/F7）
+        from .l0 import sweep_orphans, sweep_crashed_runs
+        sweep_orphans(conn, db_path.parent / "l0")
+        sweep_crashed_runs(conn)
     return conn
 
 

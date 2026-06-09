@@ -138,9 +138,12 @@ CREATE TABLE IF NOT EXISTS facts (
     version         INTEGER NOT NULL DEFAULT 0,    -- §10 R12/B5: optimistic-lock cursor (§11.7)
     injection_mode  TEXT NOT NULL DEFAULT 'detected'
                         CHECK(injection_mode IN ('always','detected','never')),  -- §03.8 / R14
+    volume_no       INTEGER,                        -- §9.4 多卷归属（NULL=跨卷全局）
+    branch_id       TEXT,                           -- §9.4 分支隔离（NULL=主线）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(entity_id) REFERENCES entities(id),
+    FOREIGN KEY(branch_id) REFERENCES branches(id),
     CHECK(detail_json IS NULL OR json_valid(detail_json)),
     CHECK(fact_type IN (
         'world_rule','power_system','character_trait','relationship',
@@ -401,6 +404,7 @@ CREATE TABLE IF NOT EXISTS draft_index (
     word_count      INTEGER,
     status          TEXT NOT NULL DEFAULT 'draft'
                         CHECK(status IN ('draft','checked','revised','committed','archived')),
+    volume_no       INTEGER,                        -- §9.4 归属卷号
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(chapter, revision_round)
 );
@@ -414,6 +418,7 @@ CREATE TABLE IF NOT EXISTS l1_atoms (
     anchor          TEXT,
     extracted_by    TEXT,
     candidate_id    TEXT,
+    cold_start      INTEGER NOT NULL DEFAULT 0,     -- §9.4 1=由冷启动反向抽取生成
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(draft_id) REFERENCES draft_index(id)
 );
@@ -471,7 +476,7 @@ CREATE INDEX IF NOT EXISTS idx_cand_rank    ON fact_candidates(status, evidence_
 
 CREATE TABLE IF NOT EXISTS promotion_log (
     id              TEXT PRIMARY KEY,
-    candidate_id    TEXT NOT NULL,
+    candidate_id    TEXT,
     fact_id         TEXT,
     entity_id       TEXT,
     decision        TEXT NOT NULL
@@ -572,3 +577,99 @@ CREATE VIRTUAL TABLE IF NOT EXISTS drafts_fts USING fts5(
     body,
     tokenize = "unicode61 remove_diacritics 2"
 );
+
+-- 12) volumes + branches (§9.4 MVP3) -----------------------------------------
+-- 卷：按章节范围划分的叙事单元，World State 在卷间通过 as-of 投影自然续接。
+CREATE TABLE IF NOT EXISTS volumes (
+    id              TEXT PRIMARY KEY,
+    volume_no       INTEGER NOT NULL,           -- 卷序号，从 1 起
+    title           TEXT NOT NULL,
+    synopsis        TEXT,
+    start_chapter   INTEGER,                    -- 第一章（含）
+    end_chapter     INTEGER,                    -- 最后一章（含），NULL = 仍在写
+    status          TEXT NOT NULL DEFAULT 'writing'
+                        CHECK(status IN ('writing','completed','archived')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(volume_no)
+);
+CREATE INDEX IF NOT EXISTS idx_volumes_no ON volumes(volume_no);
+
+-- 分支：从某章分叉的平行线（支线/IF 结局）
+CREATE TABLE IF NOT EXISTS branches (
+    id              TEXT PRIMARY KEY,
+    branch_name     TEXT NOT NULL UNIQUE,
+    fork_chapter    INTEGER NOT NULL,           -- 从哪一章分叉
+    base_branch_id  TEXT,                       -- NULL = 主线；否则指向父分支
+    description     TEXT,
+    status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','merged','abandoned')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(base_branch_id) REFERENCES branches(id)
+);
+CREATE INDEX IF NOT EXISTS idx_branches_fork ON branches(fork_chapter);
+
+-- 13) pipeline_run 状态机表（F6 崩溃幂等恢复）-------------------------------
+-- 每次 generate_chapter() 开始时插入 'running'，完成后更新为 'completed'。
+-- 启动期 sweep_crashed_runs() 将残留 'running' 行标为 'crashed'。
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    run_id          TEXT PRIMARY KEY,
+    chapter         INTEGER NOT NULL,
+    project_id      TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running'
+                        CHECK(status IN ('running','completed','crashed')),
+    draft_id        TEXT,   -- draft_index.id，成功后填入
+    started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_chapter ON pipeline_run(project_id, chapter);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_status  ON pipeline_run(status);
+
+-- 14) sessions + turns + turn_events（§13.2 会话/turn 模型 + SSE 断线续传）--------
+CREATE TABLE IF NOT EXISTS sessions (
+    id            TEXT PRIMARY KEY,
+    client        TEXT NOT NULL
+                     CHECK(client IN ('cli','web','chat','api')),
+    mode          TEXT
+                     CHECK(mode IN ('human_gate','auto_promote','hybrid')),
+    actor         TEXT NOT NULL,
+    started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at      TEXT,
+    budget_spent_tokens INTEGER NOT NULL DEFAULT 0,
+    budget_spent_usd    REAL    NOT NULL DEFAULT 0.0,
+    summary       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS turns (
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES sessions(id),
+    seq           INTEGER NOT NULL,
+    kind          TEXT NOT NULL
+                     CHECK(kind IN ('command','chat','long_task')),
+    intent        TEXT,
+    request_json  TEXT NOT NULL,
+    routed_endpoint TEXT,
+    status        TEXT NOT NULL DEFAULT 'running'
+                     CHECK(status IN ('running','done','error','canceled')),
+    stream        INTEGER NOT NULL DEFAULT 0,
+    result_json   TEXT,
+    started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at   TEXT,
+    UNIQUE(session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, seq);
+
+CREATE TABLE IF NOT EXISTS turn_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id       TEXT NOT NULL REFERENCES turns(id),
+    event_type    TEXT NOT NULL,  -- phase|progress|draft_token|check_issue|gate_decision|result|error
+    data_json     TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_turn_events_turn ON turn_events(turn_id, id);
+
+-- 新增列由迁移器在已有库上追加（见 db/migrations.py）；
+-- 新建库通过 CREATE TABLE 定义直接包含（见 facts/draft_index/l1_atoms 表定义）。
+-- 索引（可在已有库上安全重建）：
+CREATE INDEX IF NOT EXISTS idx_facts_volume ON facts(volume_no);
+CREATE INDEX IF NOT EXISTS idx_facts_branch ON facts(branch_id);
+CREATE INDEX IF NOT EXISTS idx_draft_volume ON draft_index(volume_no);
