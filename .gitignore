@@ -28,6 +28,8 @@ novel.db-shm
 *.sqlite3
 *.sqlite-wal
 *.sqlite-shm
+data/
+l0/
 projects/*/l0/
 projects/*/render/
 *.backup/

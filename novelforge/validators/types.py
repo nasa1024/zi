@@ -6,6 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+
 class ClaimType(str, Enum):
     POWER_LEVEL    = "power_level"
     KNOWLEDGE      = "knowledge"
@@ -90,16 +91,30 @@ class ItemOwnershipEntry(BaseModel):
 
 
 class WorldState:
-    """Lightweight world state snapshot. Populated by replay_* queries from *_log tables."""
+    """Lightweight world state snapshot. Populated by replay_* queries from *_log tables.
 
-    def __init__(self, as_of: int, conn: sqlite3.Connection):
+    branch_id=None → mainline (no extra filtering).
+    branch_id=X    → branch-scoped: only facts from X and its ancestor chain are
+                      visible (§9.4 Group 13 branch isolation).
+    """
+
+    def __init__(
+        self,
+        as_of: int,
+        conn: sqlite3.Connection,
+        branch_id: Optional[str] = None,
+    ):
         self.as_of = as_of
         self._conn = conn
+        self._branch_id = branch_id
         self._power_cache: dict | None = None
         self._knowledge_cache: dict | None = None
         self._numeric_cache: dict | None = None
         self._item_cache: dict | None = None
         self._rank_order_cache: dict | None = None
+        # Precompute branch filter; deferred import avoids circular dependency
+        from ..world.branch import build_branch_filter
+        self._bf: tuple[str, tuple] = build_branch_filter(conn, branch_id)
 
     @property
     def rank_order_map(self) -> dict:
@@ -113,20 +128,28 @@ class WorldState:
 
     def power_history(self, entity_id: str) -> list:
         """Full character_power_log for entity, ordered by change_chapter."""
+        branch_sql, branch_params = self._bf
         rows = self._conn.execute(
-            "SELECT entity_id, system_name, rank_id, rank_order, change_chapter, change_type "
-            "FROM character_power_log "
-            "WHERE entity_id=? AND change_chapter<=? ORDER BY change_chapter",
-            (entity_id, self.as_of),
+            "SELECT x.entity_id, x.system_name, x.rank_id, x.rank_order,"
+            "       x.change_chapter, x.change_type "
+            "FROM character_power_log x "
+            "LEFT JOIN facts f ON f.id=x.source_fact_id "
+            "WHERE x.entity_id=? AND x.change_chapter<=? "
+            + branch_sql
+            + " ORDER BY x.change_chapter",
+            (entity_id, self.as_of) + branch_params,
         ).fetchall()
         return [dict(r) for r in rows]
 
     def knowledge_set(self, entity_id: str, chapter: int) -> set:
         """Set of secret_keys known by entity up to chapter."""
+        branch_sql, branch_params = self._bf
         rows = self._conn.execute(
-            "SELECT secret_key FROM knowledge_edges "
-            "WHERE knower_entity_id=? AND learned_chapter<=?",
-            (entity_id, chapter),
+            "SELECT x.secret_key FROM knowledge_edges x "
+            "LEFT JOIN facts f ON f.id=x.source_fact_id "
+            "WHERE x.knower_entity_id=? AND x.learned_chapter<=? "
+            + branch_sql,
+            (entity_id, chapter) + branch_params,
         ).fetchall()
         return {r[0] for r in rows}
 
@@ -141,16 +164,22 @@ class WorldState:
 
     def numeric_state(self, entity_id: Optional[str], metric_key: str) -> Optional[dict]:
         """Latest numeric fact for (entity_id, metric_key) as of self.as_of."""
+        branch_sql, branch_params = self._bf
         row = self._conn.execute(
-            "SELECT value, unit FROM numeric_facts "
-            "WHERE (entity_id IS ? OR entity_id=?) AND metric_key=? AND as_of_chapter<=? "
-            "ORDER BY as_of_chapter DESC LIMIT 1",
-            (entity_id, entity_id, metric_key, self.as_of),
+            "SELECT x.value, x.unit FROM numeric_facts x "
+            "LEFT JOIN facts f ON f.id=x.source_fact_id "
+            "WHERE (x.entity_id IS ? OR x.entity_id=?) AND x.metric_key=? AND x.as_of_chapter<=? "
+            + branch_sql
+            + " ORDER BY x.as_of_chapter DESC LIMIT 1",
+            (entity_id, entity_id, metric_key, self.as_of) + branch_params,
         ).fetchone()
         return {"value": row[0], "unit": row[1]} if row else None
 
     def item_qty(self, owner_entity_id: str, item_entity_id: str) -> int:
-        """Quantity of item held by owner, from item_ownership snapshot."""
+        """Quantity of item held by owner, from item_ownership snapshot.
+
+        item_ownership has no source_fact_id, so branch isolation is not applied here.
+        """
         row = self._conn.execute(
             "SELECT quantity FROM item_ownership WHERE item_entity_id=? AND owner_entity_id=?",
             (item_entity_id, owner_entity_id),
@@ -159,8 +188,13 @@ class WorldState:
 
     def ever_owned(self, owner_entity_id: str, item_entity_id: str) -> bool:
         """True if owner ever held item (per item_log history)."""
+        branch_sql, branch_params = self._bf
         row = self._conn.execute(
-            "SELECT 1 FROM item_log WHERE item_entity_id=? AND to_owner_id=? LIMIT 1",
-            (item_entity_id, owner_entity_id),
+            "SELECT 1 FROM item_log x "
+            "LEFT JOIN facts f ON f.id=x.source_fact_id "
+            "WHERE x.item_entity_id=? AND x.to_owner_id=? "
+            + branch_sql
+            + " LIMIT 1",
+            (item_entity_id, owner_entity_id) + branch_params,
         ).fetchone()
         return row is not None
