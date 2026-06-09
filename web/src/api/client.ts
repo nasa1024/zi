@@ -7,8 +7,11 @@ import type {
   ApproveResponse,
   BibleRenderResponse,
   HealthResponse,
+  PipelineRunDetail,
+  PipelineRunRecord,
   PipelineRunRequest,
   PipelineRunResponse,
+  PipelineStreamHandlers,
   ProjectCreateRequest,
   ProjectResponse,
   RejectRequest,
@@ -16,6 +19,7 @@ import type {
   SearchFactsResponse,
   SeedRequest,
   SeedResponse,
+  SSEPipelineEvent,
   StateQueryRequest,
   WorldStateSnapshot,
 } from './types';
@@ -163,6 +167,67 @@ export const api = {
 
   runPipeline(id: string, req: PipelineRunRequest): Promise<PipelineRunResponse> {
     return request<PipelineRunResponse>('POST', `/v1/${encodeURIComponent(id)}/pipeline/run`, req);
+  },
+
+  async runPipelineStream(
+    id: string,
+    req: PipelineRunRequest,
+    handlers: PipelineStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+    const key = getApiKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+
+    const res = await fetch(API_BASE + `/v1/${encodeURIComponent(id)}/pipeline/run/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req),
+      signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(text || res.statusText, res.status);
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(line.slice(6)) as SSEPipelineEvent;
+          if (ev.event === 'stage') handlers.onStage?.(ev);
+          else if (ev.event === 'done') handlers.onDone?.(ev);
+          else if (ev.event === 'error') handlers.onError?.(ev);
+        } catch { /* malformed line */ }
+      }
+    }
+  },
+
+  listPipelineRuns(id: string, limit = 30): Promise<PipelineRunRecord[]> {
+    return request<PipelineRunRecord[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/runs?limit=${limit}`,
+    );
+  },
+
+  getPipelineRun(id: string, runId: string): Promise<PipelineRunDetail> {
+    return request<PipelineRunDetail>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}`,
+    );
   },
 
   reviews(id: string): Promise<ReviewQueueItem[]> {

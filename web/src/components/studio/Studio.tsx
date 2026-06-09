@@ -2,14 +2,17 @@
 // 无需 LLM 即可跑通：seed → bible → state → search → reviews。
 // pipeline tab 需后端配置 LLM provider key 才能真正生成。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
 import { useHealth } from '../../api/hooks';
 import type {
   BibleRenderResponse,
-  PipelineRunResponse,
+  PipelineRunDetail,
+  PipelineRunRecord,
   ProjectResponse,
   ReviewQueueItem,
+  SSEDoneEvent,
+  SSEStageEvent,
   SearchFactsResponse,
   SeedRequest,
   WorldStateSnapshot,
@@ -840,7 +843,7 @@ function ReviewsPanel({
 }
 
 // ============================================================
-// (f) Pipeline 生成章节
+// (f) Pipeline 生成章节（SSE 流式 + 历史记录）
 // ============================================================
 function PipelinePanel({
   projectId,
@@ -854,40 +857,107 @@ function PipelinePanel({
   const [mode, setMode] = useState<'human_gate' | 'auto_promote' | 'hybrid'>('human_gate');
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<PipelineRunResponse | null>(null);
+
+  // SSE 流式状态
+  const [liveStages, setLiveStages] = useState<SSEStageEvent[]>([]);
+  const [liveDraft, setLiveDraft] = useState<string>('');
+  const [doneData, setDoneData] = useState<SSEDoneEvent | null>(null);
+
+  // 历史记录
+  const [history, setHistory] = useState<PipelineRunRecord[]>([]);
+  const [histLoading, setHistLoading] = useState<boolean>(false);
+  const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [runDetails, setRunDetails] = useState<Record<string, PipelineRunDetail>>({});
+  const [detailLoading, setDetailLoading] = useState<string | null>(null);
+
+  const abortRef = useRef<AbortController | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    setHistLoading(true);
+    try {
+      const list = await api.listPipelineRuns(projectId);
+      setHistory(list);
+    } catch { /* ignore */ } finally {
+      setHistLoading(false);
+    }
+  }, [projectId]);
+
+  // 首次挂载和 projectId 变化时拉取历史
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
 
   const run = async () => {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
     setBusy(true);
     setError(null);
-    setData(null);
+    setLiveStages([]);
+    setLiveDraft('');
+    setDoneData(null);
+
     const n = Number.parseInt(chapterNo, 10);
     try {
-      const res = await api.runPipeline(projectId, {
-        chapter_no: Number.isFinite(n) ? n : 1,
-        chapter_goal: chapterGoal.trim() || undefined,
-        mode,
-      });
-      setData(res);
-      onChanged(); // 章节/canon 可能变化 → 刷新项目统计
+      await api.runPipelineStream(
+        projectId,
+        {
+          chapter_no: Number.isFinite(n) ? n : 1,
+          chapter_goal: chapterGoal.trim() || undefined,
+          mode,
+        },
+        {
+          onStage: (e) => setLiveStages((prev) => [...prev, e]),
+          onDone: (e) => {
+            setDoneData(e);
+            setLiveDraft(e.draft_text ?? '');
+            onChanged();
+            void loadHistory();
+          },
+          onError: (e) => setError(e.message || '生成失败'),
+        },
+        ctrl.signal,
+      );
     } catch (err) {
-      setError(errMessage(err, '生成失败'));
+      if ((err as { name?: string }).name !== 'AbortError') {
+        setError(errMessage(err, '生成失败'));
+      }
     } finally {
       setBusy(false);
     }
   };
 
+  const toggleExpand = async (runId: string) => {
+    if (expandedRun === runId) {
+      setExpandedRun(null);
+      return;
+    }
+    setExpandedRun(runId);
+    if (!runDetails[runId]) {
+      setDetailLoading(runId);
+      try {
+        const detail = await api.getPipelineRun(projectId, runId);
+        setRunDetails((prev) => ({ ...prev, [runId]: detail }));
+      } catch { /* ignore */ } finally {
+        setDetailLoading(null);
+      }
+    }
+  };
+
+  const stageOrder = ['recall', 'plan', 'draft', 'check', 'gate'];
+  const allStages = stageOrder.map((s) => liveStages.find((e) => e.stage === s));
+  const hasLiveResult = liveStages.length > 0 || doneData;
+
   return (
     <div className="studio-panel">
       <div className="panel-head">
         <h3 className="cn">生成章节</h3>
-        <span className="ph-hint">plan → recall → draft → check → gate</span>
+        <span className="ph-hint">SSE 流式 · plan → recall → draft → check → gate</span>
       </div>
 
       <div className="nf-notice">
         ⚠ <b>需要 LLM provider key</b>：后端配置{' '}
-        <code>NOVELFORGE_API_KEY</code> / <code>DEEPSEEK_API_KEY</code>{' '}
-        后方能真正生成正文。未配置时返回 <code>error</code> —— 这是预期行为，确定性核心
-        （seed / bible / state / search / reviews）不受影响。
+        <code>DEEPSEEK_API_KEY</code>{' '}
+        后方能真正生成正文；确定性核心（seed / bible / state / search / reviews）不受影响。
       </div>
 
       <div className="nf-form">
@@ -943,59 +1013,105 @@ function PipelinePanel({
         </div>
       </div>
 
-      {error && (
-        <div className="nf-msg err">
-          <span>⚠</span>
-          <span>{error}</span>
-        </div>
-      )}
-
-      {data && (
+      {/* ── 实时进度条 ─────────────────────────────────── */}
+      {hasLiveResult && (
         <>
           <div className="stage-row">
-            {data.stages.map((s) => (
-              <span key={s.stage} className={`stage-pill ${s.status}`}>
-                <span className="sp-dot" />
-                {s.stage}
-                <span className="sp-status">{s.status}</span>
-              </span>
-            ))}
+            {stageOrder.map((s) => {
+              const ev = allStages[stageOrder.indexOf(s)];
+              const cls = ev ? ev.status : busy ? 'pending' : '';
+              return (
+                <span key={s} className={`stage-pill ${cls}`}>
+                  {busy && !ev && <span className="nf-spin" style={{ marginRight: 4 }} />}
+                  {ev && <span className="sp-dot" />}
+                  {s}
+                  {ev && <span className="sp-status">{ev.status}</span>}
+                </span>
+              );
+            })}
           </div>
 
-          <div className="run-summary">
-            <span className="rs-chip gate">
-              final_gate：<b>{data.final_gate}</b>
-            </span>
-            <span className="rs-chip">
-              tokens：<b>{data.budget_spent.tokens}</b>
-            </span>
-            <span className="rs-chip">
-              usd：<b>${data.budget_spent.usd}</b>
-            </span>
-            {data.budget_spent.revise_rounds !== undefined && (
-              <span className="rs-chip">
-                revise：<b>{data.budget_spent.revise_rounds}</b>
+          {doneData && (
+            <div className="run-summary">
+              <span className="rs-chip gate">
+                final_gate：<b>{doneData.final_gate}</b>
               </span>
-            )}
-            {data.circuit_breaker_tripped && (
-              <span className="rs-chip tripped">⚡ 熔断已触发</span>
-            )}
-          </div>
-
-          {data.error && (
-            <div className="nf-msg err">
-              <span>⚠</span>
-              <span>{data.error}</span>
+              <span className="rs-chip">tokens：<b>{doneData.tokens}</b></span>
+              <span className="rs-chip">usd：<b>${doneData.usd.toFixed(4)}</b></span>
             </div>
           )}
 
-          {data.draft_text && (
+          {error && (
+            <div className="nf-msg err">
+              <span>⚠</span>
+              <span>{error}</span>
+            </div>
+          )}
+
+          {(doneData?.error) && (
+            <div className="nf-msg err">
+              <span>⚠</span>
+              <span>{doneData.error}</span>
+            </div>
+          )}
+
+          {liveDraft && (
             <div className="bible-box">
-              <pre>{data.draft_text}</pre>
+              <pre>{liveDraft}</pre>
             </div>
           )}
         </>
       )}
+
+      {/* ── 历史记录 ─────────────────────────────────── */}
+      <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+        <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>生成历史</span>
+        <button
+          type="button"
+          className="nf-btn-sm"
+          onClick={() => void loadHistory()}
+          disabled={histLoading}
+          style={{ marginLeft: 'auto' }}
+        >
+          {histLoading ? '…' : '↻ 刷新'}
+        </button>
+      </div>
+
+      {history.length === 0 && !histLoading && (
+        <div className="nf-empty">尚无生成记录</div>
+      )}
+
+      <div className="pipeline-history">
+        {history.map((rec) => (
+          <div key={rec.run_id} className={`ph-row ${expandedRun === rec.run_id ? 'expanded' : ''}`}>
+            <button
+              type="button"
+              className="ph-header"
+              onClick={() => void toggleExpand(rec.run_id)}
+            >
+              <span className={`ph-status ${rec.status}`}>{rec.status}</span>
+              <span className="ph-ch">第 {rec.chapter} 章</span>
+              <span className="ph-wc">{rec.word_count != null ? `${rec.word_count} 字` : '—'}</span>
+              <span className="ph-time">{rec.started_at.replace('T', ' ').slice(0, 16)}</span>
+              <span className="ph-arrow">{expandedRun === rec.run_id ? '▲' : '▼'}</span>
+            </button>
+
+            {expandedRun === rec.run_id && (
+              <div className="ph-body">
+                {detailLoading === rec.run_id ? (
+                  <div className="nf-loading">加载中…</div>
+                ) : runDetails[rec.run_id]?.draft_text ? (
+                  <div className="bible-box">
+                    <pre>{runDetails[rec.run_id].draft_text}</pre>
+                  </div>
+                ) : (
+                  <div className="nf-empty">草稿文件不存在或已删除</div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

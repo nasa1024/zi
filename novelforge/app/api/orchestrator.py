@@ -1,16 +1,22 @@
-"""控制平面端点：/pipeline/run。"""
+"""控制平面端点：/pipeline/run + 历史 + SSE 流式。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import json as _json
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
     BudgetSpent,
+    PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
     StageResult,
 )
 from ...config import NovelForgeConfig
-from ...control_plane.budget import BudgetLedger, CircuitTripped
+from ...control_plane.budget import CircuitTripped
 from ...control_plane.llm.factory import build_gateway
 from ...control_plane.orchestrator import Orchestrator
 from ...control_plane.skill_registry import SkillRegistry
@@ -27,15 +33,7 @@ def _build_orch(cfg: NovelForgeConfig) -> Orchestrator:
     return Orchestrator(gw, reg, cfg)
 
 
-@router.post("/{project_id}/pipeline/run", response_model=PipelineRunResponse)
-def pipeline_run(
-    project_id: str,
-    req: PipelineRunRequest,
-    registry: ProjectRegistry = Depends(get_registry),
-):
-    from ...config import NovelForgeConfig
-    import os
-
+def _make_cfg(project_id: str, req: PipelineRunRequest, registry: ProjectRegistry) -> NovelForgeConfig:
     cfg = NovelForgeConfig(
         project_id=project_id,
         db_path=registry.get(project_id).db_path if registry.get(project_id) else "novel.db",
@@ -46,19 +44,28 @@ def pipeline_run(
         cfg.budget.max_tokens_per_chapter = req.budget_max_tokens
     if req.budget_max_usd:
         cfg.budget.max_usd_per_chapter = req.budget_max_usd
-
-    # API key from environment
     api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if api_key:
         cfg.provider.api_key = api_key
-        provider_name = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-        cfg.provider.provider = provider_name
+        cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+    return cfg
 
+
+@router.post("/{project_id}/pipeline/run", response_model=PipelineRunResponse)
+def pipeline_run(
+    project_id: str,
+    req: PipelineRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
     from ..security import sanitize_user_text
+
+    cfg = _make_cfg(project_id, req, registry)
     conn = registry.open_conn(project_id)
-    run_id = new_id("run")
     stages: list[StageResult] = []
-    tripped = False
+    stage_acc: list[StageResult] = []
+
+    def on_stage(stage: str, status: str, detail: dict) -> None:
+        stage_acc.append(StageResult(stage=stage, status=status, detail=detail))
 
     try:
         orch = _build_orch(cfg)
@@ -67,9 +74,10 @@ def pipeline_run(
             chapter_goal=sanitize_user_text(req.chapter_goal or ""),
             entity_ids=req.entity_ids,
             keyword_query=sanitize_user_text(req.keyword_query or "") if req.keyword_query else None,
+            progress_cb=on_stage,
         )
 
-        stages = [
+        stages = stage_acc or [
             StageResult(stage="plan",   status="ok", detail={}),
             StageResult(stage="recall", status="ok", detail={}),
             StageResult(stage="draft",  status="ok" if outcome.ok else "blocked",
@@ -86,26 +94,23 @@ def pipeline_run(
             else "no_candidates"
         )
         return PipelineRunResponse(
-            run_id=run_id,
+            run_id=outcome.run_id or new_id("run"),
             chapter_no=req.chapter_no,
             stages=stages,
             final_gate=final_gate,
             draft_text=outcome.draft_text,
-            budget_spent=BudgetSpent(
-                tokens=outcome.usage_tokens,
-                usd=outcome.usage_usd,
-            ),
+            budget_spent=BudgetSpent(tokens=outcome.usage_tokens, usd=outcome.usage_usd),
             circuit_breaker_tripped=False,
             error=outcome.error,
         )
     except CircuitTripped as e:
         return PipelineRunResponse(
-            run_id=run_id,
+            run_id=new_id("run"),
             chapter_no=req.chapter_no,
-            stages=stages + [StageResult(stage="circuit_breaker",
-                                          status="circuit_broken",
-                                          detail={"reason": e.reason,
-                                                  "spent": e.spent, "cap": e.cap})],
+            stages=stage_acc + [StageResult(stage="circuit_breaker",
+                                             status="circuit_broken",
+                                             detail={"reason": e.reason,
+                                                     "spent": e.spent, "cap": e.cap})],
             final_gate="circuit_broken",
             budget_spent=BudgetSpent(tokens=0, usd=0.0),
             circuit_breaker_tripped=True,
@@ -113,10 +118,159 @@ def pipeline_run(
         )
     except Exception as e:
         return PipelineRunResponse(
-            run_id=run_id, chapter_no=req.chapter_no, stages=stages,
+            run_id=new_id("run"), chapter_no=req.chapter_no, stages=stage_acc,
             final_gate="error",
             budget_spent=BudgetSpent(tokens=0, usd=0.0),
             error=str(e),
+        )
+    finally:
+        conn.close()
+
+
+@router.post("/{project_id}/pipeline/run/stream")
+async def pipeline_run_stream(
+    project_id: str,
+    req: PipelineRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """SSE 流式生成端点：每个 stage 完成后即时推送，最后推送 done 事件（含完整 draft_text）。"""
+    import asyncio
+    from ..security import sanitize_user_text
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _push(data: dict) -> None:
+        line = f"data: {_json.dumps(data, ensure_ascii=False)}\n\n"
+        loop.call_soon_threadsafe(queue.put_nowait, line)
+
+    def run_sync() -> None:
+        cfg = _make_cfg(project_id, req, registry)
+        conn = registry.open_conn(project_id)
+
+        def on_stage(stage: str, status: str, detail: dict) -> None:
+            _push({"event": "stage", "stage": stage, "status": status, "detail": detail})
+
+        try:
+            orch = _build_orch(cfg)
+            outcome = orch.generate_chapter(
+                req.chapter_no, conn,
+                chapter_goal=sanitize_user_text(req.chapter_goal or ""),
+                entity_ids=req.entity_ids,
+                keyword_query=sanitize_user_text(req.keyword_query or "") if req.keyword_query else None,
+                progress_cb=on_stage,
+            )
+            final_gate = (
+                "committed_canon" if outcome.fact_ids_committed
+                else "enqueued_review" if outcome.candidates_queued
+                else "no_candidates"
+            )
+            _push({
+                "event": "done",
+                "run_id": outcome.run_id or new_id("run"),
+                "chapter_no": req.chapter_no,
+                "draft_text": outcome.draft_text,
+                "final_gate": final_gate,
+                "tokens": outcome.usage_tokens,
+                "usd": outcome.usage_usd,
+                "error": outcome.error,
+            })
+        except CircuitTripped as e:
+            _push({"event": "error", "message": str(e), "type": "circuit_broken"})
+        except Exception as e:
+            _push({"event": "error", "message": str(e)})
+        finally:
+            conn.close()
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.run_in_executor(executor, run_sync)
+
+    async def event_gen():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/{project_id}/pipeline/runs", response_model=list[PipelineRunRecord])
+def list_pipeline_runs(
+    project_id: str,
+    limit: int = 30,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """列出生成历史（按时间倒序，最多 limit 条）。"""
+    conn = registry.open_conn(project_id)
+    try:
+        rows = conn.execute(
+            "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
+            "       di.word_count"
+            " FROM pipeline_run pr"
+            " LEFT JOIN draft_index di ON di.id = pr.draft_id"
+            " WHERE pr.project_id = ?"
+            " ORDER BY pr.started_at DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        return [
+            PipelineRunRecord(
+                run_id=r["run_id"],
+                chapter=r["chapter"],
+                status=r["status"],
+                started_at=r["started_at"],
+                finished_at=r["finished_at"],
+                word_count=r["word_count"],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pipeline/runs/{run_id}", response_model=PipelineRunDetail)
+def get_pipeline_run(
+    project_id: str,
+    run_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """查看单次生成详情（含完整草稿正文）。"""
+    from pathlib import Path
+
+    conn = registry.open_conn(project_id)
+    try:
+        row = conn.execute(
+            "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
+            "       di.word_count, di.file_path"
+            " FROM pipeline_run pr"
+            " LEFT JOIN draft_index di ON di.id = pr.draft_id"
+            " WHERE pr.run_id = ? AND pr.project_id = ?",
+            (run_id, project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "run not found")
+
+        draft_text = ""
+        if row["file_path"]:
+            db_entry = registry.get(project_id)
+            if db_entry:
+                l0_path = Path(db_entry.db_path).parent / row["file_path"]
+                if l0_path.exists():
+                    draft_text = l0_path.read_text(encoding="utf-8")
+
+        return PipelineRunDetail(
+            run_id=row["run_id"],
+            chapter=row["chapter"],
+            status=row["status"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            word_count=row["word_count"],
+            draft_text=draft_text,
         )
     finally:
         conn.close()

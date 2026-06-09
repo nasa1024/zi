@@ -899,6 +899,111 @@
   box-shadow: 6px 6px 0 var(--ink);
 }
 
+/* ============================== Pipeline 历史 ============================== */
+.stage-pill.pending {
+  background: var(--cream-2);
+  color: var(--ink-soft);
+  animation: phblink 1s ease-in-out infinite;
+}
+@keyframes phblink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.nf-btn-sm {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  padding: 0.38em 0.9em;
+  background: var(--cream);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 var(--ink);
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.nf-btn-sm:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.nf-btn-sm:disabled { opacity: 0.5; cursor: default; }
+
+.nf-empty {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  padding: 16px 0;
+  text-align: center;
+}
+
+.panel-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 10px;
+  border-top: 1.5px dashed var(--ink-soft);
+}
+
+.pipeline-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ph-row {
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 3px 3px 0 var(--ink);
+  transition: box-shadow 0.12s;
+}
+.ph-row:hover { box-shadow: 5px 5px 0 var(--ink); }
+.ph-row.expanded { border-color: var(--blue); box-shadow: 4px 4px 0 var(--blue); }
+
+.ph-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--cream);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  transition: background 0.1s;
+}
+.ph-header:hover { background: var(--cream-2); }
+
+.ph-status {
+  display: inline-block;
+  padding: 0.2em 0.65em;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  border: 1.5px solid var(--ink);
+  min-width: 72px;
+  text-align: center;
+}
+.ph-status.completed { background: var(--lime); color: var(--ink); }
+.ph-status.running   { background: var(--blue); color: var(--cream); animation: phblink 1s infinite; }
+.ph-status.crashed   { background: var(--pink); color: var(--cream); }
+
+.ph-ch   { font-weight: 700; color: var(--ink); min-width: 64px; }
+.ph-wc   { color: var(--blue); min-width: 54px; }
+.ph-time { color: var(--ink-soft); flex: 1; text-align: right; }
+.ph-arrow { opacity: 0.55; font-size: 0.7rem; }
+
+.ph-body {
+  padding: 12px 14px 16px;
+  border-top: 1.5px dashed var(--ink-soft);
+  background: var(--cream-2);
+}
+
 /* ============================== RESPONSIVE ============================== */
 @media (max-width: 720px) {
   .nf-form {

@@ -200,6 +200,21 @@ class PipelineRunResponse(BaseModel):
     error: Optional[str] = None
 
 
+class PipelineRunRecord(BaseModel):
+    """pipeline_run 历史列表条目（不含正文）。"""
+    run_id: str
+    chapter: int
+    status: str
+    started_at: str
+    finished_at: Optional[str] = None
+    word_count: Optional[int] = None
+
+
+class PipelineRunDetail(PipelineRunRecord):
+    """pipeline_run 详情（含完整正文）。"""
+    draft_text: str = ""
+
+
 # ── Check ─────────────────────────────────────────────────────────────────────
 
 class CheckRequest(BaseModel):
