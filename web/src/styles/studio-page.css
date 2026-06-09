@@ -1,0 +1,91 @@
+/* ============================================================
+   StudioPage — 工作台独立页面顶栏
+   霓虹蛮荒多巴胺：与落地页 nav 风格一致，但更紧凑。
+   ============================================================ */
+
+.studio-nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--ink);
+  border-bottom: var(--bd);
+  padding: 0 0;
+}
+
+.sn-inner {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  gap: 20px;
+}
+
+/* 返回主页按钮 */
+.sn-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: var(--cream);
+  text-decoration: none;
+  padding: 0.4em 0.9em;
+  border: 2px solid rgba(251, 241, 227, 0.3);
+  border-radius: 999px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.sn-back:hover {
+  border-color: var(--cream);
+  background: rgba(251, 241, 227, 0.08);
+}
+.sn-back-arrow {
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+.sn-back:hover .sn-back-arrow {
+  transform: translateX(-3px);
+}
+
+/* 品牌 logo */
+.sn-brand {
+  display: flex;
+  align-items: center;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  color: var(--cream);
+  flex: 1;
+  text-align: center;
+  justify-content: center;
+  letter-spacing: 0.01em;
+}
+.sn-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--lime);
+  background: rgba(187, 255, 0, 0.12);
+  border: 1.5px solid var(--lime);
+  border-radius: 6px;
+  padding: 0.18em 0.55em;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* 健康徽章 */
+.sn-health {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--cream);
+  opacity: 0.75;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* Studio section 在工作台页：去掉顶部大间距（nav 已占位），去掉重复边框 */
+.studio-nav + .studio {
+  padding-top: 40px;
+  border-top: none;
+}
