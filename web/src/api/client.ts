@@ -5,8 +5,11 @@
 import type {
   ApproveRequest,
   ApproveResponse,
+  AutopilotSessionInfo,
+  AutopilotStartRequest,
   BibleRenderResponse,
   HealthResponse,
+  NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
   PipelineRunRequest,
@@ -214,6 +217,35 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  autopilotStart(id: string, req: AutopilotStartRequest): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/start`,
+      req,
+    );
+  },
+
+  autopilotStatus(id: string): Promise<AutopilotSessionInfo[]> {
+    return request<AutopilotSessionInfo[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/autopilot/status`,
+    );
+  },
+
+  autopilotCancel(id: string, sessionId: string): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/cancel`,
+    );
+  },
+
+  pipelineNext(id: string): Promise<NextChapterSuggestion> {
+    return request<NextChapterSuggestion>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/next`,
+    );
   },
 
   listPipelineRuns(id: string, limit = 30): Promise<PipelineRunRecord[]> {

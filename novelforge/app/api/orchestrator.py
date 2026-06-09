@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
     BudgetSpent,
+    NextChapterSuggestion,
     PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
     StageResult,
@@ -198,6 +199,35 @@ async def pipeline_run_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/{project_id}/pipeline/next", response_model=NextChapterSuggestion)
+def pipeline_next(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """「下一章」自动建议：算出下一章号 + 最优 chapter_goal。
+
+    章号 = 已完成生成（pipeline_run completed ∪ draft_index）的最大章 + 1；
+    目标按优先级拼装：本章章节卡 → 上一章钩子 → 所属卷大纲 → 到期伏笔 → 已计划节拍。
+    节拍器（pacing）建议由 generate_chapter 内部自动追加，此处不重复。
+    """
+    from ..chapter_suggest import assemble_chapter_goal, next_chapter_no
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        nxt, last = next_chapter_no(conn, project_id)
+        goal, sources = assemble_chapter_goal(conn, nxt)
+        return NextChapterSuggestion(
+            next_chapter=nxt,
+            last_completed_chapter=last,
+            suggested_goal=goal,
+            sources=sources,
+        )
+    finally:
+        conn.close()
 
 
 @router.get("/{project_id}/pipeline/runs", response_model=list[PipelineRunRecord])
