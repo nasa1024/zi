@@ -1,3 +1,10 @@
+# ---- Node / frontend (web/) ----
+web/node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+web/vite.config.d.ts
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
