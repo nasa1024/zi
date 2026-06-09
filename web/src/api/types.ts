@@ -109,6 +109,52 @@ export interface PipelineRunResponse {
   error?: string | null;
 }
 
+export interface PipelineRunRecord {
+  run_id: string;
+  chapter: number;
+  status: 'running' | 'completed' | 'crashed' | string;
+  started_at: string;
+  finished_at?: string | null;
+  word_count?: number | null;
+}
+
+export interface PipelineRunDetail extends PipelineRunRecord {
+  draft_text: string;
+}
+
+// SSE 事件类型
+export interface SSEStageEvent {
+  event: 'stage';
+  stage: string;
+  status: string;
+  detail: Record<string, unknown>;
+}
+
+export interface SSEDoneEvent {
+  event: 'done';
+  run_id: string;
+  chapter_no: number;
+  draft_text: string;
+  final_gate: string;
+  tokens: number;
+  usd: number;
+  error?: string | null;
+}
+
+export interface SSEErrorEvent {
+  event: 'error';
+  message: string;
+  type?: string;
+}
+
+export type SSEPipelineEvent = SSEStageEvent | SSEDoneEvent | SSEErrorEvent;
+
+export interface PipelineStreamHandlers {
+  onStage?: (e: SSEStageEvent) => void;
+  onDone?: (e: SSEDoneEvent) => void;
+  onError?: (e: SSEErrorEvent) => void;
+}
+
 export interface ReviewQueueItem {
   candidate_id: string;
   fact_type: string;

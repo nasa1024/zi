@@ -30,6 +30,7 @@ from .skill_registry import SkillRegistry, get_registry
 class ChapterOutcome:
     chapter: int
     ok: bool
+    run_id: str = ""
     draft_text: str = ""
     fact_ids_committed: list[str] = field(default_factory=list)
     candidates_queued: list[str] = field(default_factory=list)
@@ -68,6 +69,7 @@ class Orchestrator:
         chapter_goal: str = "",
         entity_ids: Optional[list[str]] = None,
         keyword_query: Optional[str] = None,
+        progress_cb=None,  # Optional[Callable[[str, str, dict], None]]
     ) -> ChapterOutcome:
         cfg = self._cfg
         ledger = self._gw.ledger
@@ -115,16 +117,25 @@ class Orchestrator:
             if hint:
                 workspace["chapter_goal"] = (chapter_goal + "\n" + hint).strip()
 
+            if progress_cb:
+                progress_cb("recall", "ok", {})
+
             # ── 2. PLAN ───────────────────────────────────────────────────────
             plan_result = self._reg.invoke("planner", skill_ctx)
+            if progress_cb:
+                progress_cb("plan", "ok" if plan_result.ok else "blocked", {})
             if not plan_result.ok:
                 workspace["beats"] = []
 
             # ── 3. DRAFT ──────────────────────────────────────────────────────
             draft_result = self._reg.invoke("chapter_draft", skill_ctx)
+            _draft_chars = len(workspace.get("draft_text", ""))
+            if progress_cb:
+                progress_cb("draft", "ok" if (draft_result.ok or workspace.get("draft_text")) else "blocked",
+                            {"chars": _draft_chars})
             if not draft_result.ok and not workspace.get("draft_text"):
                 return ChapterOutcome(
-                    chapter=chapter, ok=False,
+                    chapter=chapter, ok=False, run_id=run_id,
                     error=f"draft 失败: {draft_result.error}",
                     usage_tokens=ledger.tokens_spent,
                 )
@@ -138,6 +149,8 @@ class Orchestrator:
             all_issues: list[dict] = continuity_issues + [
                 {"source": "craft", **i} for i in craft_issues
             ]
+            if progress_cb:
+                progress_cb("check", "ok", {"issues": len(all_issues)})
 
             # ── 5. REVISE loop ────────────────────────────────────────────────
             hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
@@ -201,9 +214,12 @@ class Orchestrator:
             pacing.update(chapter, beats, len(draft_text), conn)
 
             committed_ids = [fid for _, fid in gate_outcome.committed]
+            if progress_cb:
+                progress_cb("gate", "ok", {"committed": len(committed_ids), "queued": len(gate_outcome.queued)})
             return ChapterOutcome(
                 chapter=chapter,
                 ok=True,
+                run_id=run_id,
                 draft_text=draft_text,
                 fact_ids_committed=committed_ids,
                 candidates_queued=gate_outcome.queued,
