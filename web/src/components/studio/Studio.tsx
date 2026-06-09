@@ -6,7 +6,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
 import { useHealth } from '../../api/hooks';
 import type {
+  AutopilotSessionInfo,
   BibleRenderResponse,
+  NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
   ProjectResponse,
@@ -858,6 +860,20 @@ function PipelinePanel({
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 「下一章」自动建议 + 连续生成
+  const [suggestion, setSuggestion] = useState<NextChapterSuggestion | null>(null);
+  const [chainCount, setChainCount] = useState<string>('1');
+  const [chainProgress, setChainProgress] = useState<{ done: number; total: number } | null>(null);
+  const stopChainRef = useRef<boolean>(false);
+  const chapterNoTouched = useRef<boolean>(false);
+
+  // Autopilot 挂机连写（后台会话，关闭页面不中断）
+  const [apSession, setApSession] = useState<AutopilotSessionInfo | null>(null);
+  const [apCount, setApCount] = useState<string>('10');
+  const [apMode, setApMode] = useState<'auto_promote' | 'hybrid'>('auto_promote');
+  const [apBusy, setApBusy] = useState<boolean>(false);
+  const [apError, setApError] = useState<string | null>(null);
+
   // SSE 流式状态
   const [liveStages, setLiveStages] = useState<SSEStageEvent[]>([]);
   const [liveDraft, setLiveDraft] = useState<string>('');
@@ -882,10 +898,29 @@ function PipelinePanel({
     }
   }, [projectId]);
 
-  // 首次挂载和 projectId 变化时拉取历史
-  useEffect(() => { void loadHistory(); }, [loadHistory]);
+  // 「下一章」建议：取已完成最大章 +1，并自动拼装最优 chapter_goal
+  const loadSuggestion = useCallback(async (): Promise<NextChapterSuggestion | null> => {
+    try {
+      const sug = await api.pipelineNext(projectId);
+      setSuggestion(sug);
+      if (!chapterNoTouched.current) {
+        setChapterNo(String(sug.next_chapter));
+      }
+      return sug;
+    } catch {
+      return null;
+    }
+  }, [projectId]);
 
-  const run = async () => {
+  // 首次挂载和 projectId 变化时拉取历史 + 下一章建议
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
+  useEffect(() => {
+    chapterNoTouched.current = false;
+    void loadSuggestion();
+  }, [loadSuggestion]);
+
+  // 跑单章；返回是否成功（done 事件且无 error），供连续生成判断是否继续
+  const runOne = async (no: number, goal: string): Promise<boolean> => {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -896,18 +931,19 @@ function PipelinePanel({
     setLiveDraft('');
     setDoneData(null);
 
-    const n = Number.parseInt(chapterNo, 10);
+    let ok = false;
     try {
       await api.runPipelineStream(
         projectId,
         {
-          chapter_no: Number.isFinite(n) ? n : 1,
-          chapter_goal: chapterGoal.trim() || undefined,
+          chapter_no: no,
+          chapter_goal: goal.trim() || undefined,
           mode,
         },
         {
           onStage: (e) => setLiveStages((prev) => [...prev, e]),
           onDone: (e) => {
+            ok = !e.error;
             setDoneData(e);
             setLiveDraft(e.draft_text ?? '');
             onChanged();
@@ -923,6 +959,118 @@ function PipelinePanel({
       }
     } finally {
       setBusy(false);
+    }
+    return ok;
+  };
+
+  // 手动模式：按表单里的章节号/目标跑一章
+  const run = async () => {
+    const n = Number.parseInt(chapterNo, 10);
+    await runOne(Number.isFinite(n) ? n : 1, chapterGoal);
+    void loadSuggestion();
+  };
+
+  // 自动模式：每章先取「下一章」最优建议（章号 + 目标），再连写 N 章
+  const runAuto = async () => {
+    const total = Math.max(1, Math.min(50, Number.parseInt(chainCount, 10) || 1));
+    stopChainRef.current = false;
+    chapterNoTouched.current = false;
+    setChainProgress({ done: 0, total });
+    try {
+      for (let i = 0; i < total; i += 1) {
+        if (stopChainRef.current) break;
+        const sug = await loadSuggestion();
+        if (!sug) {
+          setError('获取下一章建议失败');
+          break;
+        }
+        setChapterNo(String(sug.next_chapter));
+        setChapterGoal(sug.suggested_goal);
+        const ok = await runOne(sug.next_chapter, sug.suggested_goal);
+        setChainProgress({ done: i + 1, total });
+        if (!ok || stopChainRef.current) break;
+      }
+    } finally {
+      setChainProgress(null);
+      void loadSuggestion();
+    }
+  };
+
+  const stopChain = () => {
+    stopChainRef.current = true;
+    abortRef.current?.abort();
+  };
+
+  const apActive = apSession != null && (apSession.status === 'running' || apSession.status === 'degraded');
+
+  // 挂载时找回该项目还在跑的 autopilot 会话（刷新页面后可继续观察/取消）
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const sessions = await api.autopilotStatus(projectId);
+        if (!alive || sessions.length === 0) return;
+        const running = sessions.filter((s) => s.status === 'running' || s.status === 'degraded');
+        const pick = (running.length > 0 ? running : sessions)
+          .slice()
+          .sort((a, b) => b.started_at.localeCompare(a.started_at))[0];
+        setApSession(pick);
+      } catch { /* autopilot 不可用时静默 */ }
+    })();
+    return () => { alive = false; };
+  }, [projectId]);
+
+  // 会话运行中每 3s 轮询进度，并同步刷新历史/建议
+  useEffect(() => {
+    if (!apSession || !apActive) return;
+    const sid = apSession.session_id;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const sessions = await api.autopilotStatus(projectId);
+          const cur = sessions.find((s) => s.session_id === sid);
+          if (!cur) return;
+          setApSession(cur);
+          void loadHistory();
+          if (cur.status !== 'running' && cur.status !== 'degraded') {
+            chapterNoTouched.current = false;
+            void loadSuggestion();
+            onChanged();
+          }
+        } catch { /* 网络抖动忽略，下个周期重试 */ }
+      })();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [apSession?.session_id, apActive, projectId]);
+
+  const startAutopilot = async () => {
+    setApError(null);
+    setApBusy(true);
+    try {
+      // 起点 = 实时的「下一章」建议；每章目标由后端逐章自动拼装
+      const sug = await loadSuggestion();
+      const n = Number.parseInt(chapterNo, 10);
+      const from = sug ? sug.next_chapter : (Number.isFinite(n) ? n : 1);
+      const count = Math.max(1, Math.min(200, Number.parseInt(apCount, 10) || 1));
+      const session = await api.autopilotStart(projectId, {
+        from_chapter: from,
+        to_chapter: from + count - 1,
+        mode: apMode,
+      });
+      setApSession(session);
+    } catch (err) {
+      setApError(errMessage(err, '启动挂机连写失败'));
+    } finally {
+      setApBusy(false);
+    }
+  };
+
+  const cancelAutopilot = async () => {
+    if (!apSession) return;
+    try {
+      setApSession(await api.autopilotCancel(projectId, apSession.session_id));
+    } catch (err) {
+      setApError(errMessage(err, '取消失败'));
     }
   };
 
@@ -969,7 +1117,10 @@ function PipelinePanel({
             type="number"
             min={1}
             value={chapterNo}
-            onChange={(e) => setChapterNo(e.target.value)}
+            onChange={(e) => {
+              chapterNoTouched.current = true;
+              setChapterNo(e.target.value);
+            }}
             disabled={busy}
           />
         </div>
@@ -1000,9 +1151,9 @@ function PipelinePanel({
             disabled={busy}
           />
         </div>
-        <div className="nf-actions" style={{ gridColumn: '1 / -1' }}>
-          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy}>
-            {busy ? (
+        <div className="nf-actions" style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy || apActive}>
+            {busy && !chainProgress ? (
               <>
                 <span className="nf-spin" /> 生成中…
               </>
@@ -1010,8 +1161,144 @@ function PipelinePanel({
               <>⚙️ 运行流水线</>
             )}
           </button>
+
+          <button
+            type="button"
+            className="nf-btn"
+            onClick={() => void runAuto()}
+            disabled={busy || apActive}
+            title="自动取「已完成最大章 +1」为章号，并按卷大纲 / 章节卡 / 待回收伏笔自动拼装本章目标"
+          >
+            {chainProgress ? (
+              <>
+                <span className="nf-spin" /> 连写中 {chainProgress.done}/{chainProgress.total}…
+              </>
+            ) : (
+              <>▶ 下一章 · 自动连写</>
+            )}
+          </button>
+
+          <label htmlFor="pl-chain" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}>
+            连写章数
+            <input
+              id="pl-chain"
+              className="nf-input"
+              type="number"
+              min={1}
+              max={50}
+              value={chainCount}
+              onChange={(e) => setChainCount(e.target.value)}
+              disabled={busy}
+              style={{ width: '4.5rem' }}
+            />
+          </label>
+
+          {busy && (
+            <button type="button" className="nf-btn-sm" onClick={stopChain}>
+              ⏹ 停止
+            </button>
+          )}
         </div>
+
+        {suggestion && !busy && (
+          <div className="ph-hint" style={{ gridColumn: '1 / -1' }}>
+            💡 建议下一章：<b>第 {suggestion.next_chapter} 章</b>
+            {suggestion.last_completed_chapter > 0 && (
+              <>（已完成至第 {suggestion.last_completed_chapter} 章）</>
+            )}
+            {suggestion.sources.length > 0 && (
+              <>　·　目标依据：{suggestion.sources.join(' / ')}</>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* ── Autopilot 挂机连写 ───────────────────────────── */}
+      <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+        <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>🚀 挂机连写 AUTOPILOT</span>
+      </div>
+      <div className="ph-hint">
+        后台会话从「下一章」起逐章生成，每章自动选取最优目标（章节卡 / 钩子 / 卷大纲 / 伏笔 / 节拍）；
+        连续出现硬一致性问题会自动降级人审，关闭页面不中断。
+      </div>
+
+      <div className="nf-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
+        <label htmlFor="ap-count" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}>
+          章数
+          <input
+            id="ap-count"
+            className="nf-input"
+            type="number"
+            min={1}
+            max={200}
+            value={apCount}
+            onChange={(e) => setApCount(e.target.value)}
+            disabled={apBusy || apActive}
+            style={{ width: '4.5rem' }}
+          />
+        </label>
+        <select
+          className="nf-select"
+          value={apMode}
+          onChange={(e) => setApMode(e.target.value as 'auto_promote' | 'hybrid')}
+          disabled={apBusy || apActive}
+          aria-label="挂机模式"
+          style={{ width: 'auto' }}
+        >
+          <option value="auto_promote">auto_promote · 全自动</option>
+          <option value="hybrid">hybrid · 混合</option>
+        </select>
+        <button
+          type="button"
+          className="nf-btn"
+          onClick={() => void startAutopilot()}
+          disabled={apBusy || apActive || busy}
+        >
+          {apBusy ? (
+            <>
+              <span className="nf-spin" /> 启动中…
+            </>
+          ) : (
+            <>🚀 启动挂机</>
+          )}
+        </button>
+        {apActive && (
+          <button type="button" className="nf-btn-sm" onClick={() => void cancelAutopilot()}>
+            ⏹ 取消会话
+          </button>
+        )}
+      </div>
+
+      {apError && (
+        <div className="nf-msg err">
+          <span>⚠</span>
+          <span>{apError}</span>
+        </div>
+      )}
+
+      {apSession && (
+        <div className="run-summary" style={{ marginTop: '0.6rem' }}>
+          <span className={`rs-chip ${apActive ? 'gate' : ''}`}>
+            状态：<b>{apSession.status}</b>
+            {apActive && <span className="nf-spin" style={{ marginLeft: 6 }} />}
+          </span>
+          <span className="rs-chip">
+            进度：<b>{apSession.chapters_done}/{apSession.chapters_total}</b>
+            （第 {apSession.from_chapter}–{apSession.to_chapter} 章）
+          </span>
+          <span className="rs-chip">模式：<b>{apSession.policy_mode}</b></span>
+          <span className="rs-chip">tokens：<b>{apSession.budget_tokens_total}</b></span>
+          <span className="rs-chip">usd：<b>${apSession.budget_usd_total.toFixed(4)}</b></span>
+          {apSession.pending_reviews > 0 && (
+            <span className="rs-chip">待审：<b>{apSession.pending_reviews}</b></span>
+          )}
+          {apSession.last_error && (
+            <span className="rs-chip" title={apSession.last_error}>
+              ⚠ {apSession.last_error.slice(0, 60)}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ── 实时进度条 ─────────────────────────────────── */}
       {hasLiveResult && (

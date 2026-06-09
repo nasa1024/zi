@@ -196,6 +196,13 @@ class AutopilotManager:
                 orch = Orchestrator(gw, reg, cfg)
 
                 chapter_goal = req.chapter_goals.get(str(chapter)) or req.chapter_goals.get(chapter) or ""
+                if not chapter_goal:
+                    # 未显式指定目标 → 按章节卡/上一章钩子/卷大纲/到期伏笔/已计划节拍自动拼装
+                    try:
+                        from .chapter_suggest import assemble_chapter_goal
+                        chapter_goal, _ = assemble_chapter_goal(conn, chapter)
+                    except Exception:
+                        chapter_goal = ""
                 outcome = orch.generate_chapter(chapter, conn, chapter_goal=chapter_goal)
 
                 with self._lock:

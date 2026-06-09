@@ -122,6 +122,44 @@ export interface PipelineRunDetail extends PipelineRunRecord {
   draft_text: string;
 }
 
+export interface NextChapterSuggestion {
+  next_chapter: number;
+  last_completed_chapter: number;
+  suggested_goal: string;
+  sources: string[];
+}
+
+export interface AutopilotStartRequest {
+  from_chapter: number;
+  to_chapter: number;
+  chapter_goals?: Record<string, string>;
+  mode?: 'auto_promote' | 'hybrid';
+  budget_max_tokens_per_chapter?: number | null;
+  budget_max_usd_per_chapter?: number | null;
+  budget_session_max_tokens?: number | null;
+  budget_session_max_usd?: number | null;
+  auto_degrade_after_consecutive_issues?: number;
+}
+
+export interface AutopilotSessionInfo {
+  session_id: string;
+  project_id: string;
+  from_chapter: number;
+  to_chapter: number;
+  current_chapter: number;
+  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | string;
+  policy_mode: string;
+  chapters_done: number;
+  chapters_total: number;
+  budget_tokens_total: number;
+  budget_usd_total: number;
+  pending_reviews: number;
+  consecutive_hard_issues: number;
+  last_error?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+}
+
 // SSE 事件类型
 export interface SSEStageEvent {
   event: 'stage';

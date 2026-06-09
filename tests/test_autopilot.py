@@ -236,3 +236,72 @@ class TestAutopilotAutoDegrade:
         # 无 hard issue → reset
         s.consecutive_hard_issues = 0
         assert s.consecutive_hard_issues == 0
+
+
+# ── Autopilot 自动选取最优 chapter_goal ───────────────────────────────────────
+
+class TestAutopilotAutoGoal:
+    def _wait_finish(self, client, project, sid, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = client.get(f"/v1/{project}/autopilot/{sid}").json()
+            if s["status"] not in ("running", "degraded"):
+                return s
+            time.sleep(0.05)
+        return s
+
+    @staticmethod
+    def _patch_orchestrator(monkeypatch, captured: dict):
+        """替换 generate_chapter 捕获 chapter_goal；gateway 不会被用到也一并替换，
+        避免对本机已安装的 provider SDK 产生依赖。"""
+        import novelforge.control_plane.llm.factory as factory_mod
+        from novelforge.control_plane.orchestrator import ChapterOutcome, Orchestrator
+
+        def fake_generate(self, chapter, conn, *, chapter_goal="", **kw):
+            captured[chapter] = chapter_goal
+            return ChapterOutcome(chapter=chapter, ok=True)
+
+        monkeypatch.setattr(Orchestrator, "generate_chapter", fake_generate)
+        monkeypatch.setattr(factory_mod, "build_gateway", lambda cfg, ledger=None: None)
+
+    def test_unspecified_goal_assembled_from_plans(self, client, project, monkeypatch):
+        """未传 chapter_goals 的章应自动按章节卡等规划数据拼装目标。"""
+        conn = _open_conn(client, project)
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, title, goal)"
+            " VALUES('cc1', 1, '开篇', '主角觉醒金手指')",
+        )
+        conn.commit()
+        conn.close()
+
+        captured: dict[int, str] = {}
+        self._patch_orchestrator(monkeypatch, captured)
+
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 1, "mode": "auto_promote",
+        })
+        assert r.status_code == 202
+        s = self._wait_finish(client, project, r.json()["session_id"])
+        assert s["status"] == "completed"
+        assert "主角觉醒金手指" in captured.get(1, "")
+
+    def test_explicit_goal_wins(self, client, project, monkeypatch):
+        """显式 chapter_goals 优先于自动拼装。"""
+        conn = _open_conn(client, project)
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, goal) VALUES('cc1', 1, '规划目标')",
+        )
+        conn.commit()
+        conn.close()
+
+        captured: dict[int, str] = {}
+        self._patch_orchestrator(monkeypatch, captured)
+
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 1, "mode": "auto_promote",
+            "chapter_goals": {"1": "手写目标"},
+        })
+        assert r.status_code == 202
+        s = self._wait_finish(client, project, r.json()["session_id"])
+        assert s["status"] == "completed"
+        assert captured.get(1) == "手写目标"
