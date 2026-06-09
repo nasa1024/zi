@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NovelForge · 让冷引擎，写出滚烫的故事</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=ZCOOL+QingKe+HuangYou&family=Noto+Sans+SC:wght@400;500;700;900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   NovelForge — Neo-Brutalist Dopamine
+   冷引擎 / 热故事：用最高的视觉温度包裹最冷的技术内核
+   ============================================================ */
+
+:root{
+  --cream:    #FBF1E3;   /* 暖纸基底 */
+  --cream-2:  #F4E4CE;
+  --ink:      #181624;   /* 近黑（带紫调） */
+  --ink-soft: #3A3550;
+  --lime:     #C6F500;   /* 电光荧光绿 */
+  --pink:     #FF3D8B;   /* 亮粉 */
+  --blue:     #2F6BFF;   /* 电光蓝 */
+  --orange:   #FF6A2C;   /* 暖橙爆点 */
+  --mint:     #16D6B4;   /* 薄荷青 */
+  --purpleA:  #9B5CFF;   /* 仅作小面积点缀 */
+  --shadow:   6px 6px 0 var(--ink);
+  --shadow-sm:4px 4px 0 var(--ink);
+  --shadow-lg:10px 10px 0 var(--ink);
+  --bd:       3px solid var(--ink);
+  --font-disp:'Syne','ZCOOL QingKe HuangYou',sans-serif;
+  --font-cn:  'ZCOOL QingKe HuangYou','Syne',sans-serif;
+  --font-body:'Noto Sans SC','Syne',sans-serif;
+  --font-mono:'DM Mono','Noto Sans SC',monospace;
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--font-body);
+  background:var(--cream);
+  color:var(--ink);
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+  line-height:1.6;
+}
+
+/* 颗粒噪点叠层 */
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;opacity:.05;mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+::selection{background:var(--lime);color:var(--ink)}
+
+a{color:inherit;text-decoration:none}
+
+/* 通用排版 */
+.eyebrow{
+  font-family:var(--font-mono);font-size:.72rem;letter-spacing:.28em;text-transform:uppercase;
+  display:inline-flex;align-items:center;gap:.5em;
+}
+.eyebrow::before{content:'';width:22px;height:3px;background:var(--ink);display:inline-block}
+
+h1,h2,h3{font-family:var(--font-disp);font-weight:800;line-height:.98;letter-spacing:-.01em}
+.cn{font-family:var(--font-cn);font-weight:400;letter-spacing:.01em}
+
+.wrap{max-width:1240px;margin:0 auto;padding:0 28px}
+
+/* 胶囊按钮 */
+.btn{
+  display:inline-flex;align-items:center;gap:.6em;
+  font-family:var(--font-cn);font-size:1.05rem;
+  padding:.85em 1.6em;border:var(--bd);border-radius:999px;
+  background:var(--lime);color:var(--ink);cursor:pointer;
+  box-shadow:var(--shadow-sm);transition:transform .12s,box-shadow .12s;
+  white-space:nowrap;
+}
+.btn:hover{transform:translate(-2px,-2px);box-shadow:7px 7px 0 var(--ink)}
+.btn:active{transform:translate(2px,2px);box-shadow:2px 2px 0 var(--ink)}
+.btn.pink{background:var(--pink);color:var(--cream)}
+.btn.blue{background:var(--blue);color:var(--cream)}
+.btn.ghost{background:transparent}
+
+/* ============================== NAV ============================== */
+.nav{
+  position:sticky;top:0;z-index:1000;
+  background:var(--cream);border-bottom:var(--bd);
+}
+.nav-in{display:flex;align-items:center;justify-content:space-between;height:72px}
+.brand{display:flex;align-items:center;gap:.6em;font-family:var(--font-disp);font-weight:800;font-size:1.4rem}
+.brand .spark{
+  width:34px;height:34px;background:var(--pink);border:var(--bd);border-radius:10px;
+  display:grid;place-items:center;transform:rotate(-6deg);box-shadow:3px 3px 0 var(--ink);
+}
+.nav-links{display:flex;gap:2rem;align-items:center}
+.nav-links a{font-family:var(--font-mono);font-size:.82rem;letter-spacing:.05em;position:relative}
+.nav-links a::after{content:'';position:absolute;left:0;bottom:-6px;width:0;height:3px;background:var(--lime);transition:width .2s}
+.nav-links a:hover::after{width:100%}
+.nav-cta{padding:.55em 1.2em;font-size:.95rem}
+.burger{display:none;font-size:1.6rem;background:none;border:none;cursor:pointer}
+
+/* ============================== HERO ============================== */
+.hero{position:relative;padding:84px 0 70px;overflow:hidden}
+.hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:48px;align-items:center}
+
+.hero-tag{
+  display:inline-flex;align-items:center;gap:.6em;
+  font-family:var(--font-mono);font-size:.74rem;letter-spacing:.18em;
+  background:var(--ink);color:var(--cream);padding:.5em 1em;border-radius:999px;margin-bottom:26px;
+}
+.hero-tag .dot{width:9px;height:9px;border-radius:50%;background:var(--lime);animation:blink 1.4s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+
+.hero h1{font-size:clamp(2.7rem,6.4vw,5rem)}
+.hero h1 .cn{display:block;font-size:.92em}
+.hi-lime{color:var(--ink);background:var(--lime);padding:0 .12em;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.hi-pink{color:var(--pink)}
+.hi-blue{color:var(--blue)}
+.hi-underline{position:relative;white-space:nowrap}
+.hi-underline svg{position:absolute;left:0;bottom:-.18em;width:100%;height:.32em}
+
+.hero-sub{font-size:1.12rem;color:var(--ink-soft);max-width:30em;margin:28px 0 34px;line-height:1.7}
+.hero-cta{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.hero-foot{display:flex;gap:26px;margin-top:34px;flex-wrap:wrap}
+.hero-foot .stat b{font-family:var(--font-disp);font-size:1.6rem;display:block;line-height:1}
+.hero-foot .stat span{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;color:var(--ink-soft)}
+
+/* hero 插画舞台 */
+.stage{position:relative;height:480px}
+.stage-bg{
+  position:absolute;inset:0;background:var(--blue);border:var(--bd);border-radius:36px;
+  box-shadow:var(--shadow-lg);overflow:hidden;
+}
+.stage-bg::before{
+  content:'';position:absolute;inset:0;
+  background-image:radial-gradient(circle at 20% 30%,rgba(255,255,255,.12) 0 2px,transparent 2px),
+                   radial-gradient(circle at 70% 80%,rgba(255,255,255,.1) 0 2px,transparent 2px);
+  background-size:46px 46px;
+}
+.hero-char{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:62%;z-index:2}
+
+/* 漂浮设定卡 */
+.float-card{
+  position:absolute;background:var(--cream);border:var(--bd);border-radius:16px;
+  padding:.6em .9em;box-shadow:var(--shadow-sm);font-family:var(--font-mono);
+  font-size:.74rem;display:flex;align-items:center;gap:.5em;z-index:5;
+  animation:floaty 5s ease-in-out infinite;
+}
+.float-card .ic{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;flex-shrink:0}
+.fc1{top:8%;left:-6%;animation-delay:0s}
+.fc2{top:34%;right:-9%;animation-delay:.8s}
+.fc3{bottom:14%;left:-9%;animation-delay:1.6s}
+.fc4{bottom:-4%;right:6%;animation-delay:2.2s}
+@keyframes floaty{0%,100%{transform:translateY(0) rotate(var(--r,0deg))}50%{transform:translateY(-14px) rotate(var(--r,0deg))}}
+
+.blob{position:absolute;border-radius:50%;filter:blur(2px);opacity:.9;z-index:0}
+
+/* 漂浮装饰小图形 */
+.deco{position:absolute;z-index:1;animation:spin 14s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.deco.slow{animation-duration:22s}
+
+/* ============================== MARQUEE ============================== */
+.marquee{
+  background:var(--ink);color:var(--cream);border-top:var(--bd);border-bottom:var(--bd);
+  overflow:hidden;padding:16px 0;transform:rotate(-1.4deg) scale(1.04);margin:46px 0;
+}
+.marquee-track{display:flex;gap:0;white-space:nowrap;animation:scroll 26s linear infinite;width:max-content}
+.marquee:hover .marquee-track{animation-play-state:paused}
+.marquee span{font-family:var(--font-disp);font-weight:800;font-size:1.5rem;padding:0 1.4rem;display:inline-flex;align-items:center;gap:1.4rem}
+.marquee .star{color:var(--lime);font-size:1.1rem}
+@keyframes scroll{to{transform:translateX(-50%)}}
+
+/* ============================== SECTION 通用 ============================== */
+.section{padding:96px 0;position:relative}
+.sec-head{max-width:46rem;margin-bottom:54px}
+.sec-head h2{font-size:clamp(2rem,4.6vw,3.4rem);margin:18px 0 16px}
+.sec-head p{font-size:1.08rem;color:var(--ink-soft)}
+
+/* reveal 动画 */
+.reveal{opacity:0;transform:translateY(34px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1;transform:none}
+
+/* ============================== SAGA 滚动叙事 ============================== */
+.saga{background:var(--cream-2);border-top:var(--bd);border-bottom:var(--bd)}
+.saga-track{height:340vh;position:relative}
+.saga-sticky{position:sticky;top:0;height:100vh;display:flex;align-items:center;overflow:hidden}
+.saga-inner{width:100%;max-width:1240px;margin:0 auto;padding:0 28px;display:grid;grid-template-columns:.9fr 1.1fr;gap:40px;align-items:center}
+
+.saga-progress{position:absolute;left:28px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:14px;z-index:10}
+.saga-progress .node{width:14px;height:14px;border:var(--bd);border-radius:50%;background:var(--cream);transition:.3s}
+.saga-progress .node.on{background:var(--pink);transform:scale(1.35)}
+
+.saga-text{position:relative;min-height:300px}
+.saga-scene-txt{position:absolute;inset:0;opacity:0;transform:translateY(20px);transition:opacity .5s,transform .5s;pointer-events:none}
+.saga-scene-txt.on{opacity:1;transform:none;pointer-events:auto}
+.saga-act{font-family:var(--font-mono);font-size:.78rem;letter-spacing:.2em;display:inline-block;padding:.4em .9em;border:var(--bd);border-radius:999px;margin-bottom:20px}
+.saga-act.a0{background:var(--orange);color:var(--cream)}
+.saga-act.a1{background:var(--blue);color:var(--cream)}
+.saga-act.a2{background:var(--lime)}
+.saga-scene-txt h3{font-size:clamp(1.9rem,3.6vw,2.9rem);margin-bottom:18px;line-height:1.05}
+.saga-scene-txt p{font-size:1.1rem;color:var(--ink-soft);max-width:26em;margin-bottom:16px}
+.saga-scene-txt .micro{font-family:var(--font-mono);font-size:.82rem;background:var(--cream);border:var(--bd);border-radius:12px;padding:.8em 1em;box-shadow:var(--shadow-sm);display:inline-block;color:var(--ink)}
+
+.saga-vis{position:relative;height:62vh;min-height:420px}
+.saga-scene-vis{position:absolute;inset:0;display:grid;place-items:center;opacity:0;transform:scale(.92) rotate(-2deg);transition:opacity .6s,transform .6s}
+.saga-scene-vis.on{opacity:1;transform:none}
+.saga-scene-vis svg{width:100%;height:100%;max-height:62vh}
+
+/* ============================== PILLARS ============================== */
+.pillars-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:26px}
+.pillar{
+  border:var(--bd);border-radius:28px;padding:34px 30px;box-shadow:var(--shadow);
+  position:relative;overflow:hidden;transition:transform .15s,box-shadow .15s;
+  min-height:340px;display:flex;flex-direction:column;
+}
+.pillar:hover{transform:translate(-3px,-3px);box-shadow:var(--shadow-lg)}
+.pillar.p1{background:var(--lime)}
+.pillar.p2{background:var(--pink);color:var(--cream)}
+.pillar.p3{background:var(--blue);color:var(--cream)}
+.pillar .num{font-family:var(--font-disp);font-size:3.4rem;font-weight:800;opacity:.25;position:absolute;top:14px;right:22px}
+.pillar .picon{width:74px;height:74px;margin-bottom:22px}
+.pillar h3{font-size:1.7rem;margin-bottom:12px}
+.pillar p{font-size:.98rem;opacity:.92;margin-bottom:18px}
+.pillar .tags{margin-top:auto;display:flex;flex-wrap:wrap;gap:8px}
+.pillar .tags span{font-family:var(--font-mono);font-size:.68rem;border:2px solid currentColor;border-radius:999px;padding:.3em .8em}
+
+/* ============================== PIPELINE ============================== */
+.pipeline{background:var(--ink);color:var(--cream);border-top:var(--bd);border-bottom:var(--bd)}
+.pipeline .sec-head h2{color:var(--cream)}
+.pipeline .sec-head p{color:#b8b2cf}
+.pipeline .eyebrow{color:var(--lime)}
+.pipeline .eyebrow::before{background:var(--lime)}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;justify-content:center}
+.step{
+  flex:1;min-width:170px;background:var(--cream);color:var(--ink);border:var(--bd);border-radius:22px;
+  padding:24px 20px;position:relative;box-shadow:4px 4px 0 var(--lime);margin:10px;
+  transition:transform .15s;
+}
+.step:hover{transform:translateY(-6px)}
+.step .sn{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.15em;color:var(--pink)}
+.step h4{font-family:var(--font-disp);font-size:1.5rem;margin:6px 0 8px}
+.step .zh{font-family:var(--font-cn);font-size:1rem;color:var(--ink-soft);margin-bottom:10px}
+.step p{font-size:.84rem;color:var(--ink-soft);line-height:1.5}
+.step .arrow{position:absolute;right:-26px;top:50%;transform:translateY(-50%);font-size:1.6rem;color:var(--lime);z-index:5}
+.step:last-child .arrow{display:none}
+.gate-note{text-align:center;margin-top:34px;font-family:var(--font-mono);font-size:.86rem;color:#b8b2cf}
+.gate-note b{color:var(--lime)}
+
+/* ============================== MODES 双模式 ============================== */
+.modes-grid{display:grid;grid-template-columns:.85fr 1.15fr;gap:46px;align-items:center}
+.switch-wrap{text-align:center}
+.switch{
+  display:inline-flex;border:var(--bd);border-radius:999px;background:var(--cream);
+  box-shadow:var(--shadow);overflow:hidden;margin-bottom:30px;
+}
+.switch button{
+  font-family:var(--font-cn);font-size:1.05rem;padding:.8em 1.8em;border:none;background:transparent;
+  cursor:pointer;color:var(--ink);transition:.2s;position:relative;z-index:2;
+}
+.switch button.act{background:var(--ink);color:var(--cream)}
+.mode-panel{border:var(--bd);border-radius:26px;padding:34px;background:var(--cream);box-shadow:var(--shadow)}
+.mode-panel h3{font-family:var(--font-cn);font-weight:400;font-size:1.8rem;margin-bottom:8px}
+.mode-panel .tagline{font-family:var(--font-mono);font-size:.8rem;color:var(--pink);margin-bottom:22px;letter-spacing:.05em}
+.mode-line{display:flex;align-items:center;gap:14px;padding:13px 0;border-top:2px dashed var(--cream-2)}
+.mode-line:first-of-type{border-top:none}
+.mode-line .badge{font-family:var(--font-mono);font-size:.66rem;padding:.35em .7em;border-radius:999px;border:var(--bd);flex-shrink:0;width:74px;text-align:center}
+.badge.auto{background:var(--lime)}
+.badge.gate{background:var(--orange);color:var(--cream)}
+.badge.same{background:var(--cream-2)}
+.mode-line span{font-size:.95rem}
+
+/* ============================== GENRES 胶囊墙 ============================== */
+.genres{background:var(--lime);border-top:var(--bd);border-bottom:var(--bd)}
+.genres .eyebrow::before{background:var(--ink)}
+.pill-wall{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;margin-top:20px}
+.pill{
+  font-family:var(--font-cn);font-size:1.15rem;
+  background:var(--cream);border:var(--bd);border-radius:999px;
+  padding:.6em 1.4em;box-shadow:var(--shadow-sm);
+  display:inline-flex;align-items:center;gap:.5em;
+  transition:transform .14s,box-shadow .14s;cursor:default;
+}
+.pill:hover{transform:translateY(-4px) rotate(-2deg);box-shadow:6px 8px 0 var(--ink)}
+.pill .emo{font-size:1.2em}
+.pill.c1{background:var(--pink);color:var(--cream)}
+.pill.c2{background:var(--blue);color:var(--cream)}
+.pill.c3{background:var(--orange);color:var(--cream)}
+.pill.c4{background:var(--mint)}
+.pill.c5{background:var(--cream)}
+.pill.c6{background:var(--purpleA);color:var(--cream)}
+.pill.big{font-size:1.4rem;padding:.7em 1.7em}
+
+/* tech 行 */
+.tech-row{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:42px}
+.tech-pill{font-family:var(--font-mono);font-size:.78rem;letter-spacing:.04em;background:var(--ink);color:var(--cream);border-radius:999px;padding:.55em 1.1em;display:inline-flex;gap:.5em;align-items:center}
+.tech-pill .gd{width:8px;height:8px;border-radius:50%;background:var(--lime)}
+
+/* ============================== STATS ============================== */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:var(--bd);border-radius:28px;overflow:hidden;box-shadow:var(--shadow-lg)}
+.stat-cell{padding:40px 26px;text-align:center;border-right:var(--bd)}
+.stat-cell:last-child{border-right:none}
+.stat-cell:nth-child(1){background:var(--cream)}
+.stat-cell:nth-child(2){background:var(--lime)}
+.stat-cell:nth-child(3){background:var(--pink);color:var(--cream)}
+.stat-cell:nth-child(4){background:var(--blue);color:var(--cream)}
+.stat-cell b{font-family:var(--font-disp);font-weight:800;font-size:clamp(2.4rem,5vw,3.6rem);display:block;line-height:1}
+.stat-cell span{font-family:var(--font-mono);font-size:.74rem;letter-spacing:.08em;margin-top:10px;display:block;opacity:.85}
+
+/* ============================== CTA ============================== */
+.cta{padding:110px 0}
+.cta-box{
+  background:var(--pink);border:var(--bd);border-radius:40px;box-shadow:var(--shadow-lg);
+  padding:70px 50px;text-align:center;position:relative;overflow:hidden;color:var(--cream);
+}
+.cta-box h2{font-size:clamp(2.2rem,5.4vw,4rem);margin-bottom:20px}
+.cta-box .cn{color:var(--lime)}
+.cta-box p{font-size:1.1rem;max-width:34em;margin:0 auto 34px;opacity:.95}
+.cta-box .hero-cta{justify-content:center}
+.cta-deco{position:absolute;opacity:.9}
+
+/* ============================== FOOTER ============================== */
+.foot{background:var(--ink);color:var(--cream);padding:60px 0 34px;border-top:var(--bd)}
+.foot-top{display:flex;justify-content:space-between;flex-wrap:wrap;gap:40px;margin-bottom:44px}
+.foot-brand{max-width:24em}
+.foot-brand .brand{color:var(--cream);margin-bottom:16px}
+.foot-brand p{color:#b8b2cf;font-size:.92rem}
+.foot-cols{display:flex;gap:60px;flex-wrap:wrap}
+.foot-col h5{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.15em;color:var(--lime);margin-bottom:16px}
+.foot-col a{display:block;color:#cbc6dd;font-size:.9rem;margin-bottom:10px;transition:.15s}
+.foot-col a:hover{color:var(--lime);transform:translateX(4px)}
+.foot-bottom{border-top:1px solid #322d48;padding-top:24px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;font-family:var(--font-mono);font-size:.74rem;color:#7a7494}
+
+/* ============================== RESPONSIVE ============================== */
+@media(max-width:980px){
+  .hero-grid,.modes-grid{grid-template-columns:1fr;gap:40px}
+  .stage{height:400px;order:-1}
+  .saga-inner{grid-template-columns:1fr;gap:24px}
+  .saga-vis{height:42vh;min-height:300px;order:-1}
+  .saga-progress{flex-direction:row;left:50%;top:auto;bottom:20px;transform:translateX(-50%)}
+  .pillars-grid{grid-template-columns:1fr}
+  .stats-grid{grid-template-columns:repeat(2,1fr)}
+  .stat-cell:nth-child(2){border-right:none}
+  .stat-cell:nth-child(1),.stat-cell:nth-child(2){border-bottom:var(--bd)}
+  .nav-links{display:none}
+  .burger{display:block}
+}
+@media(max-width:560px){
+  .wrap{padding:0 18px}
+  .hero-foot{gap:18px}
+  .stats-grid{grid-template-columns:1fr}
+  .stat-cell{border-right:none!important;border-bottom:var(--bd)}
+  .stat-cell:last-child{border-bottom:none}
+  .cta-box{padding:48px 24px}
+}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  .reveal{opacity:1;transform:none}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================== NAV ============================== -->
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a href="#top" class="brand">
+      <span class="spark">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2z" fill="#FBF1E3" stroke="#181624" stroke-width="1.5" stroke-linejoin="round"/></svg>
+      </span>
+      NovelForge
+    </a>
+    <div class="nav-links">
+      <a href="#saga">情绪滑梯</a>
+      <a href="#pillars">三大支柱</a>
+      <a href="#pipeline">写作流水线</a>
+      <a href="#genres">题材覆盖</a>
+      <a href="#docs">文档</a>
+    </div>
+    <a href="#cta" class="btn nav-cta pink">开始创作 →</a>
+    <button class="burger" aria-label="menu">☰</button>
+  </div>
+</nav>
+
+<main id="top">
+
+<!-- ============================== HERO ============================== -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <div class="hero-tag"><span class="dot"></span> AI 网文写作引擎 · MVP v0.3</div>
+      <h1>
+        <span>让<span class="hi-blue">冷</span>引擎，</span>
+        <span class="cn">写出<span class="hi-underline">滚烫的故事
+          <svg viewBox="0 0 200 12" preserveAspectRatio="none"><path d="M2 8 Q50 2 100 7 T198 5" stroke="#FF3D8B" stroke-width="5" fill="none" stroke-linecap="round"/></svg>
+        </span></span>
+      </h1>
+      <p class="hero-sub">
+        SQLite 账本、确定性 validator、as-of 投影 —— 听起来很硬核？
+        它们只为一件事服务：让你的主角<b>境界不倒退</b>、伏笔<b>必回收</b>、世界观<b>永不崩塌</b>，
+        同时把每一章都写出<b>追更的爽感</b>。
+      </p>
+      <div class="hero-cta">
+        <a href="#cta" class="btn">⚡ 立即开写</a>
+        <a href="#saga" class="btn ghost">看它怎么救场 ↓</a>
+      </div>
+      <div class="hero-foot">
+        <div class="stat"><b>262</b><span>测试全绿</span></div>
+        <div class="stat"><b>0</b><span>外网依赖建库</span></div>
+        <div class="stat"><b>2</b><span>模式一键切换</span></div>
+        <div class="stat"><b>∞</b><span>章节不崩</span></div>
+      </div>
+    </div>
+
+    <!-- 插画舞台 -->
+    <div class="stage reveal">
+      <div class="stage-bg">
+        <span class="blob" style="width:160px;height:160px;background:var(--pink);top:-40px;right:-30px"></span>
+        <span class="blob" style="width:120px;height:120px;background:var(--lime);bottom:-30px;left:-20px"></span>
+        <svg class="deco slow" style="top:18px;left:24px;width:40px;height:40px" viewBox="0 0 40 40"><path d="M20 2l4 12 12 4-12 4-4 12-4-12-12-4 12-4z" fill="#C6F500" stroke="#181624" stroke-width="2"/></svg>
+        <svg class="deco" style="bottom:22px;right:30px;width:34px;height:34px" viewBox="0 0 34 34"><circle cx="17" cy="17" r="14" fill="#FF6A2C" stroke="#181624" stroke-width="2.5"/></svg>
+      </div>
+
+      <!-- 中央创作小人：拿魔法笔的角色 -->
+      <svg class="hero-char" viewBox="0 0 300 320" fill="none">
+        <!-- 书桌底座 -->
+        <rect x="40" y="250" width="220" height="44" rx="12" fill="#181624"/>
+        <rect x="40" y="244" width="220" height="14" rx="7" fill="#FBF1E3" stroke="#181624" stroke-width="3"/>
+        <!-- 身体 -->
+        <path d="M110 250 Q108 180 150 178 Q192 180 190 250 Z" fill="#FF3D8B" stroke="#181624" stroke-width="4"/>
+        <!-- 围巾/领 -->
+        <path d="M126 190 Q150 206 174 190 L168 210 Q150 220 132 210 Z" fill="#C6F500" stroke="#181624" stroke-width="3"/>
+        <!-- 头 -->
+        <circle cx="150" cy="146" r="40" fill="#F1C27D" stroke="#181624" stroke-width="4"/>
+        <!-- 头发 -->
+        <path d="M110 142 Q108 100 150 100 Q192 100 190 142 Q180 120 150 122 Q120 120 110 142Z" fill="#181624"/>
+        <!-- 眼睛 -->
+        <circle cx="137" cy="148" r="4.5" fill="#181624"/>
+        <circle cx="165" cy="148" r="4.5" fill="#181624"/>
+        <!-- 腮红 -->
+        <circle cx="128" cy="160" r="6" fill="#FF6A2C" opacity=".5"/>
+        <circle cx="172" cy="160" r="6" fill="#FF6A2C" opacity=".5"/>
+        <!-- 微笑 -->
+        <path d="M140 164 Q150 174 160 164" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+        <!-- 手臂 + 魔法笔 -->
+        <path d="M186 212 Q224 200 236 168" stroke="#181624" stroke-width="14" stroke-linecap="round"/>
+        <path d="M186 212 Q224 200 236 168" stroke="#F1C27D" stroke-width="8" stroke-linecap="round"/>
+        <rect x="228" y="150" width="10" height="34" rx="5" transform="rotate(28 233 167)" fill="#2F6BFF" stroke="#181624" stroke-width="3"/>
+        <!-- 笔尖星光 -->
+        <path d="M246 150l3 8 8 3-8 3-3 8-3-8-8-3 8-3z" fill="#C6F500" stroke="#181624" stroke-width="1.6"/>
+        <!-- 左手扶书 -->
+        <path d="M114 212 Q90 214 84 244" stroke="#181624" stroke-width="14" stroke-linecap="round"/>
+        <path d="M114 212 Q90 214 84 244" stroke="#F1C27D" stroke-width="8" stroke-linecap="round"/>
+        <!-- 桌上发光的书 -->
+        <rect x="70" y="232" width="64" height="20" rx="4" fill="#16D6B4" stroke="#181624" stroke-width="3.5"/>
+        <line x1="102" y1="232" x2="102" y2="252" stroke="#181624" stroke-width="2.5"/>
+      </svg>
+
+      <!-- 漂浮设定卡 -->
+      <div class="float-card fc1" style="--r:-5deg"><span class="ic" style="background:var(--pink)">⚔️</span> 境界 · 炼气→筑基</div>
+      <div class="float-card fc2" style="--r:4deg"><span class="ic" style="background:var(--lime)">✓</span> 一致性 PASS</div>
+      <div class="float-card fc3" style="--r:6deg"><span class="ic" style="background:var(--orange)">🧩</span> 伏笔 #07 已回收</div>
+      <div class="float-card fc4" style="--r:-4deg"><span class="ic" style="background:var(--blue);color:#fff">🔥</span> 本章爽点 ×3</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== MARQUEE ============================== -->
+<div class="marquee">
+  <div class="marquee-track">
+    <span>确定性一致性 <i class="star">✦</i> 分层记忆召回 <i class="star">✦</i> 双模式治理 <i class="star">✦</i> 追更力工艺层 <i class="star">✦</i> as-of 时点投影 <i class="star">✦</i> 伏笔必回收 <i class="star">✦</i></span>
+    <span>确定性一致性 <i class="star">✦</i> 分层记忆召回 <i class="star">✦</i> 双模式治理 <i class="star">✦</i> 追更力工艺层 <i class="star">✦</i> as-of 时点投影 <i class="star">✦</i> 伏笔必回收 <i class="star">✦</i></span>
+  </div>
+</div>
+
+<!-- ============================== SAGA 情绪滑梯 ============================== -->
+<section class="saga" id="saga">
+  <div class="saga-track">
+    <div class="saga-sticky">
+      <div class="saga-progress">
+        <div class="node on" data-n="0"></div>
+        <div class="node" data-n="1"></div>
+        <div class="node" data-n="2"></div>
+      </div>
+      <div class="saga-inner">
+        <!-- 文案 -->
+        <div class="saga-text">
+          <div class="saga-scene-txt on" data-n="0">
+            <span class="saga-act a0">ACT 01 · 混乱 / CHAOS</span>
+            <h3 class="cn">设定在脑子里<br>打架。</h3>
+            <p>写到第 47 章——「等等，主角第 3 章不是炼气期吗？怎么这里成了筑基，下一章又掉回炼气？」</p>
+            <p>跨越几十万字、几百个设定，人脑根本记不住。前后矛盾、人设崩塌、世界观漏洞，是连载写作最致命的「混乱」。</p>
+            <div class="micro">❌ ch3: 炼气期 &nbsp;→&nbsp; ch47: 筑基期 &nbsp;→&nbsp; ch48: 炼气期 ??</div>
+          </div>
+          <div class="saga-scene-txt" data-n="1">
+            <span class="saga-act a1">ACT 02 · 接管 / ENGINE</span>
+            <h3 class="cn">引擎，<br>悄悄接住了。</h3>
+            <p>每一条设定都进入只追加的 <b>canon 账本</b>。World State Store 用确定性 validator 做 as-of 投影——写第 48 章时，系统精确知道「此刻主角应是筑基」。</p>
+            <p>矛盾在落笔前就被拦下，飞舞的散稿被收进秩序井然的状态表。</p>
+            <div class="micro">✓ validator.power_rank · as_of=48 · status=canon</div>
+          </div>
+          <div class="saga-scene-txt" data-n="2">
+            <span class="saga-act a2">ACT 03 · 和谐 / HARMONY</span>
+            <h3 class="cn">读者一口气，<br>追到大结局。</h3>
+            <p>前后自洽、伏笔回收、节奏带爽点。读者不再被低级错误劝退，而是沉浸在你的世界里疯狂追更。</p>
+            <p>一致性是<b>不扣分项</b>，追更力是<b>得分项</b>——NovelForge 两手都抓。</p>
+            <div class="micro">🔥 完读率 ↑ · 追更留存 ↑ · 弃书率 ↓</div>
+          </div>
+        </div>
+
+        <!-- 插画 -->
+        <div class="saga-vis">
+          <!-- 场景0：焦头烂额的作者 -->
+          <div class="saga-scene-vis on" data-n="0">
+            <svg viewBox="0 0 420 360" fill="none">
+              <!-- 散乱矛盾纸张 -->
+              <g stroke="#181624" stroke-width="3">
+                <rect x="20" y="40" width="74" height="54" rx="6" fill="#FF6A2C" transform="rotate(-14 57 67)"/>
+                <rect x="320" y="30" width="74" height="54" rx="6" fill="#FF3D8B" transform="rotate(12 357 57)"/>
+                <rect x="340" y="200" width="70" height="50" rx="6" fill="#FF6A2C" transform="rotate(-8 375 225)"/>
+                <rect x="14" y="220" width="70" height="50" rx="6" fill="#FF3D8B" transform="rotate(10 49 245)"/>
+              </g>
+              <!-- 矛盾叹号 -->
+              <g font-family="DM Mono,monospace" font-size="30" fill="#181624" font-weight="bold">
+                <text x="44" y="76" transform="rotate(-14 57 67)">!?</text>
+                <text x="344" y="66" transform="rotate(12 357 57)">×</text>
+                <text x="360" y="234" transform="rotate(-8 375 225)">!!</text>
+                <text x="32" y="254" transform="rotate(10 49 245)">??</text>
+              </g>
+              <!-- 角色：抱头 -->
+              <ellipse cx="210" cy="332" rx="120" ry="16" fill="#181624" opacity=".12"/>
+              <path d="M150 320 Q146 230 210 228 Q274 230 270 320 Z" fill="#2F6BFF" stroke="#181624" stroke-width="4"/>
+              <circle cx="210" cy="180" r="48" fill="#C68642" stroke="#181624" stroke-width="4"/>
+              <!-- 乱发 -->
+              <path d="M162 176 Q150 120 210 122 Q270 120 258 176 Q250 150 230 156 Q220 138 210 152 Q200 138 190 156 Q170 150 162 176Z" fill="#181624"/>
+              <!-- 抓头的手 -->
+              <path d="M170 150 Q150 120 168 96" stroke="#181624" stroke-width="13" stroke-linecap="round"/>
+              <path d="M170 150 Q150 120 168 96" stroke="#C68642" stroke-width="7" stroke-linecap="round"/>
+              <path d="M250 150 Q270 120 252 96" stroke="#181624" stroke-width="13" stroke-linecap="round"/>
+              <path d="M250 150 Q270 120 252 96" stroke="#C68642" stroke-width="7" stroke-linecap="round"/>
+              <!-- 苦脸 -->
+              <path d="M192 178 l12 8 M228 178 l-12 8" stroke="#181624" stroke-width="3.5" stroke-linecap="round"/>
+              <path d="M194 206 Q210 196 226 206" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+              <!-- 头顶愤怒符号 -->
+              <text x="276" y="120" font-family="DM Mono" font-size="26" fill="#FF3D8B" font-weight="bold">#@!</text>
+            </svg>
+          </div>
+          <!-- 场景1：引擎接管 -->
+          <div class="saga-scene-vis" data-n="1">
+            <svg viewBox="0 0 420 360" fill="none">
+              <!-- 收纳整齐的账本 -->
+              <g stroke="#181624" stroke-width="3.5">
+                <rect x="250" y="70" width="140" height="210" rx="14" fill="#FBF1E3"/>
+                <line x1="250" y1="110" x2="390" y2="110"/>
+                <rect x="266" y="124" width="108" height="16" rx="4" fill="#C6F500"/>
+                <rect x="266" y="150" width="88" height="14" rx="4" fill="#16D6B4"/>
+                <rect x="266" y="174" width="100" height="14" rx="4" fill="#2F6BFF"/>
+                <rect x="266" y="198" width="76" height="14" rx="4" fill="#FF6A2C"/>
+                <rect x="266" y="222" width="94" height="14" rx="4" fill="#C6F500"/>
+                <rect x="266" y="246" width="64" height="14" rx="4" fill="#FF3D8B"/>
+              </g>
+              <text x="262" y="100" font-family="DM Mono" font-size="13" fill="#181624">CANON LEDGER ✓</text>
+              <!-- 机器人引擎角色 -->
+              <ellipse cx="130" cy="332" rx="100" ry="14" fill="#181624" opacity=".12"/>
+              <rect x="74" y="200" width="112" height="120" rx="22" fill="#C6F500" stroke="#181624" stroke-width="4"/>
+              <!-- 头 -->
+              <rect x="86" y="120" width="88" height="80" rx="20" fill="#FBF1E3" stroke="#181624" stroke-width="4"/>
+              <!-- 天线 -->
+              <line x1="130" y1="120" x2="130" y2="98" stroke="#181624" stroke-width="4"/>
+              <circle cx="130" cy="92" r="9" fill="#FF3D8B" stroke="#181624" stroke-width="3"/>
+              <!-- 眼睛（笑眼） -->
+              <path d="M104 156 Q112 148 120 156" stroke="#181624" stroke-width="4" stroke-linecap="round" fill="none"/>
+              <path d="M140 156 Q148 148 156 156" stroke="#181624" stroke-width="4" stroke-linecap="round" fill="none"/>
+              <path d="M118 174 Q130 182 142 174" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+              <circle cx="100" cy="170" r="5" fill="#FF6A2C" opacity=".5"/>
+              <circle cx="160" cy="170" r="5" fill="#FF6A2C" opacity=".5"/>
+              <!-- 伸手把纸递进账本 -->
+              <path d="M186 230 Q230 220 248 188" stroke="#181624" stroke-width="13" stroke-linecap="round"/>
+              <rect x="206" y="186" width="40" height="30" rx="5" fill="#FF3D8B" stroke="#181624" stroke-width="3" transform="rotate(-12 226 201)"/>
+              <path d="M214 200 l6 6 12 -14" stroke="#FBF1E3" stroke-width="3" fill="none" stroke-linecap="round" transform="rotate(-12 226 201)"/>
+              <!-- 校验对勾粒子 -->
+              <g stroke="#16D6B4" stroke-width="3" stroke-linecap="round">
+                <path d="M198 120 l5 5 9 -11"/>
+                <path d="M222 96 l5 5 9 -11"/>
+              </g>
+            </svg>
+          </div>
+          <!-- 场景2：读者追更 -->
+          <div class="saga-scene-vis" data-n="2">
+            <svg viewBox="0 0 420 360" fill="none">
+              <ellipse cx="210" cy="334" rx="170" ry="16" fill="#181624" opacity=".1"/>
+              <!-- 读者1 -->
+              <g>
+                <path d="M70 322 Q66 256 116 256 Q166 256 162 322 Z" fill="#FF3D8B" stroke="#181624" stroke-width="4"/>
+                <circle cx="116" cy="214" r="36" fill="#F1C27D" stroke="#181624" stroke-width="4"/>
+                <path d="M82 212 Q78 174 116 174 Q154 174 150 212 Q140 192 116 196 Q92 192 82 212Z" fill="#181624"/>
+                <path d="M104 214 Q110 208 116 214 M116 214 Q122 208 128 214" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+                <path d="M104 226 Q116 236 128 226" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+                <circle cx="98" cy="224" r="5" fill="#FF6A2C" opacity=".5"/>
+                <circle cx="134" cy="224" r="5" fill="#FF6A2C" opacity=".5"/>
+                <!-- 手机 -->
+                <rect x="150" y="268" width="40" height="60" rx="8" fill="#181624" transform="rotate(-14 170 298)"/>
+                <rect x="156" y="274" width="28" height="48" rx="4" fill="#C6F500" transform="rotate(-14 170 298)"/>
+              </g>
+              <!-- 读者2（戴眼镜，肤色不同） -->
+              <g>
+                <path d="M250 322 Q246 256 300 256 Q354 256 350 322 Z" fill="#2F6BFF" stroke="#181624" stroke-width="4"/>
+                <circle cx="300" cy="210" r="38" fill="#8D5524" stroke="#181624" stroke-width="4"/>
+                <path d="M262 208 Q258 166 300 166 Q342 166 338 208 Q344 182 300 180 Q256 182 262 208Z" fill="#181624"/>
+                <!-- 眼镜 -->
+                <circle cx="288" cy="210" r="9" fill="none" stroke="#181624" stroke-width="3"/>
+                <circle cx="314" cy="210" r="9" fill="none" stroke="#181624" stroke-width="3"/>
+                <line x1="297" y1="210" x2="305" y2="210" stroke="#181624" stroke-width="3"/>
+                <path d="M286 226 Q300 238 314 226" stroke="#181624" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+                <rect x="232" y="266" width="40" height="58" rx="8" fill="#181624" transform="rotate(12 252 295)"/>
+                <rect x="238" y="272" width="28" height="46" rx="4" fill="#FF6A2C" transform="rotate(12 252 295)"/>
+              </g>
+              <!-- 漂浮爱心 / 火 -->
+              <g>
+                <path d="M196 90 q-14 -18 -28 -4 q-14 14 28 40 q42 -26 28 -40 q-14 -14 -28 4z" fill="#FF3D8B" stroke="#181624" stroke-width="3"/>
+                <text x="120" y="120" font-size="30">🔥</text>
+                <text x="276" y="110" font-size="26">✨</text>
+                <path d="M236 150l4 11 11 4-11 4-4 11-4-11-11-4 11-4z" fill="#C6F500" stroke="#181624" stroke-width="2"/>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== PILLARS ============================== -->
+<section class="section" id="pillars">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">THREE PILLARS</span>
+      <h2 class="cn">三大支柱，<br>缺一不可。</h2>
+      <p>记忆让它「记得住」，一致性让它「不出错」，工艺让它「更好看」。三者正交，各司其职。</p>
+    </div>
+    <div class="pillars-grid">
+      <div class="pillar p1 reveal">
+        <span class="num">01</span>
+        <svg class="picon" viewBox="0 0 64 64" fill="none">
+          <rect x="10" y="14" width="44" height="38" rx="8" fill="#FBF1E3" stroke="#181624" stroke-width="4"/>
+          <line x1="10" y1="26" x2="54" y2="26" stroke="#181624" stroke-width="3"/>
+          <rect x="18" y="34" width="20" height="5" rx="2.5" fill="#FF3D8B"/>
+          <rect x="18" y="42" width="28" height="5" rx="2.5" fill="#2F6BFF"/>
+          <circle cx="48" cy="14" r="9" fill="#FF6A2C" stroke="#181624" stroke-width="3"/>
+        </svg>
+        <h3 class="cn">记忆</h3>
+        <p>分层记忆 + 实体优先召回。软记忆走 RAG，硬状态进关系表。要用什么设定，它先帮你捞回来。</p>
+        <div class="tags"><span>实体召回</span><span>FTS5 检索</span><span>World Bible</span></div>
+      </div>
+      <div class="pillar p2 reveal">
+        <span class="num">02</span>
+        <svg class="picon" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="24" fill="#FBF1E3" stroke="#181624" stroke-width="4"/>
+          <path d="M22 32 l7 8 14 -17" stroke="#16D6B4" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="32" cy="32" r="30" stroke="#181624" stroke-width="2" stroke-dasharray="4 5" fill="none"/>
+        </svg>
+        <h3 class="cn">一致性</h3>
+        <p>World State + 确定性 Python validator + as-of 投影。硬冲突落笔前拦截，软冲突 LLM 二次判断。</p>
+        <div class="tags"><span>canon 账本</span><span>as-of 投影</span><span>确定性校验</span></div>
+      </div>
+      <div class="pillar p3 reveal">
+        <span class="num">03</span>
+        <svg class="picon" viewBox="0 0 64 64" fill="none">
+          <path d="M32 6l7 18 19 1-15 12 5 19-16-11-16 11 5-19-15-12 19-1z" fill="#C6F500" stroke="#181624" stroke-width="4" stroke-linejoin="round"/>
+        </svg>
+        <h3 class="cn">工艺</h3>
+        <p>爽点、钩子、节奏、value_shift。一致性是不扣分项，追更力才是得分项——这一层专管「好看」。</p>
+        <div class="tags"><span>爽点节奏</span><span>章末钩子</span><span>价值轴</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== PIPELINE ============================== -->
+<section class="section pipeline" id="pipeline">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">THE PIPELINE</span>
+      <h2>一条流水线，<span class="hi-pink">五道工序</span></h2>
+      <p>从规划到入库，每一章都跑同一条确定性管线。唯一的「晋升闸门」决定双模式如何分叉。</p>
+    </div>
+    <div class="flow">
+      <div class="step reveal"><div class="sn">STAGE 01</div><h4>plan</h4><div class="zh cn">规划</div><p>定本章目标、beats、价值轴与钩子。</p><span class="arrow">→</span></div>
+      <div class="step reveal"><div class="sn">STAGE 02</div><h4>recall</h4><div class="zh cn">召回</div><p>实体优先捞回相关 canon 与历史片段。</p><span class="arrow">→</span></div>
+      <div class="step reveal"><div class="sn">STAGE 03</div><h4>draft</h4><div class="zh cn">起草</div><p>as-of 注入约束，LLM 写出正文初稿。</p><span class="arrow">→</span></div>
+      <div class="step reveal"><div class="sn">STAGE 04</div><h4>check</h4><div class="zh cn">校验</div><p>确定性 validator + 工艺检查双重过滤。</p><span class="arrow">→</span></div>
+      <div class="step reveal"><div class="sn">STAGE 05</div><h4>gate</h4><div class="zh cn">闸门</div><p>晋升 canon 或入审核队列——双模式在此分叉。</p></div>
+    </div>
+    <p class="gate-note reveal">⚙️ 崩溃也不怕：<b>L0 原子写入</b>（temp→fsync→rename）+ <b>pipeline_run 状态机</b>，下次启动自动扫描残留、回滚到一致态。</p>
+  </div>
+</section>
+
+<!-- ============================== MODES ============================== -->
+<section class="section" id="modes">
+  <div class="wrap modes-grid">
+    <div class="switch-wrap reveal">
+      <span class="eyebrow" style="margin-bottom:18px">DUAL MODE</span>
+      <h2 class="cn" style="font-size:2.6rem;margin:14px 0 26px">一行 config，<br>两种活法。</h2>
+      <div class="switch">
+        <button class="act" data-mode="gate">🧑‍⚖️ 人审模式</button>
+        <button data-mode="auto">🤖 全自动</button>
+      </div>
+      <p style="color:var(--ink-soft);max-width:24em;margin:0 auto">同一条管线、同一套 canon 账本。区别只在那道「晋升闸门」放不放行。</p>
+    </div>
+
+    <div class="mode-panel reveal">
+      <h3 id="modeTitle">human_gate · 人审模式</h3>
+      <div class="tagline" id="modeTag">每一条新设定都等你点头</div>
+      <div id="modeLines">
+        <!-- JS 注入 -->
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== GENRES 胶囊墙 ============================== -->
+<section class="section genres" id="genres">
+  <div class="wrap" style="text-align:center">
+    <div class="reveal" style="display:inline-block">
+      <span class="eyebrow">FULL-SPECTRUM</span>
+      <h2 class="cn" style="font-size:clamp(2rem,4.6vw,3.2rem);margin:16px 0 12px">一套引擎，<br>吃下全题材。</h2>
+      <p style="color:var(--ink-soft);max-width:38em;margin:0 auto 10px">玄幻修仙的境界体系、都市言情的人物关系、悬疑无限流的伏笔回收——结构化 canon 通吃。</p>
+    </div>
+    <div class="pill-wall reveal">
+      <span class="pill big c1"><span class="emo">⚔️</span> 玄幻</span>
+      <span class="pill big c5"><span class="emo">🧙</span> 修仙</span>
+      <span class="pill c2"><span class="emo">🏙️</span> 都市</span>
+      <span class="pill c4"><span class="emo">🚀</span> 科幻</span>
+      <span class="pill c5"><span class="emo">📜</span> 历史</span>
+      <span class="pill c3"><span class="emo">🗡️</span> 武侠</span>
+      <span class="pill c6"><span class="emo">💕</span> 言情</span>
+      <span class="pill c5"><span class="emo">🔍</span> 悬疑</span>
+      <span class="pill c1"><span class="emo">🎮</span> 游戏</span>
+      <span class="pill c2"><span class="emo">♾️</span> 无限流</span>
+      <span class="pill c4"><span class="emo">🐉</span> 西幻</span>
+      <span class="pill c3"><span class="emo">☄️</span> 末世</span>
+      <span class="pill c5"><span class="emo">👑</span> 宫斗</span>
+      <span class="pill c6"><span class="emo">🌌</span> 星际</span>
+    </div>
+    <div class="tech-row reveal">
+      <span class="tech-pill"><span class="gd"></span>Python 3.13</span>
+      <span class="tech-pill"><span class="gd"></span>FastAPI</span>
+      <span class="tech-pill"><span class="gd"></span>SQLite · WAL</span>
+      <span class="tech-pill"><span class="gd"></span>FTS5 + jieba</span>
+      <span class="tech-pill"><span class="gd"></span>SSE 流式</span>
+      <span class="tech-pill"><span class="gd"></span>多供应商 LLM</span>
+      <span class="tech-pill"><span class="gd"></span>SCHEMA v7</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== STATS ============================== -->
+<section class="section" style="padding-top:40px">
+  <div class="wrap">
+    <div class="stats-grid reveal">
+      <div class="stat-cell"><b data-count="262">0</b><span>测试用例全绿</span></div>
+      <div class="stat-cell"><b data-count="7">0</b><span>SCHEMA 版本</span></div>
+      <div class="stat-cell"><b data-count="5">0</b><span>核心 Skill</span></div>
+      <div class="stat-cell"><b data-count="13">0</b><span>功能组落地</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== CTA ============================== -->
+<section class="cta" id="cta">
+  <div class="wrap">
+    <div class="cta-box reveal">
+      <svg class="cta-deco" style="top:24px;left:30px;width:48px" viewBox="0 0 48 48"><path d="M24 2l6 16 16 6-16 6-6 16-6-16-16-6 16-6z" fill="#C6F500" stroke="#181624" stroke-width="3"/></svg>
+      <svg class="cta-deco" style="bottom:24px;right:34px;width:40px" viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" fill="#2F6BFF" stroke="#181624" stroke-width="3"/></svg>
+      <span class="eyebrow" style="color:var(--cream);justify-content:center">START NOW</span>
+      <h2>准备好让你的世界观<br><span class="cn">永不崩塌</span>了吗？</h2>
+      <p>本地优先、零外网即可建库与跑测。一条 uvicorn 命令，引擎就位。</p>
+      <div class="hero-cta">
+        <a href="#top" class="btn">⚡ 开始创作</a>
+        <a href="#docs" class="btn ghost" style="background:var(--ink);color:var(--cream);border-color:var(--cream)">📖 读文档</a>
+      </div>
+      <div style="margin-top:30px;display:inline-block;background:var(--ink);color:var(--lime);font-family:var(--font-mono);font-size:.82rem;padding:.8em 1.2em;border-radius:12px;box-shadow:var(--shadow-sm);border:var(--bd)">
+        $ uvicorn novelforge.app.main:app --port 8787
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============================== FOOTER ============================== -->
+<footer class="foot" id="docs">
+  <div class="wrap">
+    <div class="foot-top">
+      <div class="foot-brand">
+        <a href="#top" class="brand">
+          <span class="spark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2z" fill="#FBF1E3" stroke="#181624" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+          NovelForge
+        </a>
+        <p>面向网文 / 长篇连载的 AI 写作「记忆 + 一致性 + 工艺」引擎。本地优先，单一 SQLite，单人可维护。</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <h5>产品</h5>
+          <a href="#saga">情绪滑梯</a>
+          <a href="#pillars">三大支柱</a>
+          <a href="#pipeline">写作流水线</a>
+          <a href="#modes">双模式</a>
+        </div>
+        <div class="foot-col">
+          <h5>文档</h5>
+          <a href="#">设计文档 §00–14</a>
+          <a href="#">实现规格 impl/</a>
+          <a href="#">REST API 一览</a>
+          <a href="#">README</a>
+        </div>
+        <div class="foot-col">
+          <h5>开发</h5>
+          <a href="#">GitHub</a>
+          <a href="#">快速开始</a>
+          <a href="#">迁移指南</a>
+          <a href="#">贡献</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 NovelForge · 让冷引擎写出滚烫的故事</span>
+      <span>MVP v0.3 · 262 tests green · made with ⚡ &amp; dopamine</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* ============================================================
+   交互逻辑
+   ============================================================ */
+
+/* ---- reveal on scroll ---- */
+const io = new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+},{threshold:.16});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+/* ---- SAGA 滚动叙事 ---- */
+const saga = document.querySelector('.saga-track');
+const sceneVis = [...document.querySelectorAll('.saga-scene-vis')];
+const sceneTxt = [...document.querySelectorAll('.saga-scene-txt')];
+const nodes = [...document.querySelectorAll('.saga-progress .node')];
+let curScene = -1;
+
+function setScene(i){
+  if(i===curScene) return;
+  curScene=i;
+  sceneVis.forEach((s,n)=>s.classList.toggle('on',n===i));
+  sceneTxt.forEach((s,n)=>s.classList.toggle('on',n===i));
+  nodes.forEach((s,n)=>s.classList.toggle('on',n===i));
+}
+
+function onScroll(){
+  const rect = saga.getBoundingClientRect();
+  const vh = window.innerHeight;
+  const total = rect.height - vh;
+  // 进度：0 当顶部贴住，1 当底部离开
+  const prog = Math.min(Math.max(-rect.top/total,0),1);
+  const idx = prog>=.66 ? 2 : prog>=.33 ? 1 : 0;
+  setScene(idx);
+}
+window.addEventListener('scroll',onScroll,{passive:true});
+onScroll();
+
+/* ---- 双模式切换 ---- */
+const MODES = {
+  gate:{
+    title:'human_gate · 人审模式',
+    tag:'每一条新设定都等你点头',
+    lines:[
+      ['same','plan / recall / draft / check 完全一致'],
+      ['gate','低风险 fact 也进审核队列'],
+      ['gate','中 / 高风险必须人工批准'],
+      ['gate','你拥有 canon 的最终决定权'],
+    ]
+  },
+  auto:{
+    title:'auto_promote · 全自动',
+    tag:'低风险设定自动晋升，你只管写',
+    lines:[
+      ['same','plan / recall / draft / check 完全一致'],
+      ['auto','低风险 fact 直接晋升 canon'],
+      ['auto','中风险按 hybrid 策略自动放行'],
+      ['gate','仅高风险才停下等你'],
+    ]
+  }
+};
+const modeTitle=document.getElementById('modeTitle');
+const modeTag=document.getElementById('modeTag');
+const modeLines=document.getElementById('modeLines');
+const labelMap={auto:'AUTO',gate:'GATE',same:'SAME'};
+function renderMode(key){
+  const m=MODES[key];
+  modeTitle.textContent=m.title;
+  modeTag.textContent=m.tag;
+  modeLines.innerHTML=m.lines.map(([b,t])=>
+    `<div class="mode-line"><span class="badge ${b}">${labelMap[b]}</span><span>${t}</span></div>`
+  ).join('');
+}
+document.querySelectorAll('.switch button').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.switch button').forEach(b=>b.classList.remove('act'));
+    btn.classList.add('act');
+    renderMode(btn.dataset.mode);
+  });
+});
+renderMode('gate');
+
+/* ---- 数字滚动 ---- */
+const counters=[...document.querySelectorAll('[data-count]')];
+const cio=new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{
+    if(!e.isIntersecting) return;
+    const el=e.target, target=+el.dataset.count;
+    let cur=0; const step=Math.max(1,Math.round(target/40));
+    const t=setInterval(()=>{
+      cur+=step;
+      if(cur>=target){cur=target;clearInterval(t);}
+      el.textContent=cur;
+    },28);
+    cio.unobserve(el);
+  });
+},{threshold:.6});
+counters.forEach(c=>cio.observe(c));
+
+/* ---- 移动端汉堡菜单（简易锚点滚动占位） ---- */
+document.querySelector('.burger')?.addEventListener('click',()=>{
+  document.querySelector('#saga')?.scrollIntoView({behavior:'smooth'});
+});
+</script>
+</body>
+</html>

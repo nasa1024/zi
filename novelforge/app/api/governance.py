@@ -124,6 +124,43 @@ def list_reviews(
         conn.close()
 
 
+@router.get("/{project_id}/staging", response_model=list[ReviewQueueItem])
+def list_staging(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """暂存待审：列 fact_candidates 中 status IN ('proposed','pending_review') 的条目。
+
+    seed 的非低风险 / 自动晋升失败条目停在此处（不进 review_queue）。
+    与 /reviews（review_queue pending，来自 pipeline gate）互补；
+    approve/reject 端点对二者皆可操作。
+    """
+    conn = registry.open_conn(project_id)
+    try:
+        rows = conn.execute(
+            "SELECT candidate_id, fact_type, risk_tier, status,"
+            "  proposal_json, source_chapter, created_at"
+            " FROM fact_candidates"
+            " WHERE status IN ('proposed','pending_review')"
+            " ORDER BY created_at ASC"
+        ).fetchall()
+        return [
+            ReviewQueueItem(
+                candidate_id=r["candidate_id"],
+                fact_type=r["fact_type"],
+                risk_tier=r["risk_tier"],
+                status=r["status"],
+                reason="待人工处理（暂存区）",
+                proposal_json=r["proposal_json"],
+                source_chapter=r["source_chapter"] or 0,
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
 @router.post("/{project_id}/reviews/{candidate_id}/approve", response_model=ApproveResponse)
 def approve_review(
     project_id: str,
@@ -153,9 +190,17 @@ def approve_review(
             evidence_refs=row["evidence_refs"],
         )
         ctx = RunContext(conn=conn, policy_mode="human_gate", actor=req.actor)
-        fact_id = with_retry(
-            lambda c=cand: commit_canon(c, conn, policy_mode="human_gate", actor=req.actor)
-        )
+        try:
+            fact_id = with_retry(
+                lambda c=cand: commit_canon(c, conn, policy_mode="human_gate", actor=req.actor)
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            # commit_canon 失败（如 item 需先有 entity）→ 收敛为 422，
+            # 而非裸 500，便于前端展示可读错误。
+            conn.rollback()
+            raise HTTPException(422, f"晋升失败：{e}")
         # 更新 review_queue
         conn.execute(
             "UPDATE review_queue SET status='approved', resolved_at=datetime('now')"

@@ -1,0 +1,138 @@
+// NovelForge API types — mirror of backend Pydantic models.
+// Keep field names/shapes in sync with the backend; see SHARED CONTRACT.
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+}
+
+export interface ProjectCreateRequest {
+  name: string;
+  genre?: string;
+  power_system?: string | null;
+}
+
+export interface ProjectResponse {
+  project_id: string;
+  name: string;
+  genre: string;
+  db_path: string;
+  created_at: string;
+  chapter_count: number;
+  canon_fact_count: number;
+  archived: boolean;
+}
+
+export interface SeedProposal {
+  op?: 'add' | 'update' | 'deprecate' | 'retcon';
+  fact_type: string;
+  entity?: string | null;
+  new?: Record<string, unknown> | null;
+  valid_from_chapter?: number;
+  risk_tier?: string;
+}
+
+export interface SeedRequest {
+  proposals: SeedProposal[];
+  auto_approve_low_risk?: boolean;
+  actor?: string;
+}
+
+export interface SeedResponse {
+  candidate_ids: string[];
+  auto_approved: string[];
+  queued: string[];
+}
+
+export interface BibleRenderResponse {
+  content: string;
+  rendered_from: Record<string, unknown>;
+  is_readonly: true;
+}
+
+export interface FactHit {
+  id: string;
+  snippet: string;
+  chapter: number;
+}
+
+export interface SearchFactsResponse {
+  hits: FactHit[];
+  mode: string;
+}
+
+export interface StateQueryRequest {
+  as_of_chapter: number;
+  entity_filter?: string[] | null;
+}
+
+export interface WorldStateSnapshot {
+  as_of_chapter: number;
+  power_ranks: Record<string, string>;
+  knowledge_edges: unknown[];
+  timeline_events: unknown[];
+  item_ownership: Record<string, unknown>;
+  gimmick_rules: unknown[];
+  numeric_facts: Record<string, unknown>;
+}
+
+export interface PipelineRunRequest {
+  chapter_no: number;
+  chapter_goal?: string;
+  entity_ids?: string[] | null;
+  keyword_query?: string | null;
+  mode?: 'human_gate' | 'auto_promote' | 'hybrid' | null;
+  budget_max_tokens?: number | null;
+  budget_max_usd?: number | null;
+}
+
+export interface StageResult {
+  stage: string;
+  status: 'ok' | 'blocked' | 'skipped' | 'circuit_broken';
+  detail: Record<string, unknown>;
+}
+
+export interface BudgetSpent {
+  tokens: number;
+  usd: number;
+  revise_rounds?: number;
+}
+
+export interface PipelineRunResponse {
+  run_id: string;
+  chapter_no: number;
+  stages: StageResult[];
+  final_gate: string;
+  draft_text: string;
+  budget_spent: BudgetSpent;
+  circuit_breaker_tripped: boolean;
+  error?: string | null;
+}
+
+export interface ReviewQueueItem {
+  candidate_id: string;
+  fact_type: string;
+  risk_tier: string;
+  status: string;
+  reason?: string | null;
+  proposal_json: string;
+  source_chapter: number;
+  created_at?: string | null;
+}
+
+export interface ApproveRequest {
+  actor: string;
+  note?: string | null;
+  valid_from_chapter_override?: number | null;
+}
+
+export interface ApproveResponse {
+  candidate_id: string;
+  fact_id: string;
+  new_status: 'canon';
+}
+
+export interface RejectRequest {
+  actor: string;
+  reason?: string;
+}

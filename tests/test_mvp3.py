@@ -225,6 +225,61 @@ class TestReviews:
         assert len(body["approved"]) + len(body["skipped"]) == 2
 
 
+# ── 4b. Staging（暂存待审）+ approve 错误收敛 ────────────────────────────────────
+
+class TestStaging:
+    def _add_proposed(self, conn, fact_type="style", risk="medium"):
+        """插入一个 proposed 态 candidate（不入 review_queue），模拟 seed 未自动晋升。"""
+        from novelforge.ids import new_id
+        cid = new_id("cand")
+        prop = json.dumps({"op": "add", "fact_type": fact_type,
+                           "new": {"subject": "x", "predicate": "p", "object": "o"},
+                           "valid_from_chapter": 1})
+        conn.execute(
+            "INSERT INTO fact_candidates"
+            "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (cid, "add", None, fact_type, prop, "proposed", risk, 1),
+        )
+        conn.commit()
+        return cid
+
+    def test_staging_lists_proposed(self, client, project):
+        """proposed 态 candidate 出现在 /staging，但不在 /reviews（review_queue）。"""
+        conn = _open_project_conn(client, project)
+        cid = self._add_proposed(conn)
+        conn.close()
+
+        r = client.get(f"/v1/{project}/staging")
+        assert r.status_code == 200
+        ids = [it["candidate_id"] for it in r.json()]
+        assert cid in ids
+
+        # /reviews 查 review_queue，proposed-only candidate 不应出现
+        rq = client.get(f"/v1/{project}/reviews")
+        assert cid not in [it["candidate_id"] for it in rq.json()]
+
+    def test_staging_approve_promotes(self, client, project):
+        """对暂存 candidate（style，无 entity 依赖）approve → 晋升 canon。"""
+        conn = _open_project_conn(client, project)
+        cid = self._add_proposed(conn, fact_type="style")
+        conn.close()
+
+        r = client.post(f"/v1/{project}/reviews/{cid}/approve", json={"actor": "web"})
+        assert r.status_code == 200
+        # 晋升后离开暂存区
+        assert cid not in [it["candidate_id"] for it in client.get(f"/v1/{project}/staging").json()]
+
+    def test_approve_item_without_entity_returns_422(self, client, project):
+        """item fact 缺前置 entity → commit 失败，端点收敛为 422 而非 500。"""
+        conn = _open_project_conn(client, project)
+        cid = self._add_proposed(conn, fact_type="item")
+        conn.close()
+
+        r = client.post(f"/v1/{project}/reviews/{cid}/approve", json={"actor": "web"})
+        assert r.status_code == 422
+
+
 # ── 5. Revert ─────────────────────────────────────────────────────────────────
 
 class TestRevert:

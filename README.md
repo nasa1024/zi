@@ -30,9 +30,34 @@ curl -s -X POST http://localhost:8787/v1/projects \
   -H "Content-Type: application/json" \
   -d '{"name":"我的小说","genre":"xuanhuan"}' | python -m json.tool
 
-# 全量测试（262 个用例）
+# 全量测试（265 个用例）
 python -m pytest -q
 ```
+
+## 前端（`web/`，Vite + React + TypeScript）
+
+营销官网（霓虹蛮荒多巴胺风格落地页）+ 创作工作台 Studio（真实接入后端 REST API）。
+
+```bash
+# 1) 先起后端（同上，:8787）
+uvicorn novelforge.app.main:app --port 8787
+
+# 2) 再起前端（:5173，经 Vite proxy 调 API，无跨域）
+cd web && npm install && npm run dev
+```
+
+打开 http://localhost:5173 ——落地页下方的 **⚙️ 工作台 / STUDIO** 真实驱动确定性核心（无需 LLM）：
+
+- **建项目** → `POST /v1/projects`（乐观更新，新书即时可用）
+- **录入设定 / 填充示例** → `POST /v1/{id}/seed`（三元组写入 canon 账本）
+- **世界圣经** → `GET /v1/{id}/bible`（由 canon 确定性渲染 Markdown）
+- **世界状态** → `POST /v1/{id}/state`（as-of 时点投影角色境界）
+- **设定检索** → `GET /v1/{id}/search/facts`（FTS5 + BM25）
+- **审核队列** → `GET /v1/{id}/reviews` + `/staging`，逐条 approve/reject
+- **生成章节** → `POST /v1/{id}/pipeline/run`（需配置 LLM provider key）
+
+实时引擎健康徽章读 `GET /health`。详见 [`web/README.md`](web/README.md)。
+后端已配 CORS（允许 `:5173/:4173`）；生产可经 `NOVELFORGE_CORS_ORIGINS` 覆盖、`VITE_API_BASE` 指定 API 地址。
 
 ## 代码结构（`novelforge/`，MVP 已全量实现）
 
@@ -123,7 +148,7 @@ python -m pytest -q
 ## 测试
 
 ```
-262 passed in ~20s
+265 passed in ~15s
 ```
 
 覆盖范围：schema 迁移、L0 原子写入、pipeline_run 状态机、会话/turn/SSE、API-key 认证、Prompt Injection 净化、热备份、FTS 重建、分支隔离 World State、软冲突检查、卷/分支 CRUD、冷启动、工艺层、自动驾驶、端到端 MVP 流水线。
