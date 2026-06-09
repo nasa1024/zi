@@ -7,6 +7,7 @@ import { ApiError, api } from '../../api/client';
 import { useHealth } from '../../api/hooks';
 import type {
   BibleRenderResponse,
+  NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
   ProjectResponse,
@@ -858,6 +859,13 @@ function PipelinePanel({
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 「下一章」自动建议 + 连续生成
+  const [suggestion, setSuggestion] = useState<NextChapterSuggestion | null>(null);
+  const [chainCount, setChainCount] = useState<string>('1');
+  const [chainProgress, setChainProgress] = useState<{ done: number; total: number } | null>(null);
+  const stopChainRef = useRef<boolean>(false);
+  const chapterNoTouched = useRef<boolean>(false);
+
   // SSE 流式状态
   const [liveStages, setLiveStages] = useState<SSEStageEvent[]>([]);
   const [liveDraft, setLiveDraft] = useState<string>('');
@@ -882,10 +890,29 @@ function PipelinePanel({
     }
   }, [projectId]);
 
-  // 首次挂载和 projectId 变化时拉取历史
-  useEffect(() => { void loadHistory(); }, [loadHistory]);
+  // 「下一章」建议：取已完成最大章 +1，并自动拼装最优 chapter_goal
+  const loadSuggestion = useCallback(async (): Promise<NextChapterSuggestion | null> => {
+    try {
+      const sug = await api.pipelineNext(projectId);
+      setSuggestion(sug);
+      if (!chapterNoTouched.current) {
+        setChapterNo(String(sug.next_chapter));
+      }
+      return sug;
+    } catch {
+      return null;
+    }
+  }, [projectId]);
 
-  const run = async () => {
+  // 首次挂载和 projectId 变化时拉取历史 + 下一章建议
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
+  useEffect(() => {
+    chapterNoTouched.current = false;
+    void loadSuggestion();
+  }, [loadSuggestion]);
+
+  // 跑单章；返回是否成功（done 事件且无 error），供连续生成判断是否继续
+  const runOne = async (no: number, goal: string): Promise<boolean> => {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -896,18 +923,19 @@ function PipelinePanel({
     setLiveDraft('');
     setDoneData(null);
 
-    const n = Number.parseInt(chapterNo, 10);
+    let ok = false;
     try {
       await api.runPipelineStream(
         projectId,
         {
-          chapter_no: Number.isFinite(n) ? n : 1,
-          chapter_goal: chapterGoal.trim() || undefined,
+          chapter_no: no,
+          chapter_goal: goal.trim() || undefined,
           mode,
         },
         {
           onStage: (e) => setLiveStages((prev) => [...prev, e]),
           onDone: (e) => {
+            ok = !e.error;
             setDoneData(e);
             setLiveDraft(e.draft_text ?? '');
             onChanged();
@@ -924,6 +952,45 @@ function PipelinePanel({
     } finally {
       setBusy(false);
     }
+    return ok;
+  };
+
+  // 手动模式：按表单里的章节号/目标跑一章
+  const run = async () => {
+    const n = Number.parseInt(chapterNo, 10);
+    await runOne(Number.isFinite(n) ? n : 1, chapterGoal);
+    void loadSuggestion();
+  };
+
+  // 自动模式：每章先取「下一章」最优建议（章号 + 目标），再连写 N 章
+  const runAuto = async () => {
+    const total = Math.max(1, Math.min(50, Number.parseInt(chainCount, 10) || 1));
+    stopChainRef.current = false;
+    chapterNoTouched.current = false;
+    setChainProgress({ done: 0, total });
+    try {
+      for (let i = 0; i < total; i += 1) {
+        if (stopChainRef.current) break;
+        const sug = await loadSuggestion();
+        if (!sug) {
+          setError('获取下一章建议失败');
+          break;
+        }
+        setChapterNo(String(sug.next_chapter));
+        setChapterGoal(sug.suggested_goal);
+        const ok = await runOne(sug.next_chapter, sug.suggested_goal);
+        setChainProgress({ done: i + 1, total });
+        if (!ok || stopChainRef.current) break;
+      }
+    } finally {
+      setChainProgress(null);
+      void loadSuggestion();
+    }
+  };
+
+  const stopChain = () => {
+    stopChainRef.current = true;
+    abortRef.current?.abort();
   };
 
   const toggleExpand = async (runId: string) => {
@@ -969,7 +1036,10 @@ function PipelinePanel({
             type="number"
             min={1}
             value={chapterNo}
-            onChange={(e) => setChapterNo(e.target.value)}
+            onChange={(e) => {
+              chapterNoTouched.current = true;
+              setChapterNo(e.target.value);
+            }}
             disabled={busy}
           />
         </div>
@@ -1000,9 +1070,9 @@ function PipelinePanel({
             disabled={busy}
           />
         </div>
-        <div className="nf-actions" style={{ gridColumn: '1 / -1' }}>
+        <div className="nf-actions" style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
           <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy}>
-            {busy ? (
+            {busy && !chainProgress ? (
               <>
                 <span className="nf-spin" /> 生成中…
               </>
@@ -1010,7 +1080,56 @@ function PipelinePanel({
               <>⚙️ 运行流水线</>
             )}
           </button>
+
+          <button
+            type="button"
+            className="nf-btn"
+            onClick={() => void runAuto()}
+            disabled={busy}
+            title="自动取「已完成最大章 +1」为章号，并按卷大纲 / 章节卡 / 待回收伏笔自动拼装本章目标"
+          >
+            {chainProgress ? (
+              <>
+                <span className="nf-spin" /> 连写中 {chainProgress.done}/{chainProgress.total}…
+              </>
+            ) : (
+              <>▶ 下一章 · 自动连写</>
+            )}
+          </button>
+
+          <label htmlFor="pl-chain" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}>
+            连写章数
+            <input
+              id="pl-chain"
+              className="nf-input"
+              type="number"
+              min={1}
+              max={50}
+              value={chainCount}
+              onChange={(e) => setChainCount(e.target.value)}
+              disabled={busy}
+              style={{ width: '4.5rem' }}
+            />
+          </label>
+
+          {busy && (
+            <button type="button" className="nf-btn-sm" onClick={stopChain}>
+              ⏹ 停止
+            </button>
+          )}
         </div>
+
+        {suggestion && !busy && (
+          <div className="ph-hint" style={{ gridColumn: '1 / -1' }}>
+            💡 建议下一章：<b>第 {suggestion.next_chapter} 章</b>
+            {suggestion.last_completed_chapter > 0 && (
+              <>（已完成至第 {suggestion.last_completed_chapter} 章）</>
+            )}
+            {suggestion.sources.length > 0 && (
+              <>　·　目标依据：{suggestion.sources.join(' / ')}</>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── 实时进度条 ─────────────────────────────────── */}

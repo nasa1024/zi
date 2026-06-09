@@ -7,6 +7,7 @@ import type {
   ApproveResponse,
   BibleRenderResponse,
   HealthResponse,
+  NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
   PipelineRunRequest,
@@ -214,6 +215,13 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  pipelineNext(id: string): Promise<NextChapterSuggestion> {
+    return request<NextChapterSuggestion>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/next`,
+    );
   },
 
   listPipelineRuns(id: string, limit = 30): Promise<PipelineRunRecord[]> {

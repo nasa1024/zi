@@ -215,6 +215,19 @@ class PipelineRunDetail(PipelineRunRecord):
     draft_text: str = ""
 
 
+class NextChapterSuggestion(BaseModel):
+    """「下一章」自动建议（GET /pipeline/next）。
+
+    next_chapter = 已完成生成的最大章节号 + 1；
+    suggested_goal 由章节卡 / 上一章钩子 / 卷大纲 / 待回收伏笔 / 已计划节拍拼装，
+    sources 标注每段建议的来源，便于前端展示依据。
+    """
+    next_chapter: int
+    last_completed_chapter: int = 0
+    suggested_goal: str = ""
+    sources: list[str] = Field(default_factory=list)
+
+
 # ── Check ─────────────────────────────────────────────────────────────────────
 
 class CheckRequest(BaseModel):

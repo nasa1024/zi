@@ -122,6 +122,13 @@ export interface PipelineRunDetail extends PipelineRunRecord {
   draft_text: string;
 }
 
+export interface NextChapterSuggestion {
+  next_chapter: number;
+  last_completed_chapter: number;
+  suggested_goal: string;
+  sources: string[];
+}
+
 // SSE 事件类型
 export interface SSEStageEvent {
   event: 'stage';

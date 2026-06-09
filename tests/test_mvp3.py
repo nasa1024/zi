@@ -422,3 +422,97 @@ class TestPipelineRun:
         body = r.json()
         assert "run_id" in body
         assert body["chapter_no"] == 1
+
+
+# ── 10. Pipeline next（「下一章」自动建议）────────────────────────────────────
+
+class TestPipelineNext:
+    def test_empty_project_starts_at_1(self, client, project):
+        r = client.get(f"/v1/{project}/pipeline/next")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["next_chapter"] == 1
+        assert body["last_completed_chapter"] == 0
+        assert body["suggested_goal"] == ""
+        assert body["sources"] == []
+
+    def test_unknown_project_404(self, client, tmp_data):
+        r = client.get("/v1/proj_nonexistent/pipeline/next")
+        assert r.status_code == 404
+
+    def test_advances_past_completed_runs(self, client, project):
+        conn = _open_project_conn(client, project)
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status)"
+            " VALUES('run_t1', 3, ?, 'completed')",
+            (project,),
+        )
+        # running 的章不计入
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status)"
+            " VALUES('run_t2', 7, ?, 'running')",
+            (project,),
+        )
+        conn.commit()
+
+        r = client.get(f"/v1/{project}/pipeline/next")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["last_completed_chapter"] == 3
+        assert body["next_chapter"] == 4
+
+    def test_draft_index_counts_as_completed(self, client, project):
+        conn = _open_project_conn(client, project)
+        conn.execute(
+            "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, word_count)"
+            " VALUES('draft_t1', 5, 0, 'l0/ch0005_r00.txt', 'x', 3000)",
+        )
+        conn.commit()
+
+        r = client.get(f"/v1/{project}/pipeline/next")
+        assert r.json()["next_chapter"] == 6
+
+    def test_goal_assembled_from_plans(self, client, project):
+        conn = _open_project_conn(client, project)
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status)"
+            " VALUES('run_t1', 2, ?, 'completed')",
+            (project,),
+        )
+        # 上一章钩子 + 下一章章节卡
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, hook_text) VALUES('cc2', 2, '神秘黑袍人现身')",
+        )
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, title, goal) VALUES('cc3', 3, '夜探藏经阁', '主角发现功法残页')",
+        )
+        # 所属卷大纲
+        conn.execute(
+            "INSERT INTO volumes(id, volume_no, title, synopsis, start_chapter, end_chapter)"
+            " VALUES('vol1', 1, '初入宗门', '主角从凡人到外门弟子', 1, 50)",
+        )
+        # 到期伏笔（due <= next+2）
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, state, planted_chapter, due_chapter)"
+            " VALUES('fs1', '黑袍人身份', '黑袍人真实身份', 'planted', 1, 4)",
+        )
+        # 已计划节拍
+        conn.execute(
+            "INSERT INTO beats(id, chapter, seq, beat_type, summary, status)"
+            " VALUES('bt1', 3, 1, 'setup', '潜入藏经阁', 'planned')",
+        )
+        conn.commit()
+
+        r = client.get(f"/v1/{project}/pipeline/next")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["next_chapter"] == 3
+        goal = body["suggested_goal"]
+        assert "夜探藏经阁" in goal
+        assert "神秘黑袍人现身" in goal
+        assert "初入宗门" in goal
+        assert "黑袍人身份" in goal
+        assert "潜入藏经阁" in goal
+        assert body["sources"] == [
+            "chapter_card", "prev_hook", "volume", "foreshadow", "beats",
+        ]
