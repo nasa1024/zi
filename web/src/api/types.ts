@@ -130,6 +130,53 @@ export interface NextChapterSuggestion {
   sources: string[];
 }
 
+export interface VolumeInfo {
+  id: string;
+  volume_no: number;
+  title: string;
+  synopsis?: string | null;
+  start_chapter?: number | null;
+  end_chapter?: number | null;
+  status: string;
+  created_at: string;
+}
+
+export interface PlannedBeat {
+  seq: number;
+  beat_type: string;
+  summary: string;
+  value_axis?: string | null;
+}
+
+export interface ChapterCard {
+  chapter: number;
+  title?: string | null;
+  goal?: string | null;
+  hook_text?: string | null;
+  status: string;
+  beats: PlannedBeat[];
+}
+
+export interface VolumePlanRequest {
+  from_chapter?: number | null;
+  to_chapter?: number | null;
+}
+
+export interface VolumePlanResponse {
+  volume_no: number;
+  from_chapter: number;
+  to_chapter: number;
+  planned: ChapterCard[];
+  skipped: number[];
+  error?: string | null;
+}
+
+export interface ChapterCardUpdateRequest {
+  title?: string | null;
+  goal?: string | null;
+  hook_text?: string | null;
+}
+
 export interface AutopilotStartRequest {
   from_chapter: number;
   to_chapter: number;

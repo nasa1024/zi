@@ -8,6 +8,8 @@ import type {
   AutopilotSessionInfo,
   AutopilotStartRequest,
   BibleRenderResponse,
+  ChapterCard,
+  ChapterCardUpdateRequest,
   HealthResponse,
   NextChapterSuggestion,
   PipelineRunDetail,
@@ -24,6 +26,9 @@ import type {
   SeedResponse,
   SSEPipelineEvent,
   StateQueryRequest,
+  VolumeInfo,
+  VolumePlanRequest,
+  VolumePlanResponse,
   WorldStateSnapshot,
 } from './types';
 
@@ -217,6 +222,37 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  listVolumes(id: string): Promise<VolumeInfo[]> {
+    return request<VolumeInfo[]>('GET', `/v1/${encodeURIComponent(id)}/volumes`);
+  },
+
+  planVolume(id: string, volumeNo: number, req: VolumePlanRequest): Promise<VolumePlanResponse> {
+    return request<VolumePlanResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/volumes/${volumeNo}/plan`,
+      req,
+    );
+  },
+
+  listChapterCards(id: string, from?: number, to?: number): Promise<ChapterCard[]> {
+    const params = new URLSearchParams();
+    if (from !== undefined) params.set('from_chapter', String(from));
+    if (to !== undefined) params.set('to_chapter', String(to));
+    const qs = params.toString();
+    return request<ChapterCard[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapter-cards${qs ? `?${qs}` : ''}`,
+    );
+  },
+
+  updateChapterCard(id: string, chapter: number, req: ChapterCardUpdateRequest): Promise<ChapterCard> {
+    return request<ChapterCard>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/chapter-cards/${chapter}`,
+      req,
+    );
   },
 
   autopilotStart(id: string, req: AutopilotStartRequest): Promise<AutopilotSessionInfo> {

@@ -216,6 +216,44 @@ class PipelineRunDetail(PipelineRunRecord):
     draft_text: str = ""
 
 
+# ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
+
+class VolumePlanRequest(BaseModel):
+    from_chapter: Optional[int] = None   # 缺省 = max(卷起始章, 已完成最大章+1)
+    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章
+
+
+class PlannedBeat(BaseModel):
+    seq: int
+    beat_type: str
+    summary: str
+    value_axis: Optional[str] = None
+
+
+class ChapterCardModel(BaseModel):
+    chapter: int
+    title: Optional[str] = None
+    goal: Optional[str] = None
+    hook_text: Optional[str] = None
+    status: str = "planned"
+    beats: list[PlannedBeat] = Field(default_factory=list)
+
+
+class VolumePlanResponse(BaseModel):
+    volume_no: int
+    from_chapter: int
+    to_chapter: int
+    planned: list[ChapterCardModel]
+    skipped: list[int] = Field(default_factory=list)  # 已 drafted/committed 受保护的章
+    error: Optional[str] = None
+
+
+class ChapterCardUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    goal: Optional[str] = None
+    hook_text: Optional[str] = None
+
+
 class NextChapterSuggestion(BaseModel):
     """「下一章」自动建议（GET /pipeline/next）。
 

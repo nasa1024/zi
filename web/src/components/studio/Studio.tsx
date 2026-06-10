@@ -8,6 +8,7 @@ import { useHealth } from '../../api/hooks';
 import type {
   AutopilotSessionInfo,
   BibleRenderResponse,
+  ChapterCard,
   NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
@@ -17,6 +18,7 @@ import type {
   SSEStageEvent,
   SearchFactsResponse,
   SeedRequest,
+  VolumeInfo,
   WorldStateSnapshot,
 } from '../../api/types';
 import '../../styles/studio.css';
@@ -875,6 +877,15 @@ function PipelinePanel({
   const [apBusy, setApBusy] = useState<boolean>(false);
   const [apError, setApError] = useState<string | null>(null);
 
+  // 卷规划（M4-④：批量生成章节卡，供「下一章」最优建议消费）
+  const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
+  const [planVolNo, setPlanVolNo] = useState<string>('');
+  const [planBusy, setPlanBusy] = useState<boolean>(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planSkipped, setPlanSkipped] = useState<number[]>([]);
+  const [cards, setCards] = useState<ChapterCard[]>([]);
+  const [cardSaving, setCardSaving] = useState<number | null>(null);
+
   // SSE 流式状态
   const [liveStages, setLiveStages] = useState<SSEStageEvent[]>([]);
   const [liveDraft, setLiveDraft] = useState<string>('');
@@ -1074,6 +1085,71 @@ function PipelinePanel({
     } catch (err) {
       setApError(errMessage(err, '取消失败'));
     }
+  };
+
+  // ── 卷规划 ───────────────────────────────────────────────────────────────
+  const selectedVol = volumes.find((v) => String(v.volume_no) === planVolNo) ?? null;
+
+  const loadCards = useCallback(async (vol: VolumeInfo | null) => {
+    if (!vol || vol.start_chapter == null) {
+      setCards([]);
+      return;
+    }
+    try {
+      setCards(await api.listChapterCards(projectId, vol.start_chapter, vol.end_chapter ?? 9999));
+    } catch { /* ignore */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const vols = await api.listVolumes(projectId);
+        if (!alive) return;
+        setVolumes(vols);
+        if (vols.length > 0) setPlanVolNo(String(vols[0].volume_no));
+      } catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [projectId]);
+
+  useEffect(() => { void loadCards(selectedVol); }, [loadCards, selectedVol]);
+
+  const runVolumePlan = async () => {
+    if (!selectedVol) return;
+    setPlanBusy(true);
+    setPlanError(null);
+    setPlanSkipped([]);
+    try {
+      const resp = await api.planVolume(projectId, selectedVol.volume_no, {});
+      if (resp.error) setPlanError(resp.error);
+      setPlanSkipped(resp.skipped);
+      await loadCards(selectedVol);
+      chapterNoTouched.current = false;
+      void loadSuggestion();   // 章节卡入库后「下一章」建议立即升级为大纲驱动
+    } catch (err) {
+      setPlanError(errMessage(err, '卷规划失败'));
+    } finally {
+      setPlanBusy(false);
+    }
+  };
+
+  const saveCard = async (card: ChapterCard) => {
+    setCardSaving(card.chapter);
+    try {
+      await api.updateChapterCard(projectId, card.chapter, {
+        title: card.title, goal: card.goal, hook_text: card.hook_text,
+      });
+      void loadSuggestion();
+    } catch (err) {
+      setPlanError(errMessage(err, '保存失败'));
+    } finally {
+      setCardSaving(null);
+    }
+  };
+
+  const editCard = (chapter: number, field: 'title' | 'goal' | 'hook_text', value: string) => {
+    setCards((prev) => prev.map((c) => (c.chapter === chapter ? { ...c, [field]: value } : c)));
   };
 
   // 恢复被中断的会话（进程重启后从断点继续，已完成的章不会重写）
@@ -1342,6 +1418,106 @@ function PipelinePanel({
             </span>
           )}
         </div>
+      )}
+
+      {/* ── 卷规划（章节卡批量预生成）───────────────────── */}
+      <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+        <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📋 卷规划</span>
+      </div>
+      <div className="ph-hint">
+        按卷大纲一次生成 ≤10 章细纲（目标/钩子/节拍，含爽点与伏笔回收安排），
+        入库后「下一章 · 自动连写」与挂机连写按细纲驱动；已写过的章不会被覆盖。
+      </div>
+
+      {volumes.length === 0 ? (
+        <div className="nf-empty">尚无卷——先在 volumes 中创建卷并填写 synopsis</div>
+      ) : (
+        <>
+          <div className="nf-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
+            <select
+              className="nf-select"
+              value={planVolNo}
+              onChange={(e) => setPlanVolNo(e.target.value)}
+              disabled={planBusy}
+              aria-label="选择卷"
+              style={{ width: 'auto' }}
+            >
+              {volumes.map((v) => (
+                <option key={v.volume_no} value={String(v.volume_no)}>
+                  第 {v.volume_no} 卷 · {v.title}
+                  {v.start_chapter != null && `（${v.start_chapter}-${v.end_chapter ?? '…'}章）`}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="nf-btn"
+              onClick={() => void runVolumePlan()}
+              disabled={planBusy || busy || !selectedVol}
+            >
+              {planBusy ? (<><span className="nf-spin" /> 规划中…</>) : (<>📋 生成细纲</>)}
+            </button>
+            {planSkipped.length > 0 && (
+              <span className="ph-hint">已写章节跳过：{planSkipped.join(', ')}</span>
+            )}
+          </div>
+
+          {planError && (
+            <div className="nf-msg err"><span>⚠</span><span>{planError}</span></div>
+          )}
+
+          {cards.length > 0 && (
+            <div className="pipeline-history" style={{ marginTop: '0.6rem' }}>
+              {cards.map((c) => (
+                <div key={c.chapter} className="ph-row">
+                  <div className="ph-body" style={{ display: 'grid', gridTemplateColumns: '5rem 1fr auto', gap: '0.5rem', alignItems: 'start', padding: '0.5rem 0.75rem' }}>
+                    <div>
+                      <div className="ph-ch">第 {c.chapter} 章</div>
+                      <div className="ph-hint">{c.status}</div>
+                    </div>
+                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                      <input
+                        className="nf-input"
+                        placeholder="章节名"
+                        value={c.title ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'title', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                      />
+                      <textarea
+                        className="nf-textarea"
+                        placeholder="本章目标（冲突/爽点）"
+                        value={c.goal ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'goal', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                        rows={2}
+                      />
+                      <input
+                        className="nf-input"
+                        placeholder="章末钩子"
+                        value={c.hook_text ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'hook_text', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                      />
+                      {c.beats.length > 0 && (
+                        <div className="ph-hint">
+                          节拍：{c.beats.map((b) => `[${b.beat_type}]${b.summary.slice(0, 14)}`).join('　')}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="nf-btn-sm"
+                      onClick={() => void saveCard(c)}
+                      disabled={cardSaving === c.chapter || c.status !== 'planned'}
+                    >
+                      {cardSaving === c.chapter ? '…' : '保存'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {/* ── 实时进度条 ─────────────────────────────────── */}
