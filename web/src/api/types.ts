@@ -84,6 +84,7 @@ export interface PipelineRunRequest {
   mode?: 'human_gate' | 'auto_promote' | 'hybrid' | null;
   budget_max_tokens?: number | null;
   budget_max_usd?: number | null;
+  n_candidates?: number | null;
 }
 
 export interface StageResult {

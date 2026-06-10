@@ -45,6 +45,8 @@ def _make_cfg(project_id: str, req: PipelineRunRequest, registry: ProjectRegistr
         cfg.budget.max_tokens_per_chapter = req.budget_max_tokens
     if req.budget_max_usd:
         cfg.budget.max_usd_per_chapter = req.budget_max_usd
+    if req.n_candidates:
+        cfg.candidates.n_candidates = max(1, min(3, req.n_candidates))
     api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if api_key:
         cfg.provider.api_key = api_key

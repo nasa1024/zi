@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "9"  # +M2-②: chapter_summaries 分层叙事摘要
+SCHEMA_VERSION = "10"  # +M3-①: pipeline_run.detail_json/quality_score

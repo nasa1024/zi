@@ -175,6 +175,7 @@ class PipelineRunRequest(BaseModel):
     mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
     budget_max_tokens: Optional[int] = None
     budget_max_usd: Optional[float] = None
+    n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # M3-①: 多候选择优
 
 
 class StageResult(BaseModel):
