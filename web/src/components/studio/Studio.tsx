@@ -857,6 +857,7 @@ function PipelinePanel({
   const [chapterNo, setChapterNo] = useState<string>('1');
   const [chapterGoal, setChapterGoal] = useState<string>('');
   const [mode, setMode] = useState<'human_gate' | 'auto_promote' | 'hybrid'>('human_gate');
+  const [nCandidates, setNCandidates] = useState<number>(1);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -939,6 +940,7 @@ function PipelinePanel({
           chapter_no: no,
           chapter_goal: goal.trim() || undefined,
           mode,
+          n_candidates: nCandidates > 1 ? nCandidates : undefined,
         },
         {
           onStage: (e) => setLiveStages((prev) => [...prev, e]),
@@ -1108,6 +1110,7 @@ function PipelinePanel({
   const stageOrder = ['recall', 'plan', 'draft', 'check', 'gate'];
   const allStages = stageOrder.map((s) => liveStages.find((e) => e.stage === s));
   const hasLiveResult = liveStages.length > 0 || doneData;
+  const candidatesEvent = liveStages.find((e) => e.stage === 'candidates');
 
   return (
     <div className="studio-panel">
@@ -1152,6 +1155,22 @@ function PipelinePanel({
             <option value="human_gate">human_gate · 人审</option>
             <option value="auto_promote">auto_promote · 全自动</option>
             <option value="hybrid">hybrid · 混合</option>
+          </select>
+        </div>
+        <div className="nf-field">
+          <label htmlFor="pl-cands" title="并行生成多个候选稿，确定性预筛 + 硬校验否决 + LLM 评委自动择优">
+            候选稿数 CANDIDATES
+          </label>
+          <select
+            id="pl-cands"
+            className="nf-select"
+            value={nCandidates}
+            onChange={(e) => setNCandidates(Number(e.target.value))}
+            disabled={busy}
+          >
+            <option value={1}>1 · 单稿（默认）</option>
+            <option value={2}>2 · 双稿择优</option>
+            <option value={3}>3 · 三稿择优</option>
           </select>
         </div>
         <div className="nf-field full">
@@ -1342,6 +1361,20 @@ function PipelinePanel({
               );
             })}
           </div>
+
+          {candidatesEvent && (
+            <div className="run-summary">
+              <span className="rs-chip">
+                🏆 候选择优：<b>{String(candidatesEvent.detail.n)} 选 1</b>
+                ，胜者 #{String(candidatesEvent.detail.winner)}
+                {Array.isArray(candidatesEvent.detail.scores) &&
+                  (candidatesEvent.detail.scores as (number | null)[]).some((s) => s != null) && (
+                  <>　评分 [{(candidatesEvent.detail.scores as (number | null)[])
+                    .map((s) => (s == null ? '—' : String(s))).join(' / ')}]</>
+                )}
+              </span>
+            </div>
+          )}
 
           {doneData && (
             <div className="run-summary">

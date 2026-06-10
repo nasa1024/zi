@@ -135,16 +135,57 @@ class Orchestrator:
             if not plan_result.ok:
                 workspace["beats"] = []
 
-            # ── 3. DRAFT ──────────────────────────────────────────────────────
-            draft_result = self._reg.invoke("chapter_draft", skill_ctx)
+            # ── 3. DRAFT（M3-①: n_candidates>1 时多候选 + 三级漏斗择优）──────
+            n_cands = max(1, min(3, getattr(getattr(cfg, "candidates", None),
+                                            "n_candidates", 1) or 1))
+            if n_cands <= 1:
+                draft_result = self._reg.invoke("chapter_draft", skill_ctx)
+                draft_ok = draft_result.ok
+            else:
+                from ..craft.candidate_judge import select_best
+                spread = getattr(cfg.candidates, "temperature_spread", 0.15)
+                cand_list: list[dict] = []
+                for i in range(n_cands):
+                    skill_ctx.extra["temperature"] = max(0.1, 1.0 - i * spread)
+                    r = self._reg.invoke("chapter_draft", skill_ctx)
+                    cand_list.append({
+                        "draft_text": workspace.get("draft_text", ""),
+                        "proposals": workspace.get("proposals", []),
+                        "ok": r.ok,
+                    })
+                skill_ctx.extra.pop("temperature", None)
+                report = select_best(
+                    cand_list,
+                    world=workspace.get("world_state"),
+                    chapter_goal=workspace.get("chapter_goal", ""),
+                    gateway=self._gw,
+                    judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
+                )
+                winner = cand_list[report["winner"]]
+                workspace["draft_text"] = winner["draft_text"]
+                workspace["proposals"] = winner["proposals"]
+                workspace["candidate_report"] = {
+                    **report,
+                    "n_candidates": n_cands,
+                    "lengths": [len(c["draft_text"]) for c in cand_list],
+                }
+                draft_ok = winner["ok"]
+                if progress_cb:
+                    progress_cb("candidates", "ok", {
+                        "n": n_cands,
+                        "winner": report["winner"],
+                        "scores": report["scores"],
+                        "reason": report["reason"],
+                    })
+
             _draft_chars = len(workspace.get("draft_text", ""))
             if progress_cb:
-                progress_cb("draft", "ok" if (draft_result.ok or workspace.get("draft_text")) else "blocked",
+                progress_cb("draft", "ok" if (draft_ok or workspace.get("draft_text")) else "blocked",
                             {"chars": _draft_chars})
-            if not draft_result.ok and not workspace.get("draft_text"):
+            if not draft_ok and not workspace.get("draft_text"):
                 return ChapterOutcome(
                     chapter=chapter, ok=False, run_id=run_id,
-                    error=f"draft 失败: {draft_result.error}",
+                    error="draft 失败: 所有候选均无产出",
                     usage_tokens=ledger.tokens_spent,
                 )
 
@@ -224,7 +265,8 @@ class Orchestrator:
 
             # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
-            _complete_pipeline_run(conn, run_id, draft_id)
+            _complete_pipeline_run(conn, run_id, draft_id,
+                                   detail=workspace.get("candidate_report"))
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
             if getattr(cfg.recall, "enable_summaries", True) and draft_text:
@@ -370,13 +412,18 @@ def _begin_pipeline_run(conn: sqlite3.Connection, chapter: int, project_id: str,
         pass
 
 
-def _complete_pipeline_run(conn: sqlite3.Connection, run_id: str, draft_id: Optional[str]) -> None:
-    """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。"""
+def _complete_pipeline_run(
+    conn: sqlite3.Connection, run_id: str, draft_id: Optional[str],
+    detail: Optional[dict] = None,
+) -> None:
+    """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。detail=候选择优报告等明细。"""
     try:
+        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         conn.execute(
-            "UPDATE pipeline_run SET status='completed', draft_id=?, finished_at=datetime('now')"
+            "UPDATE pipeline_run SET status='completed', draft_id=?, detail_json=?,"
+            " finished_at=datetime('now')"
             " WHERE run_id=?",
-            (draft_id, run_id),
+            (draft_id, detail_json, run_id),
         )
         conn.commit()
     except Exception:

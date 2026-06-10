@@ -51,6 +51,14 @@ class DeduplicationConfig:
 
 
 @dataclass
+class CandidateConfig:
+    """M3-①: 章节多候选 + 评分择优。n_candidates=1 时完全等价于旧行为。"""
+    n_candidates: int = 1                # 候选稿数量（1=关闭；建议生产 2-3，上限 3）
+    judge_tier: str = "mid"              # LLM 评委档位 fast|mid|strong
+    temperature_spread: float = 0.15     # 候选间温度差（多样性）
+
+
+@dataclass
 class NovelForgeConfig:
     db_path: str = "novel.db"
     project_id: str = "default"
@@ -59,6 +67,7 @@ class NovelForgeConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     recall: RecallConfig = field(default_factory=RecallConfig)
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
+    candidates: CandidateConfig = field(default_factory=CandidateConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）

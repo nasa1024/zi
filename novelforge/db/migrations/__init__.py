@@ -51,12 +51,13 @@ def migrate(conn: sqlite3.Connection) -> tuple[str, str]:
         (old_version, new_version) — same string means nothing was applied.
     """
     # 延迟导入，确保所有版本模块已注册
-    from . import v3, v4, v5, v6, v7, v8, v9  # noqa: F401
+    from . import v3, v4, v5, v6, v7, v8, v9, v10  # noqa: F401
 
     current = get_meta(conn, "schema_version") or "1"
     applied = []
-    for v, fn in sorted(_MIGRATIONS.items()):
-        if v > current:
+    # 数值序比较：字符串序到 v10 会错（"10" < "9"）
+    for v, fn in sorted(_MIGRATIONS.items(), key=lambda kv: int(kv[0])):
+        if int(v) > int(current):
             try:
                 fn(conn)
                 set_meta(conn, "schema_version", v)

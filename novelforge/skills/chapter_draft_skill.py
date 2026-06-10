@@ -117,6 +117,8 @@ class ChapterDraftSkill:
             [Message(role="user", content=user_msg)],
             system=_SYSTEM,
             max_tokens=max_out,
+            # M3-①: 多候选时由 orchestrator 注入不同温度制造多样性
+            temperature=ctx.extra.get("temperature", 1.0),
         )
 
         draft_text, proposals = _parse_output(resp.text, ctx.target_chapter)
