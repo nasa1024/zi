@@ -12,6 +12,7 @@ import type {
   NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
+  ForeshadowHealth,
   ProjectResponse,
   ReviewQueueItem,
   SSEDoneEvent,
@@ -860,6 +861,8 @@ function PipelinePanel({
   const [chapterGoal, setChapterGoal] = useState<string>('');
   const [mode, setMode] = useState<'human_gate' | 'auto_promote' | 'hybrid'>('human_gate');
   const [nCandidates, setNCandidates] = useState<number>(1);
+  const [qualityCheck, setQualityCheck] = useState<boolean>(false);
+  const [fsHealth, setFsHealth] = useState<ForeshadowHealth | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -918,6 +921,8 @@ function PipelinePanel({
       if (!chapterNoTouched.current) {
         setChapterNo(String(sug.next_chapter));
       }
+      // 伏笔健康度随建议一起刷新（轻量聚合查询）
+      api.foreshadowHealth(projectId).then(setFsHealth).catch(() => {});
       return sug;
     } catch {
       return null;
@@ -952,6 +957,7 @@ function PipelinePanel({
           chapter_goal: goal.trim() || undefined,
           mode,
           n_candidates: nCandidates > 1 ? nCandidates : undefined,
+          quality_check: qualityCheck || undefined,
         },
         {
           onStage: (e) => setLiveStages((prev) => [...prev, e]),
@@ -1069,6 +1075,7 @@ function PipelinePanel({
         from_chapter: from,
         to_chapter: from + count - 1,
         mode: apMode,
+        quality_check: qualityCheck || undefined,
       });
       setApSession(session);
     } catch (err) {
@@ -1302,6 +1309,19 @@ function PipelinePanel({
             />
           </label>
 
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}
+            title="LLM 评委给每章打 0-10 分；低分或工艺 warn 堆积时自动润色一轮（取分高版本）；挂机时连续低分自动降级人审"
+          >
+            <input
+              type="checkbox"
+              checked={qualityCheck}
+              onChange={(e) => setQualityCheck(e.target.checked)}
+              disabled={busy}
+            />
+            质量评分
+          </label>
+
           {busy && (
             <button type="button" className="nf-btn-sm" onClick={stopChain}>
               ⏹ 停止
@@ -1317,6 +1337,14 @@ function PipelinePanel({
             )}
             {suggestion.sources.length > 0 && (
               <>　·　目标依据：{suggestion.sources.join(' / ')}</>
+            )}
+            {fsHealth && fsHealth.overdue_count > 0 && (
+              <span
+                title={`最早第 ${fsHealth.oldest_overdue_chapter} 章到期；未回收伏笔共 ${fsHealth.open_count} 条`}
+                style={{ marginLeft: '0.5rem' }}
+              >
+                {fsHealth.status === 'red' ? '🔴' : '🟡'} 逾期伏笔 {fsHealth.overdue_count} 条
+              </span>
             )}
           </div>
         )}
@@ -1564,6 +1592,11 @@ function PipelinePanel({
                   cache命中：<b>{doneData.cache_read_tokens}</b>
                 </span>
               )}
+              {doneData.quality_score != null && (
+                <span className="rs-chip" title="LLM 评委质量分（0-10）">
+                  质量分：<b>{doneData.quality_score.toFixed(1)}</b>
+                </span>
+              )}
             </div>
           )}
 
@@ -1618,6 +1651,9 @@ function PipelinePanel({
               <span className={`ph-status ${rec.status}`}>{rec.status}</span>
               <span className="ph-ch">第 {rec.chapter} 章</span>
               <span className="ph-wc">{rec.word_count != null ? `${rec.word_count} 字` : '—'}</span>
+              {rec.quality_score != null && (
+                <span className="ph-wc" title="质量分">★{rec.quality_score.toFixed(1)}</span>
+              )}
               <span className="ph-time">{rec.started_at.replace('T', ' ').slice(0, 16)}</span>
               <span className="ph-arrow">{expandedRun === rec.run_id ? '▲' : '▼'}</span>
             </button>

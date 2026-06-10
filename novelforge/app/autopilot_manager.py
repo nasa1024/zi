@@ -233,6 +233,7 @@ class AutopilotManager:
                 "budget_session_max_tokens": session.budget_session_max_tokens,
                 "budget_session_max_usd": session.budget_session_max_usd,
                 "auto_degrade_after_consecutive_issues": getattr(req, "auto_degrade_after_consecutive_issues", 2),
+                "quality_check": getattr(req, "quality_check", False),
             }, ensure_ascii=False)
             conn = registry.open_conn(session.project_id)
             try:
@@ -327,6 +328,8 @@ class AutopilotManager:
                     cfg.budget.max_tokens_per_chapter = req.budget_max_tokens_per_chapter
                 if req.budget_max_usd_per_chapter:
                     cfg.budget.max_usd_per_chapter = req.budget_max_usd_per_chapter
+                if getattr(req, "quality_check", False):
+                    cfg.quality.enabled = True
                 if api_key:
                     cfg.provider.api_key = api_key
                     cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
@@ -355,7 +358,11 @@ class AutopilotManager:
                     session._touch()
 
                     hard_issues = [i for i in (outcome.issues or []) if i.get("severity") == "block"]
-                    if hard_issues:
+                    # M5-⑦：质量分低于阈值视同一次 hard issue，连续低分同样触发降级
+                    q_score = getattr(outcome, "quality_score", None)
+                    low_quality = (cfg.quality.enabled and q_score is not None
+                                   and q_score < cfg.quality.min_score)
+                    if hard_issues or low_quality:
                         session.consecutive_hard_issues += 1
                         if session.consecutive_hard_issues >= req.auto_degrade_after_consecutive_issues:
                             session.policy_mode = "human_gate"

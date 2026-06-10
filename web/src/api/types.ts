@@ -85,6 +85,7 @@ export interface PipelineRunRequest {
   budget_max_tokens?: number | null;
   budget_max_usd?: number | null;
   n_candidates?: number | null;
+  quality_check?: boolean | null;
 }
 
 export interface StageResult {
@@ -117,6 +118,7 @@ export interface PipelineRunRecord {
   started_at: string;
   finished_at?: string | null;
   word_count?: number | null;
+  quality_score?: number | null;
 }
 
 export interface PipelineRunDetail extends PipelineRunRecord {
@@ -187,6 +189,15 @@ export interface AutopilotStartRequest {
   budget_session_max_tokens?: number | null;
   budget_session_max_usd?: number | null;
   auto_degrade_after_consecutive_issues?: number;
+  quality_check?: boolean;
+}
+
+export interface ForeshadowHealth {
+  open_count: number;
+  overdue_count: number;
+  oldest_overdue_chapter?: number | null;
+  due_soon: { label: string; due_chapter: number }[];
+  status: 'green' | 'yellow' | 'red' | string;
 }
 
 export interface AutopilotSessionInfo {
@@ -225,6 +236,7 @@ export interface SSEDoneEvent {
   tokens: number;
   usd: number;
   cache_read_tokens?: number;
+  quality_score?: number | null;
   error?: string | null;
 }
 
