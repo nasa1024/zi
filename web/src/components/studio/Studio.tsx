@@ -1074,6 +1074,20 @@ function PipelinePanel({
     }
   };
 
+  // 恢复被中断的会话（进程重启后从断点继续，已完成的章不会重写）
+  const resumeAutopilot = async () => {
+    if (!apSession) return;
+    setApError(null);
+    setApBusy(true);
+    try {
+      setApSession(await api.autopilotResume(projectId, apSession.session_id));
+    } catch (err) {
+      setApError(errMessage(err, '恢复失败'));
+    } finally {
+      setApBusy(false);
+    }
+  };
+
   const toggleExpand = async (runId: string) => {
     if (expandedRun === runId) {
       setExpandedRun(null);
@@ -1267,6 +1281,17 @@ function PipelinePanel({
             ⏹ 取消会话
           </button>
         )}
+        {apSession?.status === 'interrupted' && (
+          <button
+            type="button"
+            className="nf-btn-sm"
+            onClick={() => void resumeAutopilot()}
+            disabled={apBusy}
+            title="会话曾被进程重启中断，从断点章继续（已完成的章不会重写）"
+          >
+            ▶ 恢复会话
+          </button>
+        )}
       </div>
 
       {apError && (
@@ -1325,6 +1350,11 @@ function PipelinePanel({
               </span>
               <span className="rs-chip">tokens：<b>{doneData.tokens}</b></span>
               <span className="rs-chip">usd：<b>${doneData.usd.toFixed(4)}</b></span>
+              {(doneData.cache_read_tokens ?? 0) > 0 && (
+                <span className="rs-chip" title="provider 前缀缓存命中的输入 token 数">
+                  cache命中：<b>{doneData.cache_read_tokens}</b>
+                </span>
+              )}
             </div>
           )}
 

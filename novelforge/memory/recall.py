@@ -24,11 +24,28 @@ class RecallPack:
     recent_beats: list[dict] = field(default_factory=list)      # 最近 N 章 beats
     gimmick_rules: list[dict] = field(default_factory=list)
 
-    def to_context_str(self) -> str:
-        """将召回结果序列化为 prompt 上下文字符串（简化版）。"""
+    def to_stable_context_str(self) -> str:
+        """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
+
+        放在所有 prompt 的最前面作为**稳定前缀**——provider 前缀缓存
+        （DeepSeek 自动 / Anthropic cache_control）按字节级前缀匹配命中，
+        同章多次调用与多候选生成共享此前缀（M1-⑥）。
+        底层 SQL 均带 ORDER BY，序列化输出确定性。
+        """
         parts = []
+        if self.taboos:
+            parts.append("## 常驻禁忌（绝对不可违反）\n" + _fmt_rows(self.taboos, ["rule_text", "reason"]))
+        if self.gimmick_rules:
+            parts.append("## 金手指规则\n" + _fmt_rows(self.gimmick_rules, ["gimmick_name", "cooldown_chapters"]))
         if self.entities:
             parts.append("## 核心实体\n" + _fmt_rows(self.entities, ["canonical_name", "entity_type"]))
+        if self.canon_facts:
+            parts.append("## 既定事实（canon）\n" + _fmt_rows(self.canon_facts, ["subject", "fact_type", "object", "valid_from_chapter"]))
+        return "\n\n".join(parts)
+
+    def to_dynamic_context_str(self) -> str:
+        """快变层：逐章演进的世界状态，放在稳定前缀之后。"""
+        parts = []
         if self.power_states:
             parts.append("## 当前境界\n" + _fmt_rows(self.power_states, ["entity_id", "rank_name", "rank_order"]))
         if self.knowledge_edges:
@@ -39,15 +56,17 @@ class RecallPack:
             parts.append("## 数值事实\n" + _fmt_rows(self.numeric_facts, ["entity_id", "metric_key", "value", "unit"]))
         if self.timeline_events:
             parts.append("## 时间线事件\n" + _fmt_rows(self.timeline_events, ["title", "chapter", "story_time_start"]))
-        if self.taboos:
-            parts.append("## 常驻禁忌（绝对不可违反）\n" + _fmt_rows(self.taboos, ["rule_text", "reason"]))
-        if self.gimmick_rules:
-            parts.append("## 金手指规则\n" + _fmt_rows(self.gimmick_rules, ["gimmick_name", "cooldown_chapters"]))
         if self.keyword_hits:
             parts.append("## 关键词召回段落\n" + _fmt_rows(self.keyword_hits, ["chapter", "snippet"]))
         if self.recent_beats:
             parts.append("## 近期 beats\n" + _fmt_rows(self.recent_beats, ["chapter", "beat_type", "summary"]))
         return "\n\n".join(parts)
+
+    def to_context_str(self) -> str:
+        """全量序列化 = 稳定层 + 动态层（保持单入口兼容）。"""
+        stable = self.to_stable_context_str()
+        dynamic = self.to_dynamic_context_str()
+        return "\n\n".join(p for p in (stable, dynamic) if p)
 
 
 def _fmt_rows(rows: list, keys: list[str]) -> str:

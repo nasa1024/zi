@@ -177,9 +177,12 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 512)
+        # M1-⑥：共享稳定前缀（前缀缓存命中）
+        stable = ctx.workspace.get("stable_context", "")
+        prefix = f"{stable}\n\n" if stable else ""
         resp = ctx.llm.generate(
             ModelTier.MID,
-            [Message(role="user", content=draft_text[:2000])],
+            [Message(role="user", content=prefix + draft_text[:2000])],
             system=_FLAT_SYSTEM,
             max_tokens=max_out,
         )

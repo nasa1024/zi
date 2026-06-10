@@ -147,7 +147,7 @@ export interface AutopilotSessionInfo {
   from_chapter: number;
   to_chapter: number;
   current_chapter: number;
-  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | string;
+  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | 'interrupted' | string;
   policy_mode: string;
   chapters_done: number;
   chapters_total: number;
@@ -176,6 +176,7 @@ export interface SSEDoneEvent {
   final_gate: string;
   tokens: number;
   usd: number;
+  cache_read_tokens?: number;
   error?: string | null;
 }
 

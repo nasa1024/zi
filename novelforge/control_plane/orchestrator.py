@@ -39,6 +39,7 @@ class ChapterOutcome:
     error: Optional[str] = None
     usage_tokens: int = 0
     usage_usd: float = 0.0
+    cache_read_tokens: int = 0
 
     def summary(self) -> str:
         if not self.ok:
@@ -109,6 +110,11 @@ class Orchestrator:
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
             workspace["world_state"] = world_state
+            # M1-⑥：稳定前缀一次构建（含标题头，保证各 skill 的 user 消息从第 0 字节
+            # 起完全一致），draft/check/revise 共享，吃 provider 前缀缓存
+            _stable = recall_pack.to_stable_context_str()
+            workspace["stable_context"] = f"## 世界设定（稳定）\n{_stable}" if _stable else ""
+            workspace["dynamic_context"] = recall_pack.to_dynamic_context_str()
 
             # PacingController：读取节拍状态，附加建议到 chapter_goal
             pacing_state = pacing.get_state(conn)
@@ -227,6 +233,7 @@ class Orchestrator:
                 gate=gate_outcome,
                 usage_tokens=ledger.tokens_spent,
                 usage_usd=ledger.usd_spent,
+                cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
             )
 
         except Exception as e:
@@ -242,7 +249,10 @@ class Orchestrator:
 
         from .llm.provider import Message
         system = "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。"
+        stable = ctx.workspace.get("stable_context", "")
+        prefix = f"{stable}\n\n" if stable else ""
         user_msg = (
+            f"{prefix}"
             f"一致性问题：\n{issues_str}\n\n"
             f"当前草稿：\n{draft_text[:4000]}"
         )

@@ -64,6 +64,8 @@ class _StartReq:
     budget_max_tokens_per_chapter: Optional[int]
     budget_max_usd_per_chapter: Optional[float]
     auto_degrade_after_consecutive_issues: int
+    budget_session_max_tokens: Optional[int] = None
+    budget_session_max_usd: Optional[float] = None
 
 
 @router.post("/{project_id}/autopilot/start", response_model=AutopilotSessionInfo, status_code=202)
@@ -89,6 +91,8 @@ def autopilot_start(
         budget_max_tokens_per_chapter=req.budget_max_tokens_per_chapter,
         budget_max_usd_per_chapter=req.budget_max_usd_per_chapter,
         auto_degrade_after_consecutive_issues=req.auto_degrade_after_consecutive_issues,
+        budget_session_max_tokens=req.budget_session_max_tokens,
+        budget_session_max_usd=req.budget_session_max_usd,
     )
     session = mgr.start(internal_req, registry, api_key=api_key)
     return _session_to_info(session)
@@ -104,9 +108,11 @@ def autopilot_status(
     if registry.get(project_id) is None:
         raise HTTPException(404, f"项目不存在: {project_id}")
     mgr = get_autopilot_manager()
-    sessions = mgr.list_for_project(project_id)
     conn = registry.open_conn(project_id)
     try:
+        # 内存活跃会话 ∪ DB 历史会话（重启残留的 running/degraded 在此被标 interrupted）
+        sessions = mgr.list_for_project(project_id) + mgr.load_db_sessions(project_id, conn)
+        sessions.sort(key=lambda s: s.started_at, reverse=True)
         return [_session_to_info(s, conn) for s in sessions]
     finally:
         conn.close()
@@ -120,13 +126,72 @@ def autopilot_get_session(
 ):
     mgr = get_autopilot_manager()
     s = mgr.get(session_id)
-    if s is None or s.project_id != project_id:
+    if s is not None and s.project_id != project_id:
         raise HTTPException(404, f"会话不存在: {session_id}")
     conn = registry.open_conn(project_id)
     try:
+        if s is None:
+            # 内存没有 → 找 DB 持久化行（进程重启后的历史会话）
+            db_sessions = [x for x in mgr.load_db_sessions(project_id, conn)
+                           if x.session_id == session_id]
+            if not db_sessions:
+                raise HTTPException(404, f"会话不存在: {session_id}")
+            s = db_sessions[0]
         return _session_to_info(s, conn)
     finally:
         conn.close()
+
+
+# ── POST /{project_id}/autopilot/{session_id}/resume ─────────────────────────
+
+@router.post("/{project_id}/autopilot/{session_id}/resume",
+             response_model=AutopilotSessionInfo, status_code=202)
+def autopilot_resume(
+    project_id: str,
+    session_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """从断点恢复被中断的会话：以「已完成最大章 +1」与 current_chapter 的较大者为新起点，
+    沿用原启动参数开新会话（resumed_from 链回旧会话）。已完成的章不会重写。"""
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    mgr = get_autopilot_manager()
+    live = mgr.get(session_id)
+    if live is not None and live.status in ("running", "degraded"):
+        raise HTTPException(409, f"会话仍在运行，无需恢复: {session_id}")
+
+    conn = registry.open_conn(project_id)
+    try:
+        info = mgr.get_db_session_req(session_id, conn)
+        if info is None:
+            raise HTTPException(404, f"会话不存在: {session_id}")
+        if info["status"] not in ("interrupted", "error", "circuit_broken"):
+            raise HTTPException(409, f"会话状态 {info['status']} 不可恢复")
+
+        from ...app.chapter_suggest import next_chapter_no
+        next_ch, _ = next_chapter_no(conn, project_id)
+        from_chapter = max(info["current_chapter"], next_ch)
+        if from_chapter > info["to_chapter"]:
+            raise HTTPException(409, "目标章已全部完成，无需恢复")
+    finally:
+        conn.close()
+
+    req = info["req"]
+    internal_req = _StartReq(
+        project_id=project_id,
+        from_chapter=from_chapter,
+        to_chapter=info["to_chapter"],
+        chapter_goals=req.get("chapter_goals") or {},
+        mode=req.get("mode") or "auto_promote",
+        budget_max_tokens_per_chapter=req.get("budget_max_tokens_per_chapter"),
+        budget_max_usd_per_chapter=req.get("budget_max_usd_per_chapter"),
+        auto_degrade_after_consecutive_issues=req.get("auto_degrade_after_consecutive_issues", 2),
+        budget_session_max_tokens=req.get("budget_session_max_tokens"),
+        budget_session_max_usd=req.get("budget_session_max_usd"),
+    )
+    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)
+    return _session_to_info(session)
 
 
 # ── POST /{project_id}/autopilot/degrade ─────────────────────────────────────
