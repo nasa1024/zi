@@ -40,6 +40,8 @@ class RecallConfig:
     max_keywords: int = 30
     context_window_chapters: int = 5     # 往前看多少章关键词
     enable_vector: bool = False          # MVP1 关闭向量召回
+    enable_summaries: bool = True        # M2-②: 分层叙事摘要（章摘要+卷滚动摘要）
+    summary_window_chapters: int = 5     # 注入最近 N 章摘要
 
 
 @dataclass
@@ -58,4 +60,5 @@ class NovelForgeConfig:
     recall: RecallConfig = field(default_factory=RecallConfig)
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
+    midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）

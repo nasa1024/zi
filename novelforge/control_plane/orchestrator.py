@@ -106,6 +106,8 @@ class Orchestrator:
                 keyword_query=keyword_query,
                 max_keywords=cfg.recall.max_keywords,
                 context_window=cfg.recall.context_window_chapters,
+                summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
+                enable_summaries=getattr(cfg.recall, "enable_summaries", True),
             )
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
@@ -159,8 +161,15 @@ class Orchestrator:
                 progress_cb("check", "ok", {"issues": len(all_issues)})
 
             # ── 5. REVISE loop ────────────────────────────────────────────────
+            # M2-⑤ 中段加压：ConStory-Bench 实证一致性错误集中在叙事进程 40-60% 处，
+            # 卷中段章节 revise 上限 +1
+            revise_budget = cfg.max_revise_loops
+            if getattr(cfg, "midpoint_boost", True):
+                _prog = _volume_progress(conn, chapter)
+                if _prog is not None and 0.4 <= _prog <= 0.6:
+                    revise_budget += 1
             hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
-            for _iter in range(cfg.max_revise_loops):
+            for _iter in range(revise_budget):
                 if not hard_blocks:
                     break
                 if ledger and hasattr(ledger, "charge_revise_round"):
@@ -213,11 +222,13 @@ class Orchestrator:
             )
             gate_outcome: GateOutcome = apply_gate_routes(ctx, gate_decision, {"chapter": chapter})
 
-            # ── 7. COMMIT（持久化草稿 + 更新节拍游标）────────────────────────
+            # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
             _complete_pipeline_run(conn, run_id, draft_id)
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
+            if getattr(cfg.recall, "enable_summaries", True) and draft_text:
+                _persist_chapter_summary(conn, self._gw, chapter, draft_text)
 
             committed_ids = [fid for _, fid in gate_outcome.committed]
             if progress_cb:
@@ -370,6 +381,107 @@ def _complete_pipeline_run(conn: sqlite3.Connection, run_id: str, draft_id: Opti
         conn.commit()
     except Exception:
         pass
+
+
+def _volume_progress(conn: sqlite3.Connection, chapter: int) -> Optional[float]:
+    """章节在所属卷中的进度 [0,1]；无卷信息或卷未闭区间时返回 None。"""
+    try:
+        row = conn.execute(
+            "SELECT start_chapter, end_chapter FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND end_chapter IS NOT NULL"
+            "   AND start_chapter<=? AND end_chapter>=?"
+            " ORDER BY volume_no LIMIT 1",
+            (chapter, chapter),
+        ).fetchone()
+        if row is None:
+            return None
+        start, end = row["start_chapter"], row["end_chapter"]
+        if end <= start:
+            return None
+        return (chapter - start) / (end - start)
+    except Exception:
+        return None
+
+
+_SUMMARY_SYSTEM = """\
+你是 NovelForge 的前情摘要助手。用不超过 250 字概括本章，必须覆盖三点：
+① 发生了什么（关键事件）；② 谁的状态/关系变了；③ 章末悬念或情绪落点。
+只输出摘要正文，不要标题、不要解释。"""
+
+
+def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, draft_text: str) -> None:
+    """M2-②：章摘要 + 每 5 章卷级滚动摘要。失败静默，不阻断主流程。"""
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+
+    try:
+        resp = gateway.generate(
+            ModelTier.FAST,
+            [Message(role="user", content=f"第 {chapter} 章正文：\n\n{draft_text[:6000]}")],
+            system=_SUMMARY_SYSTEM,
+            max_tokens=400,
+        )
+        summary = resp.text.strip()
+        if not summary:
+            return
+
+        vol_row = conn.execute(
+            "SELECT volume_no FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
+            "   AND (end_chapter IS NULL OR end_chapter>=?)"
+            " ORDER BY volume_no LIMIT 1",
+            (chapter, chapter),
+        ).fetchone()
+        volume_no = vol_row["volume_no"] if vol_row else None
+
+        conn.execute(
+            "INSERT INTO chapter_summaries(id, chapter, summary, volume_no)"
+            " VALUES(?,?,?,?)"
+            " ON CONFLICT(chapter) DO UPDATE SET"
+            "   summary=excluded.summary, volume_no=excluded.volume_no,"
+            "   created_at=datetime('now')",
+            (new_id("csum"), chapter, summary, volume_no),
+        )
+        conn.commit()
+
+        # 卷级 rollup：每 5 章或写到卷末时刷新本卷滚动摘要
+        if volume_no is not None:
+            vol = conn.execute(
+                "SELECT end_chapter FROM volumes WHERE volume_no=?", (volume_no,)
+            ).fetchone()
+            at_volume_end = vol and vol["end_chapter"] == chapter
+            if chapter % 5 == 0 or at_volume_end:
+                _rollup_volume_summary(conn, gateway, volume_no)
+    except Exception:
+        pass
+
+
+def _rollup_volume_summary(conn: sqlite3.Connection, gateway, volume_no: int) -> None:
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+
+    rows = conn.execute(
+        "SELECT chapter, summary FROM chapter_summaries"
+        " WHERE volume_no=? ORDER BY chapter",
+        (volume_no,),
+    ).fetchall()
+    if not rows:
+        return
+    joined = "\n".join(f"第{r['chapter']}章：{r['summary']}" for r in rows)
+    resp = gateway.generate(
+        ModelTier.FAST,
+        [Message(role="user", content=f"以下是本卷各章摘要：\n\n{joined[:8000]}")],
+        system="你是 NovelForge 的卷情节梳理助手。把各章摘要压缩成不超过 300 字的本卷剧情概要，"
+               "保留主线推进、关键转折与当前悬而未决的冲突。只输出概要正文。",
+        max_tokens=500,
+    )
+    summary = resp.text.strip()
+    if summary:
+        conn.execute(
+            "UPDATE volumes SET rolling_summary=? WHERE volume_no=?",
+            (summary, volume_no),
+        )
+        conn.commit()
 
 
 def _persist_draft(

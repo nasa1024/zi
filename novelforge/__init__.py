@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "8"  # +M1-③: autopilot_sessions 持久化（断点恢复）
+SCHEMA_VERSION = "9"  # +M2-②: chapter_summaries 分层叙事摘要
