@@ -174,6 +174,7 @@ async def pipeline_run_stream(
                 "final_gate": final_gate,
                 "tokens": outcome.usage_tokens,
                 "usd": outcome.usage_usd,
+                "cache_read_tokens": getattr(outcome, "cache_read_tokens", 0),
                 "error": outcome.error,
             })
         except CircuitTripped as e:

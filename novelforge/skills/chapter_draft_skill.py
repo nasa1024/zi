@@ -80,15 +80,30 @@ class ChapterDraftSkill:
         chapter_goal: str = ctx.workspace.get("chapter_goal", "")
         target_chars: int = ctx.extra.get("draft_target_chars", 3000)
 
-        context_str = recall.to_context_str() if recall else "(无召回上下文)"
+        # M1-⑥：稳定前缀（慢变设定）在前、动态状态居中、本章任务最后——
+        # 同章 draft/check/revise 与多候选生成的 user 消息共享首段字节，
+        # 吃 provider 前缀缓存。stable_context 由 orchestrator 构建（已含标题头）。
+        stable = ctx.workspace.get("stable_context")
+        dynamic = ctx.workspace.get("dynamic_context")
+        if stable is None and recall is not None:
+            _s = recall.to_stable_context_str()
+            stable = f"## 世界设定（稳定）\n{_s}" if _s else ""
+            dynamic = recall.to_dynamic_context_str()
+        context_block = "\n\n".join(
+            p for p in (
+                stable or "",
+                f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
+            ) if p
+        ) or "(无召回上下文)"
         beats_str = _fmt_beats(beats)
 
         user_msg = (
+            f"{context_block}\n\n"
+            f"## 本章任务\n"
             f"第 {ctx.target_chapter} 章\n"
             f"目标字数：约 {target_chars} 字\n"
             f"章节目标：{chapter_goal or '按情节发展'}\n\n"
-            f"## Beat Sheet\n{beats_str}\n\n"
-            f"## 世界状态召回\n{context_str}"
+            f"## Beat Sheet\n{beats_str}"
         )
 
         from ..control_plane.llm.provider import Message

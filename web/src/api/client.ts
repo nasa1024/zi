@@ -241,6 +241,13 @@ export const api = {
     );
   },
 
+  autopilotResume(id: string, sessionId: string): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/resume`,
+    );
+  },
+
   pipelineNext(id: string): Promise<NextChapterSuggestion> {
     return request<NextChapterSuggestion>(
       'GET',
