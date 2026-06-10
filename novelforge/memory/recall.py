@@ -23,6 +23,8 @@ class RecallPack:
     canon_facts: list[dict] = field(default_factory=list)       # facts where status='canon'
     recent_beats: list[dict] = field(default_factory=list)      # 最近 N 章 beats
     gimmick_rules: list[dict] = field(default_factory=list)
+    chapter_summaries: list[dict] = field(default_factory=list)  # M2-②: 最近 N 章前情摘要（时间正序）
+    volume_summary: str = ""                                     # M2-②: 本卷至今滚动摘要
 
     def to_stable_context_str(self) -> str:
         """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
@@ -44,8 +46,17 @@ class RecallPack:
         return "\n\n".join(parts)
 
     def to_dynamic_context_str(self) -> str:
-        """快变层：逐章演进的世界状态，放在稳定前缀之后。"""
+        """快变层：逐章演进的世界状态，放在稳定前缀之后。
+
+        前情摘要置于动态层最前——这是 LLM 最缺的叙事语境
+        （硬状态管得住等级数值，管不住上一章的情绪余韵）。
+        """
         parts = []
+        if self.volume_summary:
+            parts.append(f"## 本卷至今\n{self.volume_summary}")
+        if self.chapter_summaries:
+            lines = [f"  第{r['chapter']}章：{r['summary']}" for r in self.chapter_summaries]
+            parts.append("## 前情摘要（近几章）\n" + "\n".join(lines))
         if self.power_states:
             parts.append("## 当前境界\n" + _fmt_rows(self.power_states, ["entity_id", "rank_name", "rank_order"]))
         if self.knowledge_edges:
@@ -90,6 +101,8 @@ def gather_hard_context(
     keyword_query: Optional[str] = None,
     max_keywords: int = 30,
     context_window: int = 5,
+    summary_window: int = 5,
+    enable_summaries: bool = True,
 ) -> RecallPack:
     """结构化 SQL 召回（§06.3 硬上下文）。"""
     pack = RecallPack()
@@ -106,6 +119,10 @@ def gather_hard_context(
     pack.gimmick_rules = _fetch_gimmicks(as_of, conn)
     pack.recent_beats = _fetch_recent_beats(as_of, conn, context_window)
     pack.canon_facts = _fetch_canon_facts(entity_ids, conn)
+
+    if enable_summaries:
+        pack.chapter_summaries = _fetch_recent_summaries(as_of, conn, summary_window)
+        pack.volume_summary = _fetch_volume_summary(as_of, conn)
 
     if keyword_query:
         pack.keyword_hits = _fts_search(keyword_query, max_keywords, conn)
@@ -238,6 +255,35 @@ def _fetch_canon_facts(ids: list[str], conn) -> list[dict]:
         f" ORDER BY valid_from_chapter DESC",
         tuple(ids),
     )
+
+
+def _fetch_recent_summaries(as_of: int, conn, window: int) -> list[dict]:
+    """最近 N 章前情摘要（chapter<=as_of 继承 as-of 防剧透语义），按时间正序返回。"""
+    try:
+        rows = _rows(
+            conn,
+            "SELECT chapter, summary FROM chapter_summaries"
+            " WHERE chapter<=? ORDER BY chapter DESC LIMIT ?",
+            (as_of, window),
+        )
+        return list(reversed(rows))
+    except Exception:
+        return []  # 旧库未迁移时静默降级
+
+
+def _fetch_volume_summary(as_of: int, conn) -> str:
+    """as_of 所在卷的滚动摘要。"""
+    try:
+        row = conn.execute(
+            "SELECT rolling_summary FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
+            "   AND (end_chapter IS NULL OR end_chapter>=?)"
+            " ORDER BY volume_no LIMIT 1",
+            (as_of, as_of),
+        ).fetchone()
+        return (row["rolling_summary"] or "") if row else ""
+    except Exception:
+        return ""
 
 
 def _fts_search(query: str, limit: int, conn) -> list[dict]:

@@ -101,13 +101,29 @@ def _run_hard_validators(proposals: list[dict], world: Optional[WorldState], ctx
 
 # ── LLM 软检查 ────────────────────────────────────────────────────────────────
 
+# 结构化检错清单：5 大类 19 子类（ConStory-Bench, arXiv:2603.05890 实证分类——
+# 长故事一致性错误集中于这些模式，且高发于叙事中段）
 _SOFT_SYSTEM = """\
-你是 NovelForge 的一致性审稿员。检查以下章节草稿中的软一致性问题：
-- 人物行为是否符合已知性格/动机
-- 情感弧线是否连贯
-- 是否引入了未铺垫的能力/道具
+你是 NovelForge 的一致性审稿员。对照下方清单逐类检查章节草稿，只报告**有原文证据**的问题：
 
-输出 JSON 数组，每条：{"type": "soft", "severity": "warn|info", "desc": "...", "span": "引用原文片段"}
+1 时间线与情节逻辑
+  1.1 绝对时间矛盾（日期/时辰与前文冲突）  1.2 时长冲突（耗时与行程/事件不符）
+  1.3 同步悖论（同一时刻身处两地/两事）    1.4 无因之果（结果缺少前文铺垫）
+  1.5 因果违反（果先于因）                1.6 废弃情节线（挑明的线索无后续却被遗忘）
+2 人物
+  2.1 记忆矛盾（忘记/虚构亲历事件）        2.2 知识不一致（知道不该知道的事，对照"知情关系"）
+  2.3 能力波动（能力无理由增减，对照"当前境界"）  2.4 遗忘特技（关键时刻不用已有能力且无解释）
+3 世界与场景
+  3.1 世界规则违反（对照"常驻禁忌/金手指规则"）  3.2 社会规范违反（礼制/称谓/阶层错乱）
+  3.3 地理矛盾（位置/距离/方位与前文不符）
+4 事实细节
+  4.1 外貌不符  4.2 命名混淆（人名/地名/物名漂移）  4.3 数量偏差（对照"数值事实"）
+5 叙事风格
+  5.1 视角混乱（POV 漂移）  5.2 基调不一致  5.3 风格漂移（文风突变/超纲词汇）
+
+输出 JSON 数组，每条：
+{"type":"soft","subclass":"2.3-能力波动","severity":"warn|block","desc":"...","span":"引用原文片段"}
+severity 规则：仅当问题**明确违反上文给出的设定**（禁忌/境界/知情/数值）时用 block，其余用 warn。
 若无问题，输出 []。只输出 JSON 数组。
 """
 
@@ -125,7 +141,7 @@ def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -
         prefix = f"{stable}\n\n" if stable else ""
         resp = ctx.llm.generate(
             ModelTier.MID,
-            [Message(role="user", content=f"{prefix}草稿：\n\n{draft_text[:3000]}\n\n提案摘要：\n{json.dumps(proposals[:5], ensure_ascii=False)}")],
+            [Message(role="user", content=f"{prefix}草稿：\n\n{draft_text[:6000]}\n\n提案摘要：\n{json.dumps(proposals[:5], ensure_ascii=False)}")],
             system=_SOFT_SYSTEM,
             max_tokens=max_out,
         )

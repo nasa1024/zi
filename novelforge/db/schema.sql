@@ -394,6 +394,18 @@ CREATE TABLE IF NOT EXISTS pacing_cursor (
     updated_at                TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 7b) 分层叙事摘要（M2-②）：章摘要 → 卷滚动摘要(volumes.rolling_summary) → 全局梗概(meta_kv)
+-- 每章 COMMIT 后由 FAST tier 生成 150-300 字摘要；召回时按 chapter<=as_of 注入
+-- 最近 N 章（防剧透语义与其余查询一致）。
+CREATE TABLE IF NOT EXISTS chapter_summaries (
+    id          TEXT PRIMARY KEY,
+    chapter     INTEGER NOT NULL UNIQUE,
+    summary     TEXT NOT NULL,
+    volume_no   INTEGER,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_summaries_chapter ON chapter_summaries(chapter);
+
 -- 8) L0 draft index + L1/L2 source tables ------------------------------------
 CREATE TABLE IF NOT EXISTS draft_index (
     id              TEXT PRIMARY KEY,
@@ -589,6 +601,7 @@ CREATE TABLE IF NOT EXISTS volumes (
     end_chapter     INTEGER,                    -- 最后一章（含），NULL = 仍在写
     status          TEXT NOT NULL DEFAULT 'writing'
                         CHECK(status IN ('writing','completed','archived')),
+    rolling_summary TEXT,                       -- M2-②: 本卷至今滚动摘要（FAST tier 每5章更新）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_no)
 );
