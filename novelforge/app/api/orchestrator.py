@@ -47,6 +47,8 @@ def _make_cfg(project_id: str, req: PipelineRunRequest, registry: ProjectRegistr
         cfg.budget.max_usd_per_chapter = req.budget_max_usd
     if req.n_candidates:
         cfg.candidates.n_candidates = max(1, min(3, req.n_candidates))
+    if req.quality_check is not None:
+        cfg.quality.enabled = req.quality_check
     api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if api_key:
         cfg.provider.api_key = api_key
@@ -104,6 +106,7 @@ def pipeline_run(
             draft_text=outcome.draft_text,
             budget_spent=BudgetSpent(tokens=outcome.usage_tokens, usd=outcome.usage_usd),
             circuit_breaker_tripped=False,
+            quality_score=getattr(outcome, "quality_score", None),
             error=outcome.error,
         )
     except CircuitTripped as e:
@@ -177,6 +180,7 @@ async def pipeline_run_stream(
                 "tokens": outcome.usage_tokens,
                 "usd": outcome.usage_usd,
                 "cache_read_tokens": getattr(outcome, "cache_read_tokens", 0),
+                "quality_score": getattr(outcome, "quality_score", None),
                 "error": outcome.error,
             })
         except CircuitTripped as e:
@@ -244,7 +248,7 @@ def list_pipeline_runs(
     try:
         rows = conn.execute(
             "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-            "       di.word_count"
+            "       pr.quality_score, di.word_count"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id = ?"
@@ -259,6 +263,7 @@ def list_pipeline_runs(
                 started_at=r["started_at"],
                 finished_at=r["finished_at"],
                 word_count=r["word_count"],
+                quality_score=r["quality_score"],
             )
             for r in rows
         ]

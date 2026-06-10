@@ -59,6 +59,14 @@ class CandidateConfig:
 
 
 @dataclass
+class QualityConfig:
+    """M5-⑦: 章节质量分门控 + 软问题润色。enabled=False 时零额外 LLM 调用。"""
+    enabled: bool = False
+    min_score: float = 6.0               # 低于此分触发润色 / 计入 autopilot 降级（autonovel 同款阈值）
+    polish_enabled: bool = True          # 低分或 craft warn≥3 时做一轮润色（取分高版本，防润色变差）
+
+
+@dataclass
 class NovelForgeConfig:
     db_path: str = "novel.db"
     project_id: str = "default"
@@ -68,6 +76,7 @@ class NovelForgeConfig:
     recall: RecallConfig = field(default_factory=RecallConfig)
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）

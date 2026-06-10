@@ -153,6 +153,41 @@ def _llm_judge(
         return None
 
 
+_SCORE_SYSTEM = """\
+你是网文主编。给这一章打分（0-10），从四个维度综合：
+① 钩子力度 ② 节奏张弛 ③ 人物声音 ④ 与本章目标的契合度
+输出 JSON 对象（不要其他说明）：{"score": 7.5, "reason": "30字内理由"}
+"""
+
+
+def score_chapter(gateway, judge_tier: str, chapter_goal: str, draft_text: str) -> Optional[float]:
+    """单稿质量分 0-10（M5-⑦）。失败返回 None（调用方按未启用处理）。"""
+    if not draft_text:
+        return None
+    try:
+        from ..control_plane.llm.provider import Message
+
+        try:
+            tier = ModelTier(judge_tier)
+        except ValueError:
+            tier = ModelTier.MID
+        resp = gateway.generate(
+            tier,
+            [Message(role="user",
+                     content=f"本章目标：{chapter_goal or '（未指定）'}\n\n{draft_text[:4000]}")],
+            system=_SCORE_SYSTEM,
+            max_tokens=120,
+        )
+        m = re.search(r"\{.*\}", resp.text, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        score = float(data.get("score"))
+        return max(0.0, min(10.0, score))
+    except Exception:
+        return None
+
+
 def _parse_verdict(raw: str) -> Optional[tuple[int, list, str]]:
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:

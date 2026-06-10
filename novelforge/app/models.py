@@ -176,6 +176,7 @@ class PipelineRunRequest(BaseModel):
     budget_max_tokens: Optional[int] = None
     budget_max_usd: Optional[float] = None
     n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # M3-①: 多候选择优
+    quality_check: Optional[bool] = None  # M5-⑦: 质量评分 + 低分润色
 
 
 class StageResult(BaseModel):
@@ -198,6 +199,7 @@ class PipelineRunResponse(BaseModel):
     draft_text: str = ""
     budget_spent: BudgetSpent
     circuit_breaker_tripped: bool = False
+    quality_score: Optional[float] = None  # M5-⑦
     error: Optional[str] = None
 
 
@@ -209,11 +211,22 @@ class PipelineRunRecord(BaseModel):
     started_at: str
     finished_at: Optional[str] = None
     word_count: Optional[int] = None
+    quality_score: Optional[float] = None  # M5-⑦
 
 
 class PipelineRunDetail(PipelineRunRecord):
     """pipeline_run 详情（含完整正文）。"""
     draft_text: str = ""
+
+
+# ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────
+
+class ForeshadowHealth(BaseModel):
+    open_count: int = 0          # 未回收（planted/reinforced/misled/overdue）
+    overdue_count: int = 0
+    oldest_overdue_chapter: Optional[int] = None   # 最早到期且仍未回收的章号
+    due_soon: list[dict] = Field(default_factory=list)  # 3 章内到期 [{label, due_chapter}]
+    status: str = "green"        # green(无逾期) / yellow(≤2) / red(>2)
 
 
 # ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
@@ -288,6 +301,7 @@ class AutopilotStartRequest(BaseModel):
     budget_session_max_tokens: Optional[int] = None   # E4: 会话级跨章 token 封顶
     budget_session_max_usd: Optional[float] = None    # E4: 会话级跨章 USD 封顶
     auto_degrade_after_consecutive_issues: int = 2  # 连续 N 章有 hard issue → 降级
+    quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
 
 
 class AutopilotSessionInfo(BaseModel):

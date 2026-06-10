@@ -40,6 +40,7 @@ class ChapterOutcome:
     usage_tokens: int = 0
     usage_usd: float = 0.0
     cache_read_tokens: int = 0
+    quality_score: Optional[float] = None
 
     def summary(self) -> str:
         if not self.ok:
@@ -227,6 +228,19 @@ class Orchestrator:
                 ]
                 hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
 
+            # ── 5b. 质量评分 + 软问题润色（M5-⑦，enabled=False 时零额外调用）──
+            quality_score: Optional[float] = None
+            qcfg = getattr(cfg, "quality", None)
+            if qcfg is not None and qcfg.enabled and workspace.get("draft_text"):
+                quality_score = self._quality_pass(
+                    skill_ctx, cfg, hard_blocks, all_issues, progress_cb
+                )
+                continuity_issues = workspace.get("continuity_issues", [])
+                craft_issues = workspace.get("craft_issues", [])
+                all_issues = continuity_issues + [
+                    {"source": "craft", **i} for i in craft_issues
+                ]
+
             # ── 6. DEDUP + CONFLICT + GATE ────────────────────────────────────
             draft_text: str = workspace.get("draft_text", "")
             proposals: list[dict] = workspace.get("proposals", [])
@@ -266,11 +280,13 @@ class Orchestrator:
             # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
             _complete_pipeline_run(conn, run_id, draft_id,
-                                   detail=workspace.get("candidate_report"))
+                                   detail=workspace.get("candidate_report"),
+                                   quality_score=quality_score)
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
             if getattr(cfg.recall, "enable_summaries", True) and draft_text:
                 _persist_chapter_summary(conn, self._gw, chapter, draft_text)
+            _flip_overdue_foreshadow(conn, chapter)
 
             committed_ids = [fid for _, fid in gate_outcome.committed]
             if progress_cb:
@@ -287,6 +303,7 @@ class Orchestrator:
                 usage_tokens=ledger.tokens_spent,
                 usage_usd=ledger.usd_spent,
                 cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
+                quality_score=quality_score,
             )
 
         except Exception as e:
@@ -295,6 +312,85 @@ class Orchestrator:
                 error=str(e),
                 usage_tokens=ledger.tokens_spent,
             )
+
+    def _quality_pass(
+        self, ctx: SkillContext, cfg, hard_blocks: list[dict],
+        all_issues: list[dict], progress_cb=None,
+    ) -> Optional[float]:
+        """M5-⑦：质量评分；低分或 craft warn 堆积时做一轮润色，取分高版本。
+
+        Returns 最终质量分（评分失败返回 None，等同未启用）。
+        """
+        from ..craft.candidate_judge import score_chapter
+
+        qcfg = cfg.quality
+        judge_tier = getattr(cfg.candidates, "judge_tier", "mid")
+        chapter_goal = ctx.workspace.get("chapter_goal", "")
+
+        # 多候选模式下评委已给胜者打过分 → 复用，避免重复调用
+        score: Optional[float] = None
+        report = ctx.workspace.get("candidate_report") or {}
+        w = report.get("winner")
+        scores = report.get("scores") or []
+        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
+            score = float(scores[w])
+        if score is None:
+            score = score_chapter(self._gw, judge_tier, chapter_goal,
+                                  ctx.workspace.get("draft_text", ""))
+        if score is None:
+            return None
+
+        craft_warns = [i for i in ctx.workspace.get("craft_issues", [])
+                       if i.get("severity") == "warn"]
+        need_polish = (qcfg.polish_enabled and not hard_blocks and
+                       (score < qcfg.min_score or len(craft_warns) >= 3))
+        if need_polish:
+            try:
+                old_draft = ctx.workspace.get("draft_text", "")
+                old_craft = list(ctx.workspace.get("craft_issues", []))
+                if self._gw.ledger and hasattr(self._gw.ledger, "charge_revise_round"):
+                    self._gw.ledger.charge_revise_round()
+                polished = self._polish(ctx, craft_warns)
+                if polished and polished != old_draft:
+                    ctx.workspace["draft_text"] = polished
+                    self._reg.invoke("craft_check", ctx)
+                    new_score = score_chapter(self._gw, judge_tier, chapter_goal, polished)
+                    if new_score is not None and new_score >= score:
+                        score = new_score
+                    else:
+                        # 润色变差 → 回退（HoLLMwood 渐进精炼 + 保底）
+                        ctx.workspace["draft_text"] = old_draft
+                        ctx.workspace["craft_issues"] = old_craft
+            except Exception:
+                pass  # 预算熔断等 → 保留原稿原分
+
+        if progress_cb:
+            progress_cb("quality", "ok", {
+                "score": score, "polished": need_polish,
+                "min_score": qcfg.min_score,
+            })
+        return score
+
+    def _polish(self, ctx: SkillContext, craft_warns: list[dict]) -> str:
+        """单轮工艺润色：不改情节/人物行为/事实设定，只解决 craft warn。"""
+        draft_text: str = ctx.workspace.get("draft_text", "")
+        warns_str = "\n".join(f"- [{w.get('check', '?')}] {w.get('detail', '')}"
+                              for w in craft_warns) or "- 整体打磨节奏与钩子"
+
+        from .llm.provider import Message
+        system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
+                  "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
+        stable = ctx.workspace.get("stable_context", "")
+        prefix = f"{stable}\n\n" if stable else ""
+        resp = ctx.llm.generate(
+            ModelTier.MID,
+            [Message(role="user", content=(
+                f"{prefix}工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
+            ))],
+            system=system,
+            max_tokens=8192,
+        )
+        return resp.text.strip()
 
     def _revise(self, ctx: SkillContext, hard_blocks: list[dict]) -> dict:
         draft_text: str = ctx.workspace.get("draft_text", "")
@@ -415,15 +511,30 @@ def _begin_pipeline_run(conn: sqlite3.Connection, chapter: int, project_id: str,
 def _complete_pipeline_run(
     conn: sqlite3.Connection, run_id: str, draft_id: Optional[str],
     detail: Optional[dict] = None,
+    quality_score: Optional[float] = None,
 ) -> None:
     """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。detail=候选择优报告等明细。"""
     try:
         detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         conn.execute(
             "UPDATE pipeline_run SET status='completed', draft_id=?, detail_json=?,"
-            " finished_at=datetime('now')"
+            " quality_score=?, finished_at=datetime('now')"
             " WHERE run_id=?",
-            (draft_id, detail_json, run_id),
+            (draft_id, detail_json, quality_score, run_id),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _flip_overdue_foreshadow(conn: sqlite3.Connection, chapter: int) -> None:
+    """M5-⑧：把已过期未回收的伏笔翻转为 overdue（此前无任何代码翻转此状态）。"""
+    try:
+        conn.execute(
+            "UPDATE foreshadow SET state='overdue', updated_at=datetime('now')"
+            " WHERE state IN ('planted','reinforced','misled')"
+            "   AND due_chapter IS NOT NULL AND due_chapter<?",
+            (chapter,),
         )
         conn.commit()
     except Exception:

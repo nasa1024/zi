@@ -10,6 +10,7 @@ import type {
   BibleRenderResponse,
   ChapterCard,
   ChapterCardUpdateRequest,
+  ForeshadowHealth,
   HealthResponse,
   NextChapterSuggestion,
   PipelineRunDetail,
@@ -222,6 +223,13 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  foreshadowHealth(id: string): Promise<ForeshadowHealth> {
+    return request<ForeshadowHealth>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/foreshadow/health`,
+    );
   },
 
   listVolumes(id: string): Promise<VolumeInfo[]> {

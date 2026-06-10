@@ -66,6 +66,7 @@ class _StartReq:
     auto_degrade_after_consecutive_issues: int
     budget_session_max_tokens: Optional[int] = None
     budget_session_max_usd: Optional[float] = None
+    quality_check: bool = False
 
 
 @router.post("/{project_id}/autopilot/start", response_model=AutopilotSessionInfo, status_code=202)
@@ -93,6 +94,7 @@ def autopilot_start(
         auto_degrade_after_consecutive_issues=req.auto_degrade_after_consecutive_issues,
         budget_session_max_tokens=req.budget_session_max_tokens,
         budget_session_max_usd=req.budget_session_max_usd,
+        quality_check=req.quality_check,
     )
     session = mgr.start(internal_req, registry, api_key=api_key)
     return _session_to_info(session)
@@ -188,6 +190,7 @@ def autopilot_resume(
         auto_degrade_after_consecutive_issues=req.get("auto_degrade_after_consecutive_issues", 2),
         budget_session_max_tokens=req.get("budget_session_max_tokens"),
         budget_session_max_usd=req.get("budget_session_max_usd"),
+        quality_check=req.get("quality_check", False),
     )
     api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)

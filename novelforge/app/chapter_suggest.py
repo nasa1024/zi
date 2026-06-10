@@ -72,11 +72,21 @@ def assemble_chapter_goal(conn: sqlite3.Connection, chapter: int) -> tuple[str, 
         (chapter + 2,),
     ).fetchall()
     if fs_rows:
-        labels = "、".join(
-            f"{r['label']}（第{r['due_chapter']}章到期）" for r in fs_rows
-        )
-        goal_parts.append(f"需要推进/回收的伏笔：{labels}")
-        sources.append("foreshadow")
+        overdue = [r for r in fs_rows if r["due_chapter"] < chapter]
+        upcoming = [r for r in fs_rows if r["due_chapter"] >= chapter]
+        if overdue:
+            # M5-⑧：逾期伏笔置顶，必须优先处理（hookAgenda 防堆积）
+            labels = "、".join(
+                f"{r['label']}（第{r['due_chapter']}章已到期）" for r in overdue
+            )
+            goal_parts.insert(0, f"【逾期伏笔，必须本章回收或推进】{labels}")
+            sources.insert(0, "foreshadow_overdue")
+        if upcoming:
+            labels = "、".join(
+                f"{r['label']}（第{r['due_chapter']}章到期）" for r in upcoming
+            )
+            goal_parts.append(f"需要推进/回收的伏笔：{labels}")
+            sources.append("foreshadow")
 
     beat_rows = conn.execute(
         "SELECT beat_type, summary FROM beats"
