@@ -12,10 +12,13 @@ from novelforge.craft.candidate_judge import score_chapter
 @pytest.fixture
 def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setenv("NOVELFORGE_DATA", str(tmp_path))
+    import novelforge.app.autopilot_manager as ap_mod
     import novelforge.app.deps as deps_mod
     deps_mod._registry = None
+    ap_mod._manager = None
     yield tmp_path
     deps_mod._registry = None
+    ap_mod._manager = None
 
 
 @pytest.fixture
@@ -247,3 +250,56 @@ class TestForeshadowHealth:
         conn.close()
         assert rows["旧伏笔"] == "overdue"
         assert rows["未到期"] == "planted"
+
+
+# ── Autopilot 选项透传（候选数 / 质量评分 → 每章 cfg）─────────────────────────
+
+class TestAutopilotOptionPassthrough:
+    def test_n_candidates_and_quality_reach_cfg(self, client, project, monkeypatch):
+        import time as _time
+
+        import novelforge.control_plane.llm.factory as factory_mod
+        from novelforge.control_plane.orchestrator import ChapterOutcome, Orchestrator
+
+        captured: dict = {}
+
+        def fake_generate(self, chapter, conn, *, chapter_goal="", **kw):
+            captured["n_candidates"] = self._cfg.candidates.n_candidates
+            captured["quality_enabled"] = self._cfg.quality.enabled
+            return ChapterOutcome(chapter=chapter, ok=True)
+
+        monkeypatch.setattr(Orchestrator, "generate_chapter", fake_generate)
+        monkeypatch.setattr(factory_mod, "build_gateway", lambda cfg, ledger=None: None)
+
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 1, "mode": "auto_promote",
+            "n_candidates": 3, "quality_check": True,
+        })
+        assert r.status_code == 202
+        sid = r.json()["session_id"]
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            s = client.get(f"/v1/{project}/autopilot/{sid}").json()
+            if s["status"] not in ("running", "degraded"):
+                break
+            _time.sleep(0.05)
+        assert s["status"] == "completed"
+        assert captured == {"n_candidates": 3, "quality_enabled": True}
+
+        # 启动参数随会话持久化（resume 沿用）
+        conn = _open_conn(project)
+        import json as _json
+        row = conn.execute(
+            "SELECT req_json FROM autopilot_sessions WHERE session_id=?", (sid,)
+        ).fetchone()
+        conn.close()
+        req = _json.loads(row["req_json"])
+        assert req["n_candidates"] == 3
+        assert req["quality_check"] is True
+
+    def test_out_of_range_n_candidates_422(self, client, project):
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 1, "mode": "auto_promote",
+            "n_candidates": 9,
+        })
+        assert r.status_code == 422

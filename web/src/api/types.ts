@@ -190,6 +190,7 @@ export interface AutopilotStartRequest {
   budget_session_max_usd?: number | null;
   auto_degrade_after_consecutive_issues?: number;
   quality_check?: boolean;
+  n_candidates?: number;
 }
 
 export interface ForeshadowHealth {

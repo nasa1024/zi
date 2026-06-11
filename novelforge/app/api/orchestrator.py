@@ -107,6 +107,7 @@ def pipeline_run(
             budget_spent=BudgetSpent(tokens=outcome.usage_tokens, usd=outcome.usage_usd),
             circuit_breaker_tripped=False,
             quality_score=getattr(outcome, "quality_score", None),
+            cache_read_tokens=getattr(outcome, "cache_read_tokens", 0),
             error=outcome.error,
         )
     except CircuitTripped as e:
