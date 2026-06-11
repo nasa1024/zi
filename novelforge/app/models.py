@@ -218,6 +218,24 @@ class PipelineRunRecord(BaseModel):
 class PipelineRunDetail(PipelineRunRecord):
     """pipeline_run 详情（含完整正文）。"""
     draft_text: str = ""
+    candidates: list["CandidateInfo"] = Field(default_factory=list)  # M6: 多候选时的全部候选
+    winner_index: Optional[int] = None
+    selected_by: Optional[str] = None    # "auto" | "human"
+
+
+class CandidateInfo(BaseModel):
+    """M6: 单个候选稿（3 选 1 换稿用）。"""
+    index: int
+    draft_text: str
+    length: int
+    score: Optional[float] = None
+    hard_blocks: int = 0
+    is_winner: bool = False
+    proposal_count: int = 0
+
+
+class SelectCandidateRequest(BaseModel):
+    candidate_index: int = Field(ge=0, le=2)
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────

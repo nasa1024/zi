@@ -894,6 +894,10 @@ function PipelinePanel({
   const [liveDraft, setLiveDraft] = useState<string>('');
   const [doneData, setDoneData] = useState<SSEDoneEvent | null>(null);
 
+  // M6: 多候选 3 选 1 换稿
+  const [runDetail, setRunDetail] = useState<PipelineRunDetail | null>(null);
+  const [selecting, setSelecting] = useState<number | null>(null);
+
   // 历史记录
   const [history, setHistory] = useState<PipelineRunRecord[]>([]);
   const [histLoading, setHistLoading] = useState<boolean>(false);
@@ -947,6 +951,7 @@ function PipelinePanel({
     setLiveStages([]);
     setLiveDraft('');
     setDoneData(null);
+    setRunDetail(null);
 
     let ok = false;
     try {
@@ -967,6 +972,12 @@ function PipelinePanel({
             setLiveDraft(e.draft_text ?? '');
             onChanged();
             void loadHistory();
+            // 多候选时拉详情供 3 选 1 换稿
+            if (nCandidates > 1 && e.run_id) {
+              api.getPipelineRun(projectId, e.run_id)
+                .then((d) => setRunDetail(d.candidates.length > 1 ? d : null))
+                .catch(() => {});
+            }
           },
           onError: (e) => setError(e.message || '生成失败'),
         },
@@ -1188,6 +1199,23 @@ function PipelinePanel({
       } catch { /* ignore */ } finally {
         setDetailLoading(null);
       }
+    }
+  };
+
+  // M6: 人工换稿——选中候选落盘为新修订，提案入 staging 走人审
+  const pickCandidate = async (idx: number) => {
+    if (!runDetail) return;
+    setSelecting(idx);
+    try {
+      const d = await api.selectCandidate(projectId, runDetail.run_id, idx);
+      setRunDetail(d);
+      setLiveDraft(d.draft_text);
+      void loadHistory();
+      onChanged();
+    } catch (err) {
+      setError(errMessage(err, '换稿失败'));
+    } finally {
+      setSelecting(null);
     }
   };
 
@@ -1580,6 +1608,54 @@ function PipelinePanel({
                 )}
               </span>
             </div>
+          )}
+
+          {/* M6: 3 选 1 候选卡片（点「采用此稿」人工换稿） */}
+          {runDetail && runDetail.candidates.length > 1 && (
+            <>
+              <div className="ph-hint" style={{ marginTop: '0.5rem' }}>
+                ✍️ 不满意自动择优？可改选其他候选：换稿会作为本章新修订落盘，
+                选中稿的设定提案进入审核队列由你裁决。
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${runDetail.candidates.length}, 1fr)`, gap: '0.6rem', marginTop: '0.4rem' }}>
+                {runDetail.candidates.map((c) => (
+                  <div
+                    key={c.index}
+                    className="ph-row"
+                    style={{
+                      padding: '0.6rem',
+                      border: c.is_winner ? '1px solid var(--nf-accent, #7ef)' : undefined,
+                      borderRadius: 6,
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <b>候选 #{c.index}</b>
+                      {c.is_winner && (
+                        <span className="rs-chip gate">
+                          当前采用{runDetail.selected_by === 'human' ? '（人工）' : '（自动）'}
+                        </span>
+                      )}
+                      {c.score != null && <span className="rs-chip">★{c.score}</span>}
+                      <span className="rs-chip">{c.length} 字</span>
+                      {c.hard_blocks > 0 && (
+                        <span className="rs-chip" title="确定性校验 block 数">⚠{c.hard_blocks}</span>
+                      )}
+                    </div>
+                    <div className="ph-hint" style={{ margin: '0.4rem 0', maxHeight: '6em', overflow: 'hidden' }}>
+                      {c.draft_text.slice(0, 160)}…
+                    </div>
+                    <button
+                      type="button"
+                      className="nf-btn-sm"
+                      onClick={() => void pickCandidate(c.index)}
+                      disabled={c.is_winner || selecting != null}
+                    >
+                      {selecting === c.index ? '换稿中…' : c.is_winner ? '已采用' : '采用此稿'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
 
           {doneData && (

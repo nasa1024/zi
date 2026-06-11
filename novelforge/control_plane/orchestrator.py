@@ -169,6 +169,13 @@ class Orchestrator:
                     **report,
                     "n_candidates": n_cands,
                     "lengths": [len(c["draft_text"]) for c in cand_list],
+                    "selected_by": "auto",
+                    # 候选全文 + 提案持久化（M6: human_gate 下前端 3 选 1 换稿的数据源）
+                    "candidates": [
+                        {"draft_text": c["draft_text"][:20000],
+                         "proposals": c["proposals"]}
+                        for c in cand_list
+                    ],
                 }
                 draft_ok = winner["ok"]
                 if progress_cb:

@@ -313,6 +313,14 @@ export const api = {
     );
   },
 
+  selectCandidate(id: string, runId: string, candidateIndex: number): Promise<PipelineRunDetail> {
+    return request<PipelineRunDetail>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}/select-candidate`,
+      { candidate_index: candidateIndex },
+    );
+  },
+
   reviews(id: string): Promise<ReviewQueueItem[]> {
     return request<ReviewQueueItem[]>('GET', `/v1/${encodeURIComponent(id)}/reviews`);
   },
