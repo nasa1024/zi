@@ -132,11 +132,11 @@ def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -
     if not draft_text:
         return []
     try:
-        from ..control_plane.llm.provider import Message
+        from ..control_plane.llm.provider import CacheHint, Message
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 2048)   # 软检查只需短列表
-        # M1-⑥：与 draft 共享稳定前缀（前缀缓存命中），设定语境也让软检查更准
+        # M1-⑥：跨章软检查共享稳定前缀（前缀缓存命中），设定语境也让软检查更准
         stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
         resp = ctx.llm.generate(
@@ -144,6 +144,7 @@ def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -
             [Message(role="user", content=f"{prefix}草稿：\n\n{draft_text[:6000]}\n\n提案摘要：\n{json.dumps(proposals[:5], ensure_ascii=False)}")],
             system=_SOFT_SYSTEM,
             max_tokens=max_out,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         text = resp.text.strip()
         if text.startswith("["):

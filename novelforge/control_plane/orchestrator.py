@@ -377,7 +377,7 @@ class Orchestrator:
         warns_str = "\n".join(f"- [{w.get('check', '?')}] {w.get('detail', '')}"
                               for w in craft_warns) or "- 整体打磨节奏与钩子"
 
-        from .llm.provider import Message
+        from .llm.provider import CacheHint, Message
         system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
                   "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
         stable = ctx.workspace.get("stable_context", "")
@@ -389,6 +389,7 @@ class Orchestrator:
             ))],
             system=system,
             max_tokens=8192,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         return resp.text.strip()
 
@@ -396,7 +397,7 @@ class Orchestrator:
         draft_text: str = ctx.workspace.get("draft_text", "")
         issues_str = "\n".join(f"- {i.get('desc', i)}" for i in hard_blocks)
 
-        from .llm.provider import Message
+        from .llm.provider import CacheHint, Message
         system = "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。"
         stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
@@ -410,6 +411,7 @@ class Orchestrator:
             [Message(role="user", content=user_msg)],
             system=system,
             max_tokens=5000,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         return {"draft_text": resp.text.strip()}
 
@@ -603,13 +605,18 @@ def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, dr
         conn.commit()
 
         # 卷级 rollup：每 5 章或写到卷末时刷新本卷滚动摘要
+        at_volume_end = False
         if volume_no is not None:
             vol = conn.execute(
                 "SELECT end_chapter FROM volumes WHERE volume_no=?", (volume_no,)
             ).fetchone()
-            at_volume_end = vol and vol["end_chapter"] == chapter
+            at_volume_end = bool(vol and vol["end_chapter"] == chapter)
             if chapter % 5 == 0 or at_volume_end:
                 _rollup_volume_summary(conn, gateway, volume_no)
+
+        # 全局梗概：每 10 章或卷末刷新（M2-② 第三层，跨卷长程记忆的地基）
+        if chapter % 10 == 0 or at_volume_end:
+            _update_global_synopsis(conn, gateway)
     except Exception:
         pass
 
@@ -639,6 +646,37 @@ def _rollup_volume_summary(conn: sqlite3.Connection, gateway, volume_no: int) ->
             "UPDATE volumes SET rolling_summary=? WHERE volume_no=?",
             (summary, volume_no),
         )
+        conn.commit()
+
+
+def _update_global_synopsis(conn: sqlite3.Connection, gateway) -> None:
+    """M2-② 第三层：把各卷滚动摘要 + 近期章摘要压成 ≤400 字全书梗概，存 meta_kv。"""
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+    from ..db.connection import set_meta
+
+    vol_rows = conn.execute(
+        "SELECT volume_no, title, rolling_summary FROM volumes"
+        " WHERE rolling_summary IS NOT NULL ORDER BY volume_no",
+    ).fetchall()
+    ch_rows = conn.execute(
+        "SELECT chapter, summary FROM chapter_summaries ORDER BY chapter DESC LIMIT 5",
+    ).fetchall()
+    parts = [f"第{r['volume_no']}卷《{r['title']}》：{r['rolling_summary']}" for r in vol_rows]
+    parts += [f"第{r['chapter']}章：{r['summary']}" for r in reversed(ch_rows)]
+    if not parts:
+        return
+    resp = gateway.generate(
+        ModelTier.FAST,
+        [Message(role="user", content="\n".join(parts)[:8000])],
+        system="你是 NovelForge 的全书梗概助手。把以下各卷概要与近期章节摘要压缩成"
+               "不超过 400 字的全书至此梗概：主线推进、主要人物当前处境、最大的未解冲突。"
+               "只输出梗概正文。",
+        max_tokens=600,
+    )
+    synopsis = resp.text.strip()
+    if synopsis:
+        set_meta(conn, "global_synopsis", synopsis)
         conn.commit()
 
 

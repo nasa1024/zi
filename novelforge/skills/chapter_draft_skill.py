@@ -106,7 +106,7 @@ class ChapterDraftSkill:
             f"## Beat Sheet\n{beats_str}"
         )
 
-        from ..control_plane.llm.provider import Message
+        from ..control_plane.llm.provider import CacheHint, Message
         # 根据 provider 能力动态选 max_tokens：取模型上限的一半（留余量），最少 8192
         model_id = ctx.llm.model_for(ModelTier.STRONG)
         caps = ctx.llm._provider.capabilities(model_id)
@@ -119,6 +119,7 @@ class ChapterDraftSkill:
             max_tokens=max_out,
             # M3-①: 多候选时由 orchestrator 注入不同温度制造多样性
             temperature=ctx.extra.get("temperature", 1.0),
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
 
         draft_text, proposals = _parse_output(resp.text, ctx.target_chapter)

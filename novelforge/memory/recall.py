@@ -25,6 +25,7 @@ class RecallPack:
     gimmick_rules: list[dict] = field(default_factory=list)
     chapter_summaries: list[dict] = field(default_factory=list)  # M2-②: 最近 N 章前情摘要（时间正序）
     volume_summary: str = ""                                     # M2-②: 本卷至今滚动摘要
+    global_synopsis: str = ""                                    # M2-②: 全书至此梗概（meta_kv）
 
     def to_stable_context_str(self) -> str:
         """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
@@ -52,6 +53,8 @@ class RecallPack:
         （硬状态管得住等级数值，管不住上一章的情绪余韵）。
         """
         parts = []
+        if self.global_synopsis:
+            parts.append(f"## 全书至此\n{self.global_synopsis}")
         if self.volume_summary:
             parts.append(f"## 本卷至今\n{self.volume_summary}")
         if self.chapter_summaries:
@@ -123,6 +126,7 @@ def gather_hard_context(
     if enable_summaries:
         pack.chapter_summaries = _fetch_recent_summaries(as_of, conn, summary_window)
         pack.volume_summary = _fetch_volume_summary(as_of, conn)
+        pack.global_synopsis = _fetch_global_synopsis(conn)
 
     if keyword_query:
         pack.keyword_hits = _fts_search(keyword_query, max_keywords, conn)
@@ -282,6 +286,17 @@ def _fetch_volume_summary(as_of: int, conn) -> str:
             (as_of, as_of),
         ).fetchone()
         return (row["rolling_summary"] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def _fetch_global_synopsis(conn) -> str:
+    """全书梗概（meta_kv，由 orchestrator 每 10 章/卷末刷新）。"""
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta_kv WHERE key='global_synopsis'"
+        ).fetchone()
+        return (row["value"] or "") if row else ""
     except Exception:
         return ""
 
