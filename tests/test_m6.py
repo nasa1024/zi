@@ -216,3 +216,51 @@ class TestSelectCandidate:
         r3 = client.post(f"/v1/{project}/pipeline/runs/run_nope/select-candidate",
                          json={"candidate_index": 0})
         assert r3.status_code == 404
+
+
+# ── 质量趋势统计 ──────────────────────────────────────────────────────────────
+
+class TestPipelineStats:
+    def _seed_run(self, conn, project, run_id, chapter, score, words, started):
+        conn.execute(
+            "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, word_count)"
+            " VALUES(?, ?, ?, ?, 'x', ?)",
+            (f"d_{run_id}", chapter, int(started[-1]), f"l0/{run_id}.txt", words),
+        )
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status, draft_id,"
+            " quality_score, started_at)"
+            " VALUES(?, ?, ?, 'completed', ?, ?, ?)",
+            (run_id, chapter, project, f"d_{run_id}", score, started),
+        )
+
+    def test_stats_latest_per_chapter_and_aggregates(self, client, project):
+        conn = _open_conn(project)
+        self._seed_run(conn, project, "r1", 1, 8.0, 3000, "2026-06-01T00:00:01")
+        self._seed_run(conn, project, "r2", 2, 5.0, 2800, "2026-06-01T00:00:02")
+        # 第 2 章重跑（更晚）→ 应取这条
+        self._seed_run(conn, project, "r3", 2, 7.0, 3200, "2026-06-02T00:00:03")
+        # running 的不计
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status)"
+            " VALUES('r4', 3, ?, 'running')", (project,),
+        )
+        conn.commit()
+        conn.close()
+
+        r = client.get(f"/v1/{project}/pipeline/stats")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["chapters_completed"] == 2
+        assert [s["chapter"] for s in body["series"]] == [1, 2]
+        assert body["series"][1]["quality_score"] == 7.0   # 取最新一次
+        assert body["total_words"] == 3000 + 3200
+        assert body["avg_quality_score"] == 7.5
+        assert body["low_quality_count"] == 0
+
+    def test_stats_empty_project(self, client, project):
+        r = client.get(f"/v1/{project}/pipeline/stats")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["chapters_completed"] == 0
+        assert body["avg_quality_score"] is None

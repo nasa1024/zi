@@ -206,6 +206,22 @@ export interface AutopilotStartRequest {
   n_candidates?: number;
 }
 
+export interface ChapterStat {
+  chapter: number;
+  word_count?: number | null;
+  quality_score?: number | null;
+  finished_at?: string | null;
+}
+
+export interface PipelineStats {
+  series: ChapterStat[];
+  chapters_completed: number;
+  total_words: number;
+  avg_quality_score?: number | null;
+  low_quality_count: number;
+  min_score_threshold: number;
+}
+
 export interface ForeshadowHealth {
   open_count: number;
   overdue_count: number;
