@@ -137,7 +137,7 @@ class DeduplicationEngine:
                     "请判断：store / merge / conflict？"
                 ))],
                 system=self._ARBITER_SYSTEM,
-                max_tokens=128,
+                max_tokens=1024,   # 思考型模型推理计入预算，128 会截断 JSON
             )
             result = json.loads(resp.text.strip())
             action = result.get("action", "store")
