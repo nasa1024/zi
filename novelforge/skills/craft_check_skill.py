@@ -173,11 +173,11 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
     if not draft_text or len(draft_text) < 200:
         return []
     try:
-        from ..control_plane.llm.provider import Message
+        from ..control_plane.llm.provider import CacheHint, Message
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 512)
-        # M1-⑥：共享稳定前缀（前缀缓存命中）
+        # M1-⑥：跨章共享稳定前缀（前缀缓存命中）
         stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
         resp = ctx.llm.generate(
@@ -185,6 +185,7 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
             [Message(role="user", content=prefix + draft_text[:2000])],
             system=_FLAT_SYSTEM,
             max_tokens=max_out,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         raw = resp.text.strip()
         if raw.startswith("["):

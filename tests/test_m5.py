@@ -95,7 +95,7 @@ class TestQualityGate:
 
         def factory(messages, model=""):
             user = str(messages[-1].content) if messages else ""
-            if user.startswith("当前章节："):   # planner：给合法 beats，避免 beat_contract 硬 block
+            if "## 规划任务" in user:   # planner：给合法 beats，避免 beat_contract 硬 block
                 return ('[{"beat_type":"setup","summary":"铺垫","value_axis":"平静→紧张"},'
                         '{"beat_type":"hook","summary":"悬念","value_axis":"紧张→悬念"}]')
             if "本章任务" in user:

@@ -17,8 +17,15 @@ class Message:
 
 @dataclass
 class CacheHint:
-    """标记某段 system prompt 开启 prompt caching（Anthropic cache_control）。"""
+    """Prompt caching 标记（Anthropic cache_control；DeepSeek 端自动前缀缓存、忽略本提示）。
+
+    breakpoint        : system 块的 cache_control 类型
+    user_prefix_chars : 首条 user 消息的前 N 个字符为稳定前缀（M1-⑥ stable_context），
+                        provider 将其切为独立 content block 并标记 cache_control；
+                        0 = 不切。
+    """
     breakpoint: str = "ephemeral"   # "ephemeral" | "persistent"
+    user_prefix_chars: int = 0
 
 
 @dataclass
