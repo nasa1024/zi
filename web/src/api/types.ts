@@ -123,6 +123,19 @@ export interface PipelineRunRecord {
 
 export interface PipelineRunDetail extends PipelineRunRecord {
   draft_text: string;
+  candidates: CandidateInfo[];
+  winner_index?: number | null;
+  selected_by?: 'auto' | 'human' | string | null;
+}
+
+export interface CandidateInfo {
+  index: number;
+  draft_text: string;
+  length: number;
+  score?: number | null;
+  hard_blocks: number;
+  is_winner: boolean;
+  proposal_count: number;
 }
 
 export interface NextChapterSuggestion {

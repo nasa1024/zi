@@ -14,6 +14,7 @@ from ..models import (
     NextChapterSuggestion,
     PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
+    SelectCandidateRequest,
     StageResult,
 )
 from ...config import NovelForgeConfig
@@ -278,38 +279,164 @@ def get_pipeline_run(
     run_id: str,
     registry: ProjectRegistry = Depends(get_registry),
 ):
-    """查看单次生成详情（含完整草稿正文）。"""
+    """查看单次生成详情（含完整草稿正文 + 多候选时的全部候选稿）。"""
+    conn = registry.open_conn(project_id)
+    try:
+        return _load_run_detail(conn, registry, project_id, run_id)
+    finally:
+        conn.close()
+
+
+def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: str) -> PipelineRunDetail:
     from pathlib import Path
+
+    from ..models import CandidateInfo
+
+    row = conn.execute(
+        "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
+        "       pr.quality_score, pr.detail_json, di.word_count, di.file_path"
+        " FROM pipeline_run pr"
+        " LEFT JOIN draft_index di ON di.id = pr.draft_id"
+        " WHERE pr.run_id = ? AND pr.project_id = ?",
+        (run_id, project_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "run not found")
+
+    draft_text = ""
+    if row["file_path"]:
+        db_entry = registry.get(project_id)
+        if db_entry:
+            l0_path = Path(db_entry.db_path).parent / row["file_path"]
+            if l0_path.exists():
+                draft_text = l0_path.read_text(encoding="utf-8")
+
+    candidates: list[CandidateInfo] = []
+    winner_index = None
+    selected_by = None
+    if row["detail_json"]:
+        try:
+            detail = _json.loads(row["detail_json"])
+            winner_index = detail.get("winner")
+            selected_by = detail.get("selected_by")
+            scores = detail.get("scores") or []
+            hard_blocks = detail.get("hard_blocks") or []
+            for i, c in enumerate(detail.get("candidates") or []):
+                text = c.get("draft_text", "")
+                candidates.append(CandidateInfo(
+                    index=i,
+                    draft_text=text,
+                    length=len(text),
+                    score=scores[i] if i < len(scores) else None,
+                    hard_blocks=hard_blocks[i] if i < len(hard_blocks) else 0,
+                    is_winner=(i == winner_index),
+                    proposal_count=len(c.get("proposals") or []),
+                ))
+        except Exception:
+            pass
+
+    return PipelineRunDetail(
+        run_id=row["run_id"],
+        chapter=row["chapter"],
+        status=row["status"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        word_count=row["word_count"],
+        quality_score=row["quality_score"],
+        draft_text=draft_text,
+        candidates=candidates,
+        winner_index=winner_index,
+        selected_by=selected_by,
+    )
+
+
+@router.post("/{project_id}/pipeline/runs/{run_id}/select-candidate",
+             response_model=PipelineRunDetail)
+def select_candidate(
+    project_id: str,
+    run_id: str,
+    req: SelectCandidateRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """M6：人工换稿（3 选 1）。
+
+    把选中候选作为本章新修订落盘（draft_index revision_round+1），更新 run 指向；
+    选中稿的 BibleChangeProposal 以 'proposed' 入 staging 走人审兜底
+    （原胜者已入队的提案仍在审核队列，由审稿人最终裁决——账本只追加不回滚）；
+    章摘要 best-effort 重新生成。选中当前胜者 = 幂等 no-op。
+    """
+    import os
+
+    from ...config import NovelForgeConfig
+    from ...control_plane.orchestrator import (
+        _persist_chapter_summary, _persist_draft, _proposals_to_candidates,
+    )
 
     conn = registry.open_conn(project_id)
     try:
         row = conn.execute(
-            "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-            "       di.word_count, di.file_path"
-            " FROM pipeline_run pr"
-            " LEFT JOIN draft_index di ON di.id = pr.draft_id"
-            " WHERE pr.run_id = ? AND pr.project_id = ?",
+            "SELECT chapter, detail_json FROM pipeline_run"
+            " WHERE run_id=? AND project_id=?",
             (run_id, project_id),
         ).fetchone()
         if not row:
             raise HTTPException(404, "run not found")
+        try:
+            detail = _json.loads(row["detail_json"] or "{}")
+        except Exception:
+            detail = {}
+        cands = detail.get("candidates") or []
+        if not cands:
+            raise HTTPException(422, "该 run 无候选稿（单稿生成或旧版本数据）")
+        idx = req.candidate_index
+        if idx >= len(cands):
+            raise HTTPException(422, f"candidate_index 越界: {idx} >= {len(cands)}")
 
-        draft_text = ""
-        if row["file_path"]:
+        if idx == detail.get("winner") and detail.get("selected_by") == "human":
+            return _load_run_detail(conn, registry, project_id, run_id)  # 幂等
+
+        chapter = row["chapter"]
+        chosen = cands[idx]
+        chosen_text = chosen.get("draft_text", "")
+        if not chosen_text:
+            raise HTTPException(422, "选中候选正文为空")
+
+        if idx != detail.get("winner"):
             db_entry = registry.get(project_id)
-            if db_entry:
-                l0_path = Path(db_entry.db_path).parent / row["file_path"]
-                if l0_path.exists():
-                    draft_text = l0_path.read_text(encoding="utf-8")
+            draft_id = _persist_draft(conn, chosen_text, chapter, project_id,
+                                      db_entry.db_path if db_entry else "novel.db")
+            if draft_id is None:
+                raise HTTPException(500, "换稿落盘失败")
+            # 选中稿的提案入 staging（人审兜底；原胜者提案仍在队列由审稿人裁决）
+            _proposals_to_candidates(chosen.get("proposals") or [], chapter, conn)
+            conn.execute(
+                "UPDATE pipeline_run SET draft_id=? WHERE run_id=?",
+                (draft_id, run_id),
+            )
 
-        return PipelineRunDetail(
-            run_id=row["run_id"],
-            chapter=row["chapter"],
-            status=row["status"],
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            word_count=row["word_count"],
-            draft_text=draft_text,
+        detail["winner"] = idx
+        detail["selected_by"] = "human"
+        conn.execute(
+            "UPDATE pipeline_run SET detail_json=? WHERE run_id=?",
+            (_json.dumps(detail, ensure_ascii=False), run_id),
         )
+        conn.commit()
+
+        # 章摘要随稿更新（best-effort，需 LLM key；失败静默）
+        try:
+            db_entry = registry.get(project_id)
+            cfg = NovelForgeConfig(project_id=project_id,
+                                   db_path=db_entry.db_path if db_entry else "novel.db")
+            api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+            if api_key:
+                cfg.provider.api_key = api_key
+                cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+            from ...control_plane.llm import factory as llm_factory
+            gw = llm_factory.build_gateway(cfg)
+            _persist_chapter_summary(conn, gw, chapter, chosen_text)
+        except Exception:
+            pass
+
+        return _load_run_detail(conn, registry, project_id, run_id)
     finally:
         conn.close()
