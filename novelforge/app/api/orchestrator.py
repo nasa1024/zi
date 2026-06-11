@@ -11,10 +11,10 @@ from fastapi.responses import StreamingResponse
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
     BudgetSpent,
-    NextChapterSuggestion,
+    ChapterStat, NextChapterSuggestion,
     PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
-    SelectCandidateRequest,
+    PipelineStats, SelectCandidateRequest,
     StageResult,
 )
 from ...config import NovelForgeConfig
@@ -234,6 +234,49 @@ def pipeline_next(
             last_completed_chapter=last,
             suggested_goal=goal,
             sources=sources,
+        )
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pipeline/stats", response_model=PipelineStats)
+def pipeline_stats(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """M6 质量趋势：逐章序列（每章取最新 completed run）+ 汇总指标。"""
+    from ...config import QualityConfig
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    threshold = QualityConfig().min_score
+    conn = registry.open_conn(project_id)
+    try:
+        rows = conn.execute(
+            "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count"
+            " FROM pipeline_run pr"
+            " LEFT JOIN draft_index di ON di.id = pr.draft_id"
+            " WHERE pr.project_id=? AND pr.status='completed'"
+            "   AND pr.started_at = ("
+            "       SELECT MAX(p2.started_at) FROM pipeline_run p2"
+            "       WHERE p2.chapter=pr.chapter AND p2.project_id=pr.project_id"
+            "         AND p2.status='completed')"
+            " ORDER BY pr.chapter",
+            (project_id,),
+        ).fetchall()
+
+        series = [ChapterStat(
+            chapter=r["chapter"], word_count=r["word_count"],
+            quality_score=r["quality_score"], finished_at=r["finished_at"],
+        ) for r in rows]
+        scores = [s.quality_score for s in series if s.quality_score is not None]
+        return PipelineStats(
+            series=series,
+            chapters_completed=len(series),
+            total_words=sum(s.word_count or 0 for s in series),
+            avg_quality_score=round(sum(scores) / len(scores), 2) if scores else None,
+            low_quality_count=sum(1 for s in scores if s < threshold),
+            min_score_threshold=threshold,
         )
     finally:
         conn.close()

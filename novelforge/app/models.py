@@ -238,6 +238,29 @@ class SelectCandidateRequest(BaseModel):
     candidate_index: int = Field(ge=0, le=2)
 
 
+# ── Pipeline stats（M6: 质量趋势看板）─────────────────────────────────────────
+
+class ChapterStat(BaseModel):
+    chapter: int
+    word_count: Optional[int] = None
+    quality_score: Optional[float] = None
+    finished_at: Optional[str] = None
+
+
+class PipelineStats(BaseModel):
+    """逐章质量/产量序列（每章取最新一次 completed run）+ 汇总。
+
+    连写 50 章时「第几章开始崩」一眼可见——ConStory 实证错误高发于中段，
+    分数趋势是最直接的监控信号。
+    """
+    series: list[ChapterStat] = Field(default_factory=list)
+    chapters_completed: int = 0
+    total_words: int = 0
+    avg_quality_score: Optional[float] = None
+    low_quality_count: int = 0      # 低于 min_score 阈值的章数
+    min_score_threshold: float = 6.0
+
+
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────
 
 class ForeshadowHealth(BaseModel):

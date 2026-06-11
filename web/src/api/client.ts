@@ -17,6 +17,7 @@ import type {
   PipelineRunRecord,
   PipelineRunRequest,
   PipelineRunResponse,
+  PipelineStats,
   PipelineStreamHandlers,
   ProjectCreateRequest,
   ProjectResponse,
@@ -296,6 +297,13 @@ export const api = {
     return request<NextChapterSuggestion>(
       'GET',
       `/v1/${encodeURIComponent(id)}/pipeline/next`,
+    );
+  },
+
+  pipelineStats(id: string): Promise<PipelineStats> {
+    return request<PipelineStats>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/stats`,
     );
   },
 

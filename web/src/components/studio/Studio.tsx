@@ -13,6 +13,7 @@ import type {
   PipelineRunDetail,
   PipelineRunRecord,
   ForeshadowHealth,
+  PipelineStats,
   ProjectResponse,
   ReviewQueueItem,
   SSEDoneEvent,
@@ -907,11 +908,15 @@ function PipelinePanel({
 
   const abortRef = useRef<AbortController | null>(null);
 
+  const [stats, setStats] = useState<PipelineStats | null>(null);
+
   const loadHistory = useCallback(async () => {
     setHistLoading(true);
     try {
       const list = await api.listPipelineRuns(projectId);
       setHistory(list);
+      // 质量趋势随历史一起刷新（轻量聚合）
+      api.pipelineStats(projectId).then(setStats).catch(() => {});
     } catch { /* ignore */ } finally {
       setHistLoading(false);
     }
@@ -1695,6 +1700,51 @@ function PipelinePanel({
           {liveDraft && (
             <div className="bible-box">
               <pre>{liveDraft}</pre>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── 质量趋势（M6）───────────────────────────────── */}
+      {stats && stats.chapters_completed > 0 && (
+        <>
+          <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+            <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📈 质量趋势</span>
+            <span className="ph-hint" style={{ marginLeft: 'auto' }}>
+              共 {stats.chapters_completed} 章 · {Math.round(stats.total_words / 1000)}k 字
+              {stats.avg_quality_score != null && <>　均分 ★{stats.avg_quality_score}</>}
+              {stats.low_quality_count > 0 && (
+                <span style={{ color: 'var(--nf-warn, #fa0)' }}>
+                  　⚠ {stats.low_quality_count} 章低于 {stats.min_score_threshold} 分
+                </span>
+              )}
+            </span>
+          </div>
+          {stats.series.some((s) => s.quality_score != null) && (
+            <div
+              style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 56, marginTop: '0.4rem' }}
+              title="逐章质量分（0-10）；红色 = 低于阈值——崩坏实证高发于卷中段，趋势下行时及时介入"
+            >
+              {stats.series.map((s) => {
+                const score = s.quality_score;
+                const h = score == null ? 4 : Math.max(4, (score / 10) * 56);
+                const low = score != null && score < stats.min_score_threshold;
+                return (
+                  <div
+                    key={s.chapter}
+                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}`}
+                    style={{
+                      width: 'clamp(4px, 100%, 18px)',
+                      flex: '1 1 0',
+                      height: h,
+                      borderRadius: 2,
+                      background: score == null
+                        ? 'rgba(255,255,255,0.15)'
+                        : low ? 'var(--nf-warn, #f66)' : 'var(--nf-accent, #6cf)',
+                    }}
+                  />
+                );
+              })}
             </div>
           )}
         </>
