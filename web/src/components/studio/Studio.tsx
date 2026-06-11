@@ -1076,6 +1076,7 @@ function PipelinePanel({
         to_chapter: from + count - 1,
         mode: apMode,
         quality_check: qualityCheck || undefined,
+        n_candidates: nCandidates > 1 ? nCandidates : undefined,
       });
       setApSession(session);
     } catch (err) {
@@ -1357,6 +1358,7 @@ function PipelinePanel({
       <div className="ph-hint">
         后台会话从「下一章」起逐章生成，每章自动选取最优目标（章节卡 / 钩子 / 卷大纲 / 伏笔 / 节拍）；
         连续出现硬一致性问题会自动降级人审，关闭页面不中断。
+        上方「候选稿数 / 质量评分」设置对挂机同样生效。
       </div>
 
       <div className="nf-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>

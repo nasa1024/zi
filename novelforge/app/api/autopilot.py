@@ -67,6 +67,7 @@ class _StartReq:
     budget_session_max_tokens: Optional[int] = None
     budget_session_max_usd: Optional[float] = None
     quality_check: bool = False
+    n_candidates: int = 1
 
 
 @router.post("/{project_id}/autopilot/start", response_model=AutopilotSessionInfo, status_code=202)
@@ -95,6 +96,7 @@ def autopilot_start(
         budget_session_max_tokens=req.budget_session_max_tokens,
         budget_session_max_usd=req.budget_session_max_usd,
         quality_check=req.quality_check,
+        n_candidates=req.n_candidates,
     )
     session = mgr.start(internal_req, registry, api_key=api_key)
     return _session_to_info(session)
@@ -191,6 +193,7 @@ def autopilot_resume(
         budget_session_max_tokens=req.get("budget_session_max_tokens"),
         budget_session_max_usd=req.get("budget_session_max_usd"),
         quality_check=req.get("quality_check", False),
+        n_candidates=req.get("n_candidates", 1),
     )
     api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)

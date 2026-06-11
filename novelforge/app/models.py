@@ -200,6 +200,7 @@ class PipelineRunResponse(BaseModel):
     budget_spent: BudgetSpent
     circuit_breaker_tripped: bool = False
     quality_score: Optional[float] = None  # M5-⑦
+    cache_read_tokens: int = 0             # M1-⑥: 前缀缓存命中量
     error: Optional[str] = None
 
 
@@ -302,6 +303,7 @@ class AutopilotStartRequest(BaseModel):
     budget_session_max_usd: Optional[float] = None    # E4: 会话级跨章 USD 封顶
     auto_degrade_after_consecutive_issues: int = 2  # 连续 N 章有 hard issue → 降级
     quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
+    n_candidates: int = Field(default=1, ge=1, le=3)  # M3-①: 每章候选稿数（择优）
 
 
 class AutopilotSessionInfo(BaseModel):

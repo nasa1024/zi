@@ -234,6 +234,7 @@ class AutopilotManager:
                 "budget_session_max_usd": session.budget_session_max_usd,
                 "auto_degrade_after_consecutive_issues": getattr(req, "auto_degrade_after_consecutive_issues", 2),
                 "quality_check": getattr(req, "quality_check", False),
+                "n_candidates": getattr(req, "n_candidates", 1),
             }, ensure_ascii=False)
             conn = registry.open_conn(session.project_id)
             try:
@@ -330,6 +331,9 @@ class AutopilotManager:
                     cfg.budget.max_usd_per_chapter = req.budget_max_usd_per_chapter
                 if getattr(req, "quality_check", False):
                     cfg.quality.enabled = True
+                _n_cands = getattr(req, "n_candidates", 1) or 1
+                if _n_cands > 1:
+                    cfg.candidates.n_candidates = max(1, min(3, _n_cands))
                 if api_key:
                     cfg.provider.api_key = api_key
                     cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
