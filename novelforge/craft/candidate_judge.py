@@ -146,7 +146,7 @@ def _llm_judge(
             tier,
             [Message(role="user", content="\n".join(parts))],
             system=_JUDGE_SYSTEM,
-            max_tokens=300,
+            max_tokens=2048,   # 思考型模型推理计入 max_tokens，过小会截断 JSON
         )
         return _parse_verdict(resp.text)
     except Exception:
@@ -176,7 +176,9 @@ def score_chapter(gateway, judge_tier: str, chapter_goal: str, draft_text: str) 
             [Message(role="user",
                      content=f"本章目标：{chapter_goal or '（未指定）'}\n\n{draft_text[:4000]}")],
             system=_SCORE_SYSTEM,
-            max_tokens=120,
+            # 思考型模型（deepseek-v4-pro 等）的内部推理计入 max_tokens，
+            # 预算过小会把 JSON 截断（实测 120 时 stop_reason=length）——上限放宽不增成本
+            max_tokens=2048,
         )
         m = re.search(r"\{.*\}", resp.text, re.DOTALL)
         if not m:
