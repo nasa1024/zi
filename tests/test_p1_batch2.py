@@ -113,3 +113,40 @@ class TestContractConsumption:
         from novelforge.craft.candidate_judge import _JUDGE_SYSTEM, _SCORE_SYSTEM
         assert "承诺" in _JUDGE_SYSTEM
         assert "承诺" in _SCORE_SYSTEM
+
+
+# ── #7 确定性检查：连续两章同型钩子 ───────────────────────────────────────────
+
+def _seed_cards(conn, *rows):
+    """rows: (chapter, hook_type)"""
+    for i, (ch, ht) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, hook_type) VALUES(?,?,?)",
+            (f"card{i}", ch, ht))
+    conn.commit()
+
+
+class TestHookRepeatCheck:
+    def _run(self, conn, chapter):
+        from novelforge.skills.craft_check_skill import _check_hook_repeat
+        return _check_hook_repeat(conn, chapter)
+
+    def test_same_type_adjacent_warns(self, conn):
+        _seed_cards(conn, (4, "reversal"), (5, "reversal"))
+        issues = self._run(conn, 5)
+        assert len(issues) == 1
+        assert issues[0].severity == "warn"
+        assert issues[0].check == "hook_repeat"
+
+    def test_different_type_no_warn(self, conn):
+        _seed_cards(conn, (4, "reversal"), (5, "cliffhanger"))
+        assert self._run(conn, 5) == []
+
+    def test_other_or_missing_skipped(self, conn):
+        _seed_cards(conn, (4, "other"), (5, "other"))
+        assert self._run(conn, 5) == []
+        assert self._run(conn, 99) == []   # 无卡
+
+    def test_null_hook_type_skipped(self, conn):
+        _seed_cards(conn, (4, None), (5, "reversal"))
+        assert self._run(conn, 5) == []
