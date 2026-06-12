@@ -115,6 +115,14 @@ class TestMigrations:
         assert column_exists(conn, "pipeline_run", "tokens_spent")
         assert column_exists(conn, "pipeline_run", "usd_spent")
 
+        # v12: foreshadow 结算列 + foreshadow_log 审计表
+        # （老库此前没有 foreshadow 表——v12 需整表创建而非 ALTER）
+        assert table_exists(conn, "foreshadow")
+        for col in ("last_mentioned_chapter", "advance_count",
+                    "last_advanced_chapter", "origin"):
+            assert column_exists(conn, "foreshadow", col), f"缺列 {col}"
+        assert table_exists(conn, "foreshadow_log")
+
         # 版本号已更新
         from novelforge.db.connection import get_meta
         assert get_meta(conn, "schema_version") == SCHEMA_VERSION
@@ -167,6 +175,51 @@ class TestMigrations:
         db = tmp_path / "new.db"
         conn = init_db(db)
         assert get_meta(conn, "schema_version") == SCHEMA_VERSION
+        conn.close()
+
+    def test_v12_fresh_db_has_settle_columns(self, tmp_path):
+        """新库走 schema.sql 基线，必须直接含 v12 列/表（不经迁移链）。"""
+        from novelforge.db.connection import init_db
+        from novelforge.db.migrations import column_exists, table_exists
+
+        conn = init_db(tmp_path / "fresh12.db")
+        for col in ("last_mentioned_chapter", "advance_count",
+                    "last_advanced_chapter", "origin"):
+            assert column_exists(conn, "foreshadow", col), f"schema.sql 基线缺列 {col}"
+        assert table_exists(conn, "foreshadow_log")
+        conn.close()
+
+    def test_v12_alters_existing_foreshadow(self, tmp_path):
+        """已有 foreshadow 表（旧形态）的库：v12 走 ALTER 补列且保数据。"""
+        from novelforge.db.migrations import migrate, column_exists
+
+        conn = _make_v4_db(tmp_path / "v4fs.db")
+        conn.executescript("""
+            CREATE TABLE foreshadow (
+                id              TEXT PRIMARY KEY,
+                label           TEXT NOT NULL,
+                description     TEXT NOT NULL,
+                state           TEXT NOT NULL DEFAULT 'planted',
+                planted_chapter INTEGER NOT NULL,
+                due_chapter     INTEGER,
+                paid_off_chapter INTEGER,
+                related_entity_id TEXT,
+                importance      INTEGER NOT NULL DEFAULT 3,
+                fact_id         TEXT,
+                updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, planted_chapter)"
+            " VALUES('fs_old','旧伏笔','迁移前已存在',3)")
+        conn.commit()
+
+        migrate(conn)
+
+        row = conn.execute("SELECT * FROM foreshadow WHERE id='fs_old'").fetchone()
+        assert row is not None and row["label"] == "旧伏笔"
+        assert row["advance_count"] == 0 and row["origin"] == "manual"
+        assert column_exists(conn, "foreshadow", "last_mentioned_chapter")
         conn.close()
 
     def test_get_db_version(self, tmp_path):
