@@ -119,13 +119,26 @@ export interface PipelineRunRecord {
   finished_at?: string | null;
   word_count?: number | null;
   quality_score?: number | null;
+  tokens_spent?: number | null;   // 逐章成本（v11）
+  usd_spent?: number | null;
 }
+
+// M7: 补丁式修订统计（kind: revise | polish）
+export interface PatchStatsEntry {
+  rounds: number;
+  patches: number;
+  applied: number;
+  failed: number;
+}
+export type PatchStats = Record<string, PatchStatsEntry>;
 
 export interface PipelineRunDetail extends PipelineRunRecord {
   draft_text: string;
   candidates: CandidateInfo[];
   winner_index?: number | null;
   selected_by?: 'auto' | 'human' | string | null;
+  patch_stats?: PatchStats | null;
+  quality_dimensions?: Record<string, number> | null;  // {hook,pacing,character,prose}
 }
 
 export interface CandidateInfo {
@@ -211,6 +224,8 @@ export interface ChapterStat {
   word_count?: number | null;
   quality_score?: number | null;
   finished_at?: string | null;
+  tokens_spent?: number | null;   // 逐章成本（v11）
+  usd_spent?: number | null;
 }
 
 export interface PipelineStats {
@@ -220,6 +235,8 @@ export interface PipelineStats {
   avg_quality_score?: number | null;
   low_quality_count: number;
   min_score_threshold: number;
+  total_tokens_spent: number;     // 成本曲线汇总（v11）
+  total_usd_spent: number;
 }
 
 export interface ForeshadowHealth {
@@ -289,6 +306,7 @@ export interface SSEDoneEvent {
   usd: number;
   cache_read_tokens?: number;
   quality_score?: number | null;
+  quality_dimensions?: Record<string, number> | null;
   error?: string | null;
 }
 

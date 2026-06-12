@@ -108,6 +108,7 @@ def pipeline_run(
             budget_spent=BudgetSpent(tokens=outcome.usage_tokens, usd=outcome.usage_usd),
             circuit_breaker_tripped=False,
             quality_score=getattr(outcome, "quality_score", None),
+            quality_dimensions=getattr(outcome, "quality_dimensions", None),
             cache_read_tokens=getattr(outcome, "cache_read_tokens", 0),
             error=outcome.error,
         )
@@ -183,6 +184,7 @@ async def pipeline_run_stream(
                 "usd": outcome.usage_usd,
                 "cache_read_tokens": getattr(outcome, "cache_read_tokens", 0),
                 "quality_score": getattr(outcome, "quality_score", None),
+                "quality_dimensions": getattr(outcome, "quality_dimensions", None),
                 "error": outcome.error,
             })
         except CircuitTripped as e:
@@ -253,7 +255,8 @@ def pipeline_stats(
     conn = registry.open_conn(project_id)
     try:
         rows = conn.execute(
-            "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count"
+            "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count,"
+            "       pr.tokens_spent, pr.usd_spent"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id=? AND pr.status='completed'"
@@ -268,6 +271,7 @@ def pipeline_stats(
         series = [ChapterStat(
             chapter=r["chapter"], word_count=r["word_count"],
             quality_score=r["quality_score"], finished_at=r["finished_at"],
+            tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
         ) for r in rows]
         scores = [s.quality_score for s in series if s.quality_score is not None]
         return PipelineStats(
@@ -277,6 +281,8 @@ def pipeline_stats(
             avg_quality_score=round(sum(scores) / len(scores), 2) if scores else None,
             low_quality_count=sum(1 for s in scores if s < threshold),
             min_score_threshold=threshold,
+            total_tokens_spent=sum(s.tokens_spent or 0 for s in series),
+            total_usd_spent=round(sum(s.usd_spent or 0.0 for s in series), 4),
         )
     finally:
         conn.close()
@@ -293,7 +299,7 @@ def list_pipeline_runs(
     try:
         rows = conn.execute(
             "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-            "       pr.quality_score, di.word_count"
+            "       pr.quality_score, pr.tokens_spent, pr.usd_spent, di.word_count"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id = ?"
@@ -309,6 +315,8 @@ def list_pipeline_runs(
                 finished_at=r["finished_at"],
                 word_count=r["word_count"],
                 quality_score=r["quality_score"],
+                tokens_spent=r["tokens_spent"],
+                usd_spent=r["usd_spent"],
             )
             for r in rows
         ]
@@ -337,7 +345,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
 
     row = conn.execute(
         "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-        "       pr.quality_score, pr.detail_json, di.word_count, di.file_path"
+        "       pr.quality_score, pr.tokens_spent, pr.usd_spent, pr.detail_json,"
+        "       di.word_count, di.file_path"
         " FROM pipeline_run pr"
         " LEFT JOIN draft_index di ON di.id = pr.draft_id"
         " WHERE pr.run_id = ? AND pr.project_id = ?",
@@ -358,12 +367,14 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     winner_index = None
     selected_by = None
     patch_stats = None
+    quality_dimensions = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
             winner_index = detail.get("winner")
             selected_by = detail.get("selected_by")
             patch_stats = detail.get("patch_stats")
+            quality_dimensions = detail.get("quality_dimensions")
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             for i, c in enumerate(detail.get("candidates") or []):
@@ -388,11 +399,14 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         finished_at=row["finished_at"],
         word_count=row["word_count"],
         quality_score=row["quality_score"],
+        tokens_spent=row["tokens_spent"],
+        usd_spent=row["usd_spent"],
         draft_text=draft_text,
         candidates=candidates,
         winner_index=winner_index,
         selected_by=selected_by,
         patch_stats=patch_stats,
+        quality_dimensions=quality_dimensions,
     )
 
 

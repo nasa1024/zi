@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 
@@ -46,19 +47,25 @@ class BudgetLedger:
     _usd_spent: float = field(default=0.0, init=False, repr=False)
     _revise_rounds: int = field(default=0, init=False, repr=False)
     _cache_read_tokens: int = field(default=0, init=False, repr=False)
+    # 多候选并行生成时各线程共享同一账本，累加必须原子
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def charge(self, usage) -> None:
-        """接受 provider.Usage 或含 input/output 属性的对象。"""
+        """接受 provider.Usage 或含 input/output 属性的对象。线程安全。"""
         ti = getattr(usage, "input", 0) or 0
         to = getattr(usage, "output", 0) or 0
         model = getattr(usage, "model", "") or ""
-        self._tokens_spent += ti + to
-        self._usd_spent += _estimate_cost(ti, to, model)
+        cost = _estimate_cost(ti, to, model)
         # M1-⑥ 观测：前缀缓存命中量（DeepSeek prompt_cache_hit / Anthropic cache_read）
-        self._cache_read_tokens += getattr(usage, "cache_read", 0) or 0
+        cache_read = getattr(usage, "cache_read", 0) or 0
+        with self._lock:
+            self._tokens_spent += ti + to
+            self._usd_spent += cost
+            self._cache_read_tokens += cache_read
 
     def charge_revise_round(self) -> None:
-        self._revise_rounds += 1
+        with self._lock:
+            self._revise_rounds += 1
 
     @property
     def cache_read_tokens(self) -> int:

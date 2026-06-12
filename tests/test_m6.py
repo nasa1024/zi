@@ -65,10 +65,12 @@ def multi_candidate_run(client, project):
         _draft_response("候选二号正文。" * 200, "炼气三层"),
     ]
 
-    def factory(messages, model=""):
+    # 并行候选生成后调用顺序不再确定，按温度映射候选序号（i → 1.0 - i*0.15）
+    def factory(messages, model="", temperature=1.0):
         user = str(messages[-1].content) if messages else ""
         if "本章任务" in user:
-            return drafts.pop(0) if drafts else "```draft\n兜底\n```"
+            idx = round((1.0 - temperature) / 0.15)
+            return drafts[idx] if 0 <= idx < len(drafts) else "```draft\n兜底\n```"
         if "### 候选" in user:
             return '{"winner": 1, "scores": [6, 9, 7], "reason": "节奏最佳"}'
         if "一致性问题" in user:

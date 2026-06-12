@@ -19,7 +19,7 @@ from ..governance.promotion_policy import GateDecision, PromotionPolicy
 from ..ids import new_id
 from ..memory.recall import gather_hard_context
 from ..world.replay import get_world_state
-from .budget import BudgetLedger
+from .budget import BudgetLedger, CircuitTripped
 from .llm.gateway import LLMGateway
 from .llm.tiers import ModelTier
 from .skill_base import SkillContext, SkillResult
@@ -41,6 +41,7 @@ class ChapterOutcome:
     usage_usd: float = 0.0
     cache_read_tokens: int = 0
     quality_score: Optional[float] = None
+    quality_dimensions: Optional[dict] = None  # {hook,pacing,character,prose: 0-10}
 
     def summary(self) -> str:
         if not self.ok:
@@ -75,6 +76,8 @@ class Orchestrator:
     ) -> ChapterOutcome:
         cfg = self._cfg
         ledger = self._gw.ledger
+        # 成本快照：落库本章净消耗（调用方复用 ledger 跨章时差值依然正确）
+        _tokens0, _usd0 = ledger.tokens_spent, ledger.usd_spent
         ctx = RunContext(conn=conn, policy_mode=cfg.governance.mode, actor="orchestrator")
 
         # ── 0. init workspace + pipeline_run 状态机 ──────────────────────────
@@ -136,25 +139,51 @@ class Orchestrator:
             if not plan_result.ok:
                 workspace["beats"] = []
 
-            # ── 3. DRAFT（M3-①: n_candidates>1 时多候选 + 三级漏斗择优）──────
+            # ── 3. DRAFT（M3-①: n_candidates>1 时多候选 + 三级漏斗择优；
+            #             候选间无依赖 → 线程池并行，单章等待时间 ≈ 最慢一稿）──
             n_cands = max(1, min(3, getattr(getattr(cfg, "candidates", None),
                                             "n_candidates", 1) or 1))
             if n_cands <= 1:
                 draft_result = self._reg.invoke("chapter_draft", skill_ctx)
                 draft_ok = draft_result.ok
             else:
+                from concurrent.futures import ThreadPoolExecutor
+
                 from ..craft.candidate_judge import select_best
                 spread = getattr(cfg.candidates, "temperature_spread", 0.15)
-                cand_list: list[dict] = []
-                for i in range(n_cands):
-                    skill_ctx.extra["temperature"] = max(0.1, 1.0 - i * spread)
-                    r = self._reg.invoke("chapter_draft", skill_ctx)
-                    cand_list.append({
-                        "draft_text": workspace.get("draft_text", ""),
-                        "proposals": workspace.get("proposals", []),
-                        "ok": r.ok,
-                    })
-                skill_ctx.extra.pop("temperature", None)
+
+                def _gen_candidate(i: int) -> dict:
+                    # 每候选独立 workspace/extra（chapter_draft 会写 draft_text/proposals）；
+                    # recall_pack 等大对象按引用共享（只读）。ledger 共享，charge 已加锁。
+                    # 注意：chapter_draft 不触 conn；并行路径中的 skill 不得使用 sqlite 连接。
+                    local_ctx = SkillContext(
+                        project_id=skill_ctx.project_id,
+                        target_chapter=skill_ctx.target_chapter,
+                        mode=skill_ctx.mode,
+                        as_of_chapter=skill_ctx.as_of_chapter,
+                        budget=skill_ctx.budget,
+                        llm=skill_ctx.llm,
+                        conn=skill_ctx.conn,
+                        workspace=dict(workspace),
+                        extra={**skill_ctx.extra,
+                               "temperature": max(0.1, 1.0 - i * spread)},
+                    )
+                    try:
+                        r = self._reg.invoke("chapter_draft", local_ctx)
+                        ok = r.ok
+                    except CircuitTripped:
+                        raise  # 预算熔断终止整章
+                    except Exception:
+                        ok = False  # 单候选失败不拖垮其余候选
+                    return {
+                        "draft_text": local_ctx.workspace.get("draft_text", ""),
+                        "proposals": local_ctx.workspace.get("proposals", []),
+                        "ok": ok,
+                    }
+
+                with ThreadPoolExecutor(max_workers=n_cands,
+                                        thread_name_prefix="cand") as pool:
+                    cand_list: list[dict] = list(pool.map(_gen_candidate, range(n_cands)))
                 report = select_best(
                     cand_list,
                     world=workspace.get("world_state"),
@@ -289,9 +318,14 @@ class Orchestrator:
             run_detail = workspace.get("candidate_report")
             if workspace.get("patch_stats"):
                 run_detail = {**(run_detail or {}), "patch_stats": workspace["patch_stats"]}
+            if workspace.get("quality_dimensions"):
+                run_detail = {**(run_detail or {}),
+                              "quality_dimensions": workspace["quality_dimensions"]}
             _complete_pipeline_run(conn, run_id, draft_id,
                                    detail=run_detail,
-                                   quality_score=quality_score)
+                                   quality_score=quality_score,
+                                   tokens_spent=ledger.tokens_spent - _tokens0,
+                                   usd_spent=ledger.usd_spent - _usd0)
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
             if getattr(cfg.recall, "enable_summaries", True) and draft_text:
@@ -314,6 +348,7 @@ class Orchestrator:
                 usage_usd=ledger.usd_spent,
                 cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
                 quality_score=quality_score,
+                quality_dimensions=workspace.get("quality_dimensions"),
             )
 
         except Exception as e:
@@ -329,9 +364,12 @@ class Orchestrator:
     ) -> Optional[float]:
         """M5-⑦：质量评分；低分或 craft warn 堆积时做一轮润色，取分高版本。
 
+        维度分（钩子/节奏/人物/文笔）写入 workspace["quality_dimensions"]，
+        随 detail_json 落库；多候选复用评委总分的路径无维度分（省一次调用）。
+
         Returns 最终质量分（评分失败返回 None，等同未启用）。
         """
-        from ..craft.candidate_judge import score_chapter
+        from ..craft.candidate_judge import score_chapter_detailed
 
         qcfg = cfg.quality
         judge_tier = getattr(cfg.candidates, "judge_tier", "mid")
@@ -345,8 +383,12 @@ class Orchestrator:
         if isinstance(w, int) and w < len(scores) and scores[w] is not None:
             score = float(scores[w])
         if score is None:
-            score = score_chapter(self._gw, judge_tier, chapter_goal,
-                                  ctx.workspace.get("draft_text", ""))
+            detail = score_chapter_detailed(self._gw, judge_tier, chapter_goal,
+                                            ctx.workspace.get("draft_text", ""))
+            if detail is not None:
+                score = detail["score"]
+                if detail["dimensions"]:
+                    ctx.workspace["quality_dimensions"] = detail["dimensions"]
         if score is None:
             return None
 
@@ -364,9 +406,12 @@ class Orchestrator:
                 if polished and polished != old_draft:
                     ctx.workspace["draft_text"] = polished
                     self._reg.invoke("craft_check", ctx)
-                    new_score = score_chapter(self._gw, judge_tier, chapter_goal, polished)
-                    if new_score is not None and new_score >= score:
-                        score = new_score
+                    new_detail = score_chapter_detailed(
+                        self._gw, judge_tier, chapter_goal, polished)
+                    if new_detail is not None and new_detail["score"] >= score:
+                        score = new_detail["score"]
+                        if new_detail["dimensions"]:
+                            ctx.workspace["quality_dimensions"] = new_detail["dimensions"]
                     else:
                         # 润色变差 → 回退（HoLLMwood 渐进精炼 + 保底）
                         ctx.workspace["draft_text"] = old_draft
@@ -378,6 +423,7 @@ class Orchestrator:
             progress_cb("quality", "ok", {
                 "score": score, "polished": need_polish,
                 "min_score": qcfg.min_score,
+                "dimensions": ctx.workspace.get("quality_dimensions"),
             })
         return score
 
@@ -554,15 +600,18 @@ def _complete_pipeline_run(
     conn: sqlite3.Connection, run_id: str, draft_id: Optional[str],
     detail: Optional[dict] = None,
     quality_score: Optional[float] = None,
+    tokens_spent: Optional[int] = None,
+    usd_spent: Optional[float] = None,
 ) -> None:
     """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。detail=候选择优报告等明细。"""
     try:
         detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         conn.execute(
             "UPDATE pipeline_run SET status='completed', draft_id=?, detail_json=?,"
-            " quality_score=?, finished_at=datetime('now')"
+            " quality_score=?, tokens_spent=?, usd_spent=?, finished_at=datetime('now')"
             " WHERE run_id=?",
-            (draft_id, detail_json, quality_score, run_id),
+            (draft_id, detail_json, quality_score, tokens_spent,
+             round(usd_spent, 6) if usd_spent is not None else None, run_id),
         )
         conn.commit()
     except Exception:

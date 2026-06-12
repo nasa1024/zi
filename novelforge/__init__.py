@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "10"  # +M3-①: pipeline_run.detail_json/quality_score
+SCHEMA_VERSION = "11"  # +逐章成本: pipeline_run.tokens_spent/usd_spent
