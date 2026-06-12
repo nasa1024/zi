@@ -16,11 +16,12 @@ from pathlib import Path
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
-API_KEY  = os.getenv("DEEPSEEK_API_KEY", "sk-43fae396e5214a329a0ac3128f28cda9")
+API_KEY  = os.getenv("DEEPSEEK_API_KEY", "")
 BASE_URL = "http://127.0.0.1:8787"
 DATA_DIR = os.getenv("NOVELFORGE_DATA", "data/smoke_mvp5")
 
-os.environ.setdefault("DEEPSEEK_API_KEY", API_KEY)
+if not API_KEY:
+    sys.exit("请先设置环境变量 DEEPSEEK_API_KEY")
 os.environ["NOVELFORGE_DATA"] = DATA_DIR
 
 import shutil

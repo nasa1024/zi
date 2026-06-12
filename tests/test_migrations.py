@@ -110,6 +110,11 @@ class TestMigrations:
         # v6 新表
         assert table_exists(conn, "pipeline_run")
 
+        # v10/v11 新列（候选报告 + 逐章成本）
+        assert column_exists(conn, "pipeline_run", "detail_json")
+        assert column_exists(conn, "pipeline_run", "tokens_spent")
+        assert column_exists(conn, "pipeline_run", "usd_spent")
+
         # 版本号已更新
         from novelforge.db.connection import get_meta
         assert get_meta(conn, "schema_version") == SCHEMA_VERSION

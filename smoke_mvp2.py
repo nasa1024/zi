@@ -18,7 +18,7 @@ import textwrap
 import time
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
-API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-43fae396e5214a329a0ac3128f28cda9")
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 CHAPTER_1_GOAL = "主角李云在废弃秘境中意外觉醒，完成第一次境界突破，从凡人跨入炼气一层。"
 CHAPTER_2_GOAL = "李云返回宗门，向师尊汇报觉醒经过，途中遭遇同门挑衅，以新境界初次出手镇压。"
 
