@@ -228,3 +228,156 @@ class TestRepairScopeRouting:
         assert patch_calls, "local 应锚点补丁先行"
         assert "原文：「他的境界是炼气三层」" in patch_calls[0], "issues_str 应携带 evidence"
         assert "建议：改为炼气一层" in patch_calls[0], "issues_str 应携带 fix"
+
+
+# ── #6 伏笔结算 ──────────────────────────────────────────────────────────────
+
+def _seed_foreshadow(conn, fs_id="fs_sword", label="断剑之谜",
+                     desc="陆天捡到的断剑来历不明", state="planted", due=None):
+    conn.execute(
+        "INSERT INTO foreshadow(id, label, description, state, planted_chapter, due_chapter)"
+        " VALUES(?,?,?,?,1,?)", (fs_id, label, desc, state, due))
+    conn.commit()
+
+
+def _settle_gateway(response: dict):
+    """直接构造 gateway 喂 foreshadow_settle（不走整条管线）。"""
+    from novelforge.control_plane.budget import BudgetLedger
+    from novelforge.control_plane.llm.fake_provider import FakeProvider
+    from novelforge.control_plane.llm.gateway import LLMGateway
+
+    def factory(messages, model="", temperature=1.0):
+        return json.dumps(response, ensure_ascii=False)
+    fake = FakeProvider(factory=factory)
+    return LLMGateway(fake, BudgetLedger(max_tokens=1_000_000, max_usd=10.0)), fake
+
+
+SETTLE_DRAFT = "陆天握紧断剑，剑身铭文骤亮——这正是十年前山门血案的凶器。他终于明白了断剑的来历。"
+
+
+class TestForeshadowSettle:
+    def test_payoff_with_valid_evidence(self, client, project):
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            _seed_foreshadow(conn)
+            gw, _ = _settle_gateway({"settlements": [
+                {"id": "fs_sword", "action": "payoff",
+                 "evidence": "这正是十年前山门血案的凶器"}], "new_hooks": []})
+            report = settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+            row = conn.execute("SELECT state, paid_off_chapter FROM foreshadow"
+                               " WHERE id='fs_sword'").fetchone()
+            assert row["state"] == "paid_off" and row["paid_off_chapter"] == 5
+            log = conn.execute("SELECT action, evidence FROM foreshadow_log"
+                               " WHERE foreshadow_id='fs_sword'").fetchone()
+            assert log["action"] == "payoff" and "凶器" in log["evidence"]
+            assert report["payoffs"] == 1
+        finally:
+            conn.close()
+
+    def test_fake_payoff_downgraded_to_mention(self, client, project):
+        """evidence 不在终稿 → payoff 降为 mention，state 不变（防假回收核心）。"""
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            _seed_foreshadow(conn)
+            gw, _ = _settle_gateway({"settlements": [
+                {"id": "fs_sword", "action": "payoff", "evidence": "编造的不存在的证据"}],
+                "new_hooks": []})
+            report = settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+            row = conn.execute("SELECT state, last_mentioned_chapter FROM foreshadow"
+                               " WHERE id='fs_sword'").fetchone()
+            assert row["state"] == "planted"            # 未被假回收
+            assert row["last_mentioned_chapter"] == 5   # 降级为 mention
+            assert report["payoffs"] == 0 and report["mentions"] == 1
+            assert report["dropped_no_evidence"] == 1
+        finally:
+            conn.close()
+
+    def test_advance_flips_planted_to_reinforced(self, client, project):
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            _seed_foreshadow(conn)
+            gw, _ = _settle_gateway({"settlements": [
+                {"id": "fs_sword", "action": "advance", "evidence": "剑身铭文骤亮"}],
+                "new_hooks": []})
+            settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+            row = conn.execute("SELECT state, advance_count, last_advanced_chapter"
+                               " FROM foreshadow WHERE id='fs_sword'").fetchone()
+            assert row["state"] == "reinforced"
+            assert row["advance_count"] == 1 and row["last_advanced_chapter"] == 5
+        finally:
+            conn.close()
+
+    def test_unknown_id_dropped(self, client, project):
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            _seed_foreshadow(conn)
+            gw, _ = _settle_gateway({"settlements": [
+                {"id": "fs_nonexistent", "action": "payoff", "evidence": "剑身铭文骤亮"}],
+                "new_hooks": []})
+            report = settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+            assert report["payoffs"] == 0
+        finally:
+            conn.close()
+
+    def test_new_hook_arbitration_three_branches(self, client, project):
+        """高相似→映射 mention；低相似→新建；中间带→拒绝（本例覆盖前两支）。"""
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            _seed_foreshadow(conn)   # 断剑之谜/陆天捡到的断剑来历不明
+            gw, _ = _settle_gateway({"settlements": [], "new_hooks": [
+                {"label": "断剑之谜", "description": "陆天捡到的断剑来历成谜", "entity": ""},
+                {"label": "黑袍人身份", "description": "雪夜出现的黑袍人到底是谁", "entity": ""},
+            ]})
+            report = settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+            # 高相似 → 映射为 fs_sword 的 mention
+            row = conn.execute("SELECT last_mentioned_chapter FROM foreshadow"
+                               " WHERE id='fs_sword'").fetchone()
+            assert row["last_mentioned_chapter"] == 5
+            # 低相似 → 新建 planted, origin=settle
+            new = conn.execute("SELECT state, origin, planted_chapter FROM foreshadow"
+                               " WHERE label='黑袍人身份'").fetchone()
+            assert new and new["state"] == "planted" and new["origin"] == "settle"
+            assert "黑袍人身份" in report["new_created"]
+        finally:
+            conn.close()
+
+    def test_new_hooks_capped(self, client, project):
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        conn = _open_conn(project)
+        try:
+            hooks = [{"label": f"全新伏笔{i}甲乙丙", "description": f"完全不同的新悬念内容{i}",
+                      "entity": ""} for i in range(5)]
+            gw, _ = _settle_gateway({"settlements": [], "new_hooks": hooks})
+            report = settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT, max_new_hooks=2)
+            n = conn.execute("SELECT COUNT(*) AS n FROM foreshadow"
+                             " WHERE origin='settle'").fetchone()["n"]
+            assert n == 2 and len(report["new_created"]) == 2
+        finally:
+            conn.close()
+
+    def test_unparseable_output_raises(self, client, project):
+        """结算输出不可解析 → 抛异常（由调用方降级保护处理）。"""
+        from novelforge.control_plane.budget import BudgetLedger
+        from novelforge.control_plane.llm.fake_provider import FakeProvider
+        from novelforge.control_plane.llm.gateway import LLMGateway
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+
+        fake = FakeProvider(factory=lambda messages, model="": "这不是 JSON")
+        gw = LLMGateway(fake, BudgetLedger(max_tokens=1_000_000, max_usd=10.0))
+        conn = _open_conn(project)
+        try:
+            with pytest.raises(Exception):
+                settle_foreshadow(gw, "fast", conn, 5, SETTLE_DRAFT)
+        finally:
+            conn.close()
+
+    def test_bigram_similarity(self):
+        from novelforge.craft.foreshadow_settle import _similarity
+        assert _similarity("断剑之谜 陆天捡到的断剑来历不明",
+                           "断剑之谜 陆天捡到的断剑来历成谜") >= 0.5
+        assert _similarity("断剑之谜", "黑袍人身份之谜雪夜") < 0.25
