@@ -169,3 +169,62 @@ class TestFindingsInChecks:
         assert d["check"] == "hook" and d["detail"] == "无钩子"          # 旧字段保留
         assert d["category"] == "craft.hook" and d["issue"] == "无钩子"  # 新字段
         assert d["repair_scope"] == "local" and d["source"] == "craft"
+
+
+# ── #8/P0#2 repair_scope 修订路由 ────────────────────────────────────────────
+
+class TestRepairScopeRouting:
+    """structural → 直接全文重写；全 local → 锚点补丁先行（现有回退保留）。"""
+
+    def _factory(self, scope: str, marker: dict):
+        body = "陆天踏入山门，他的境界是炼气三层。" + "平铺叙事。" * 150
+
+        def factory(messages, model="", temperature=1.0):
+            user = str(messages[-1].content) if messages else ""
+            if "规划任务" in user:
+                return _BEATS_JSON
+            if "本章任务" in user:
+                return _draft_response(body)
+            if "草稿：" in user:
+                if "炼气三层" in user and not marker.get("reported"):
+                    marker["reported"] = True
+                    return json.dumps([{"category": "2.3", "severity": "block",
+                                        "issue": "境界跳级", "evidence": "他的境界是炼气三层",
+                                        "fix": "改为炼气一层", "repair_scope": scope}],
+                                      ensure_ascii=False)
+                return "[]"
+            if "修订补丁任务" in user:
+                return json.dumps([{"find": "他的境界是炼气三层",
+                                    "replace": "他的境界是炼气一层"}], ensure_ascii=False)
+            if "一致性问题" in user:
+                return "重写后的正文。" * 200
+            return "[]"
+        return factory
+
+    def test_structural_skips_patch_goes_rewrite(self, client, project):
+        marker = {}
+        orch, fake = _build_orch(project, self._factory("structural", marker))
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+        finally:
+            conn.close()
+        assert outcome.ok
+        users = [str(c["messages"][-1].content) for c in fake.calls]
+        assert not any("修订补丁任务" in u for u in users), "structural 不应走补丁"
+        assert any("一致性问题" in u for u in users), "structural 应直接全文重写"
+
+    def test_local_tries_patch_first(self, client, project):
+        marker = {}
+        orch, fake = _build_orch(project, self._factory("local", marker))
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+        finally:
+            conn.close()
+        assert outcome.ok
+        users = [str(c["messages"][-1].content) for c in fake.calls]
+        patch_calls = [u for u in users if "修订补丁任务" in u]
+        assert patch_calls, "local 应锚点补丁先行"
+        assert "原文：「他的境界是炼气三层」" in patch_calls[0], "issues_str 应携带 evidence"
+        assert "建议：改为炼气一层" in patch_calls[0], "issues_str 应携带 fix"
