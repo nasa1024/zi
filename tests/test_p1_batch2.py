@@ -291,3 +291,55 @@ class TestStyleAnchorInjection:
         sent = self._run_draft(conn, {
             "beats": [{"beat_type": "hook", "summary": "s"}]})
         assert "文风参考" not in sent
+
+
+# ── #10 爽点循环完成率 ────────────────────────────────────────────────────────
+
+class TestPayoffLoopRate:
+    def test_three_evidence_sources_close_loop(self, conn):
+        from novelforge.app.api.orchestrator import _payoff_closed_chapters
+        from novelforge.ids import new_id
+        # 章1：伏笔 payoff
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, planted_chapter)"
+            " VALUES('f1', 'l', 'd', 1)")
+        conn.execute(
+            "INSERT INTO foreshadow_log(id, foreshadow_id, chapter, action)"
+            " VALUES('fl1', 'f1', 1, 'payoff')")
+        # 章2：境界突破
+        eid = new_id("ent")
+        conn.execute("INSERT INTO entities(id, canonical_name, entity_type)"
+                     " VALUES(?, '陆天', 'character')", (eid,))
+        conn.execute(
+            "INSERT INTO power_ranks(id, system_name, rank_name, rank_order)"
+            " VALUES('pr1', '修真', '筑基', 2)")
+        conn.execute(
+            "INSERT INTO character_power_log(id, entity_id, system_name, rank_id,"
+            " rank_order, change_chapter, change_type)"
+            " VALUES('cpl1', ?, '修真', 'pr1', 2, 2, 'breakthrough')", (eid,))
+        # 章3：获得道具
+        iid = new_id("ent")
+        conn.execute("INSERT INTO entities(id, canonical_name, entity_type)"
+                     " VALUES(?, '玄铁剑', 'item')", (iid,))
+        conn.execute(
+            "INSERT INTO item_log(id, item_entity_id, quantity_delta,"
+            " change_chapter, change_type) VALUES('il1', ?, 1, 3, 'acquire')", (iid,))
+        # 章4：injury_drop / consume 不算爽点
+        conn.execute(
+            "INSERT INTO character_power_log(id, entity_id, system_name, rank_id,"
+            " rank_order, change_chapter, change_type)"
+            " VALUES('cpl2', ?, '修真', 'pr1', 1, 4, 'injury_drop')", (eid,))
+        conn.execute(
+            "INSERT INTO item_log(id, item_entity_id, quantity_delta,"
+            " change_chapter, change_type) VALUES('il2', ?, -1, 4, 'consume')", (iid,))
+        conn.commit()
+        assert _payoff_closed_chapters(conn) == {1, 2, 3}
+
+    def test_empty_db_returns_empty(self, conn):
+        from novelforge.app.api.orchestrator import _payoff_closed_chapters
+        assert _payoff_closed_chapters(conn) == set()
+
+    def test_stats_endpoint_exposes_payoff_fields(self, client, project):
+        body = client.get(f"/v1/{project}/pipeline/stats").json()
+        assert "payoff_loop_rate" in body
+        assert body["payoff_loop_rate"] is None   # 无完成章 → None
