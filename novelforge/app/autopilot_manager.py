@@ -441,7 +441,9 @@ class AutopilotManager:
                     q_score = getattr(outcome, "quality_score", None)
                     low_quality = (cfg.quality.enabled and q_score is not None
                                    and q_score < cfg.quality.min_score)
-                    if hard_issues or low_quality:
+                    # P1#11：结算降级计入连续问题——连续失败自然转人审
+                    degraded = getattr(outcome, "state_degraded", False)
+                    if hard_issues or low_quality or degraded:
                         session.consecutive_hard_issues += 1
                         if session.consecutive_hard_issues >= req.auto_degrade_after_consecutive_issues:
                             session.policy_mode = "human_gate"

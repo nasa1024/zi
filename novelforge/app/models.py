@@ -226,6 +226,8 @@ class PipelineRunDetail(PipelineRunRecord):
     selected_by: Optional[str] = None    # "auto" | "human"
     patch_stats: Optional[dict] = None   # M7: 补丁式修订统计 {revise|polish: {rounds,patches,applied,failed}}
     quality_dimensions: Optional[dict] = None  # 维度分 {hook,pacing,character,prose}
+    state_degraded: bool = False         # P1#11: 结算降级（正文已落袋，世界状态待修复）
+    foreshadow_settle: Optional[dict] = None   # P1#6: 伏笔结算报告
 
 
 class CandidateInfo(BaseModel):
@@ -531,6 +533,11 @@ class ForeshadowResponse(BaseModel):
     related_entity_id: Optional[str] = None
     importance: int
     updated_at: str
+    # v12: 伏笔结算列（P1#6）
+    last_mentioned_chapter: Optional[int] = None
+    advance_count: int = 0
+    last_advanced_chapter: Optional[int] = None
+    origin: str = "manual"
 
 
 # ── Sessions / Turns / SSE ────────────────────────────────────────────────────

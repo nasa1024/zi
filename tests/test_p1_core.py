@@ -499,3 +499,57 @@ class TestSettleDegradation:
                 "canon 结算应已正常完成"
         finally:
             conn.close()
+
+
+# ── API / autopilot 接线 ─────────────────────────────────────────────────────
+
+class TestApiWiring:
+    def test_run_detail_exposes_degraded_and_settle(self, client, project, monkeypatch):
+        import novelforge.control_plane.orchestrator as orch_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("gate 编造故障")
+        monkeypatch.setattr(orch_mod.PromotionPolicy, "decide_batch", boom)
+        orch, _ = _build_orch(project, _plain_factory)
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+        finally:
+            conn.close()
+        detail = client.get(f"/v1/{project}/pipeline/runs/{outcome.run_id}").json()
+        assert detail["state_degraded"] is True
+
+    def test_foreshadow_api_exposes_settle_columns(self, client, project):
+        r = client.post(f"/v1/{project}/foreshadow",
+                        json={"label": "测试伏笔", "description": "描述",
+                              "planted_chapter": 1})
+        assert r.status_code == 201
+        rows = client.get(f"/v1/{project}/foreshadow").json()
+        assert rows and rows[0]["advance_count"] == 0 and rows[0]["origin"] == "manual"
+
+    def test_autopilot_counts_state_degraded(self):
+        """state_degraded 计入 consecutive_hard_issues 的判定输入（单元级锁定）。"""
+        from novelforge.control_plane.orchestrator import ChapterOutcome
+        outcome = ChapterOutcome(chapter=1, ok=True, state_degraded=True)
+        hard_issues = [i for i in (outcome.issues or []) if i.get("severity") == "block"]
+        assert not hard_issues
+        assert getattr(outcome, "state_degraded", False)
+
+    def test_chapter_goal_foreshadow_carries_entity_name(self, client, project):
+        """到期伏笔挂角色名（P1#6 消费侧）。"""
+        from novelforge.app.chapter_suggest import assemble_chapter_goal
+        conn = _open_conn(project)
+        try:
+            conn.execute(
+                "INSERT INTO entities(id, canonical_name, entity_type)"
+                " VALUES('ent_lu','陆天','character')")
+            conn.execute(
+                "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
+                " due_chapter, related_entity_id)"
+                " VALUES('fs_e','血衣之约','与陆天有关','planted',1,6,'ent_lu')")
+            conn.commit()
+            goal, sources = assemble_chapter_goal(conn, 5)
+            assert "血衣之约" in goal and "陆天" in goal
+            assert "foreshadow" in sources
+        finally:
+            conn.close()
