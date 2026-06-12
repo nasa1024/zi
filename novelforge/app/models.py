@@ -550,6 +550,30 @@ class ForeshadowResponse(BaseModel):
     origin: str = "manual"
 
 
+# ── Style anchors（P1#9 文风锚点 few-shot）────────────────────────────────────
+
+class StyleAnchorCreate(BaseModel):
+    emotion: str = Field(min_length=1, max_length=50)
+    title: Optional[str] = Field(default=None, max_length=200)
+    content: str = Field(min_length=50, max_length=2000)   # 300-500 字最佳，硬限 50-2000
+
+
+class StyleAnchorUpdate(BaseModel):
+    emotion: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    title: Optional[str] = Field(default=None, max_length=200)
+    content: Optional[str] = Field(default=None, min_length=50, max_length=2000)
+    enabled: Optional[bool] = None
+
+
+class StyleAnchorResponse(BaseModel):
+    id: str
+    emotion: str
+    title: Optional[str] = None
+    content: str
+    enabled: bool = True
+    created_at: Optional[str] = None
+
+
 # ── Sessions / Turns / SSE ────────────────────────────────────────────────────
 
 class SessionCreateRequest(BaseModel):

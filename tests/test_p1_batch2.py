@@ -8,6 +8,7 @@ import json
 import sqlite3
 
 import pytest
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -18,6 +19,31 @@ def conn():
     init_db_from_conn(c)
     yield c
     c.close()
+
+
+# ── API fixtures（与 test_p1_core 同款）──────────────────────────────────────
+
+@pytest.fixture
+def tmp_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOVELFORGE_DATA", str(tmp_path))
+    import novelforge.app.deps as deps_mod
+    deps_mod._registry = None
+    yield tmp_path
+    deps_mod._registry = None
+
+
+@pytest.fixture
+def client(tmp_data):
+    from novelforge.app.main import app
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def project(client):
+    resp = client.post("/v1/projects", json={"name": "P1批2测试", "genre": "xuanhuan"})
+    assert resp.status_code == 201
+    return resp.json()["project_id"]
 
 
 # ── #7 钩子枚举与归一 ─────────────────────────────────────────────────────────
@@ -150,3 +176,29 @@ class TestHookRepeatCheck:
     def test_null_hook_type_skipped(self, conn):
         _seed_cards(conn, (4, None), (5, "reversal"))
         assert self._run(conn, 5) == []
+
+
+# ── #9 style_anchors API ─────────────────────────────────────────────────────
+
+class TestStyleAnchorApi:
+    def test_crud_roundtrip(self, client, project):
+        r = client.post(f"/v1/{project}/style-anchors", json={
+            "emotion": "紧张", "title": "某书第3章", "content": "刀光一闪。" * 20})
+        assert r.status_code == 201
+        aid = r.json()["id"]
+        rows = client.get(f"/v1/{project}/style-anchors",
+                          params={"emotion": "紧张"}).json()
+        assert len(rows) == 1 and rows[0]["enabled"] is True
+        r = client.patch(f"/v1/{project}/style-anchors/{aid}", json={"enabled": False})
+        assert r.json()["enabled"] is False
+        assert client.delete(f"/v1/{project}/style-anchors/{aid}").status_code == 204
+        assert client.get(f"/v1/{project}/style-anchors").json() == []
+
+    def test_content_length_validated(self, client, project):
+        r = client.post(f"/v1/{project}/style-anchors",
+                        json={"emotion": "x", "content": "短"})
+        assert r.status_code == 422
+
+    def test_patch_missing_404(self, client, project):
+        r = client.patch(f"/v1/{project}/style-anchors/nope", json={"enabled": False})
+        assert r.status_code == 404
