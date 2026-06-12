@@ -67,6 +67,14 @@ class QualityConfig:
 
 
 @dataclass
+class SettleConfig:
+    """P1#6: 章末伏笔结算（mention/advance/payoff 判定 + 新伏笔确定性仲裁）。"""
+    enabled: bool = True                 # 默认开；FAST 档单章成本可忽略
+    tier: str = "fast"                   # 结算 LLM 档位
+    max_new_hooks: int = 2               # 每章自动新建伏笔上限（防账本灌水）
+
+
+@dataclass
 class NovelForgeConfig:
     db_path: str = "novel.db"
     project_id: str = "default"
@@ -77,6 +85,7 @@ class NovelForgeConfig:
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
+    settle: SettleConfig = field(default_factory=SettleConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
     patch_revise: bool = True            # M7: revise/润色先尝试锚点补丁（局部修改），失败回退全文重写
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）

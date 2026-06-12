@@ -173,7 +173,9 @@ class TestChapterSummaries:
 class TestConStoryChecklist:
     def test_soft_system_contains_19_subclasses(self):
         from novelforge.skills.continuity_check_skill import _SOFT_SYSTEM
-        for marker in ("能力波动", "同步悖论", "命名混淆", "视角混乱", "地理矛盾", "subclass"):
+        for marker in ("能力波动", "同步悖论", "命名混淆", "视角混乱", "地理矛盾",
+                       # P1#8 findings 契约字段
+                       "category", "evidence", "repair_scope"):
             assert marker in _SOFT_SYSTEM
 
     def test_volume_progress(self, client, project):

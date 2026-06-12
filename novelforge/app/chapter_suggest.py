@@ -64,27 +64,29 @@ def assemble_chapter_goal(conn: sqlite3.Connection, chapter: int) -> tuple[str, 
         goal_parts.append(f"本卷《{vol['title']}》主线：{vol['synopsis']}")
         sources.append("volume")
 
+    # P1#6：伏笔挂角色名下——条目带关联角色，写作时可定向安排该角色出场
     fs_rows = conn.execute(
-        "SELECT label, due_chapter FROM foreshadow"
-        " WHERE state IN ('planted','reinforced','misled','overdue')"
-        "   AND due_chapter IS NOT NULL AND due_chapter<=?"
-        " ORDER BY due_chapter LIMIT 5",
+        "SELECT f.label, f.due_chapter, e.canonical_name AS entity_name"
+        " FROM foreshadow f LEFT JOIN entities e ON e.id = f.related_entity_id"
+        " WHERE f.state IN ('planted','reinforced','misled','overdue')"
+        "   AND f.due_chapter IS NOT NULL AND f.due_chapter<=?"
+        " ORDER BY f.due_chapter LIMIT 5",
         (chapter + 2,),
     ).fetchall()
     if fs_rows:
+        def _fs_label(r, suffix: str) -> str:
+            who = f"角色：{r['entity_name']}，" if r["entity_name"] else ""
+            return f"{r['label']}（{who}第{r['due_chapter']}章{suffix}）"
+
         overdue = [r for r in fs_rows if r["due_chapter"] < chapter]
         upcoming = [r for r in fs_rows if r["due_chapter"] >= chapter]
         if overdue:
             # M5-⑧：逾期伏笔置顶，必须优先处理（hookAgenda 防堆积）
-            labels = "、".join(
-                f"{r['label']}（第{r['due_chapter']}章已到期）" for r in overdue
-            )
+            labels = "、".join(_fs_label(r, "已到期") for r in overdue)
             goal_parts.insert(0, f"【逾期伏笔，必须本章回收或推进】{labels}")
             sources.insert(0, "foreshadow_overdue")
         if upcoming:
-            labels = "、".join(
-                f"{r['label']}（第{r['due_chapter']}章到期）" for r in upcoming
-            )
+            labels = "、".join(_fs_label(r, "到期") for r in upcoming)
             goal_parts.append(f"需要推进/回收的伏笔：{labels}")
             sources.append("foreshadow")
 

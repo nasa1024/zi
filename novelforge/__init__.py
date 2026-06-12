@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "11"  # +逐章成本: pipeline_run.tokens_spent/usd_spent
+SCHEMA_VERSION = "12"  # +伏笔结算: foreshadow 结算列 + foreshadow_log
