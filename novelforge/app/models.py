@@ -254,6 +254,7 @@ class ChapterStat(BaseModel):
     finished_at: Optional[str] = None
     tokens_spent: Optional[int] = None   # 逐章成本（v11）
     usd_spent: Optional[float] = None
+    payoff_closed: bool = False          # P1#10: 本章有确定性爽点闭环证据
 
 
 class PipelineStats(BaseModel):
@@ -270,6 +271,7 @@ class PipelineStats(BaseModel):
     min_score_threshold: float = 6.0
     total_tokens_spent: int = 0     # 成本曲线汇总（v11；旧数据无成本列时为 0）
     total_usd_spent: float = 0.0
+    payoff_loop_rate: Optional[float] = None   # P1#10: 闭环章/完成章（≥0.7 高 0.5-0.7 中 <0.5 低）
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────
@@ -302,6 +304,11 @@ class ChapterCardModel(BaseModel):
     goal: Optional[str] = None
     hook_text: Optional[str] = None
     status: str = "planned"
+    # P1#7 细纲契约
+    target_emotion: Optional[str] = None
+    opening_hook_type: Optional[str] = None
+    hook_type: Optional[str] = None
+    expectation_score: Optional[int] = None
     beats: list[PlannedBeat] = Field(default_factory=list)
 
 
@@ -318,6 +325,11 @@ class ChapterCardUpdateRequest(BaseModel):
     title: Optional[str] = None
     goal: Optional[str] = None
     hook_text: Optional[str] = None
+    # P1#7 细纲契约（人审可改）
+    target_emotion: Optional[str] = None
+    opening_hook_type: Optional[str] = None
+    hook_type: Optional[str] = None
+    expectation_score: Optional[int] = Field(default=None, ge=1, le=5)
 
 
 class NextChapterSuggestion(BaseModel):
@@ -538,6 +550,30 @@ class ForeshadowResponse(BaseModel):
     advance_count: int = 0
     last_advanced_chapter: Optional[int] = None
     origin: str = "manual"
+
+
+# ── Style anchors（P1#9 文风锚点 few-shot）────────────────────────────────────
+
+class StyleAnchorCreate(BaseModel):
+    emotion: str = Field(min_length=1, max_length=50)
+    title: Optional[str] = Field(default=None, max_length=200)
+    content: str = Field(min_length=50, max_length=2000)   # 300-500 字最佳，硬限 50-2000
+
+
+class StyleAnchorUpdate(BaseModel):
+    emotion: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    title: Optional[str] = Field(default=None, max_length=200)
+    content: Optional[str] = Field(default=None, min_length=50, max_length=2000)
+    enabled: Optional[bool] = None
+
+
+class StyleAnchorResponse(BaseModel):
+    id: str
+    emotion: str
+    title: Optional[str] = None
+    content: str
+    enabled: bool = True
+    created_at: Optional[str] = None
 
 
 # ── Sessions / Turns / SSE ────────────────────────────────────────────────────

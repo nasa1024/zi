@@ -97,9 +97,13 @@ class ChapterDraftSkill:
         ) or "(无召回上下文)"
         beats_str = _fmt_beats(beats)
 
+        # P1#9：文风锚点块在稳定段之后、本章任务之前——跨章前缀缓存无损，
+        # 同章多候选间字节一致（候选间缓存同样无损）
+        anchor_block = ctx.workspace.get("style_anchor_block", "")
         user_msg = (
             f"{context_block}\n\n"
-            f"## 本章任务\n"
+            + (f"{anchor_block}\n\n" if anchor_block else "")
+            + f"## 本章任务\n"
             f"第 {ctx.target_chapter} 章\n"
             f"目标字数：约 {target_chars} 字\n"
             f"章节目标：{chapter_goal or '按情节发展'}\n\n"
