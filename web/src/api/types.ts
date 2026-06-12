@@ -230,6 +230,28 @@ export interface ForeshadowHealth {
   status: 'green' | 'yellow' | 'red' | string;
 }
 
+// M8: Autopilot 进度 SSE 事件
+export interface AutopilotSessionEvent {
+  event: 'session';
+  reason: 'snapshot' | 'chapter_done' | 'finished' | 'canceled' | 'circuit_broken' | string;
+  session: AutopilotSessionInfo;
+}
+
+export interface AutopilotStageEvent {
+  event: 'stage';
+  chapter: number;
+  stage: string;
+  status: string;
+  detail: Record<string, unknown>;
+}
+
+export type AutopilotSSEEvent = AutopilotSessionEvent | AutopilotStageEvent;
+
+export interface AutopilotStreamHandlers {
+  onSession?: (e: AutopilotSessionEvent) => void;
+  onStage?: (e: AutopilotStageEvent) => void;
+}
+
 export interface AutopilotSessionInfo {
   session_id: string;
   project_id: string;

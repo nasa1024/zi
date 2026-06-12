@@ -7,6 +7,7 @@ import { ApiError, api } from '../../api/client';
 import { useHealth } from '../../api/hooks';
 import type {
   AutopilotSessionInfo,
+  AutopilotStageEvent,
   BibleRenderResponse,
   ChapterCard,
   NextChapterSuggestion,
@@ -880,6 +881,7 @@ function PipelinePanel({
   const [apMode, setApMode] = useState<'auto_promote' | 'hybrid'>('auto_promote');
   const [apBusy, setApBusy] = useState<boolean>(false);
   const [apError, setApError] = useState<string | null>(null);
+  const [apStage, setApStage] = useState<AutopilotStageEvent | null>(null);  // M8: 章内实时进度
 
   // 卷规划（M4-④：批量生成章节卡，供「下一章」最优建议消费）
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
@@ -1055,27 +1057,61 @@ function PipelinePanel({
     return () => { alive = false; };
   }, [projectId]);
 
-  // 会话运行中每 3s 轮询进度，并同步刷新历史/建议
+  // M8：运行中会话优先 SSE 实时推送（章内 stage + 每章完成 + 终态）；
+  // SSE 不可用时回退 3s 轮询。
   useEffect(() => {
     if (!apSession || !apActive) return;
     const sid = apSession.session_id;
-    const timer = setInterval(() => {
-      void (async () => {
-        try {
-          const sessions = await api.autopilotStatus(projectId);
-          const cur = sessions.find((s) => s.session_id === sid);
-          if (!cur) return;
-          setApSession(cur);
+    const ctrl = new AbortController();
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+
+    const onTerminal = () => {
+      setApStage(null);
+      void loadHistory();
+      chapterNoTouched.current = false;
+      void loadSuggestion();
+      onChanged();
+    };
+
+    const startPolling = () => {
+      if (stopped || pollTimer) return;
+      pollTimer = setInterval(() => {
+        void (async () => {
+          try {
+            const sessions = await api.autopilotStatus(projectId);
+            const cur = sessions.find((s) => s.session_id === sid);
+            if (!cur) return;
+            setApSession(cur);
+            void loadHistory();
+            if (cur.status !== 'running' && cur.status !== 'degraded') onTerminal();
+          } catch { /* 网络抖动忽略，下个周期重试 */ }
+        })();
+      }, 3000);
+    };
+
+    api.autopilotEvents(projectId, sid, {
+      onSession: (e) => {
+        setApSession(e.session);
+        if (e.reason === 'chapter_done') {
+          setApStage(null);
           void loadHistory();
-          if (cur.status !== 'running' && cur.status !== 'degraded') {
-            chapterNoTouched.current = false;
-            void loadSuggestion();
-            onChanged();
-          }
-        } catch { /* 网络抖动忽略，下个周期重试 */ }
-      })();
-    }, 3000);
-    return () => clearInterval(timer);
+        }
+        if (e.session.status !== 'running' && e.session.status !== 'degraded') onTerminal();
+      },
+      onStage: (e) => setApStage(e),
+    }, ctrl.signal)
+      .then(() => {
+        // 流正常关闭（终态）；若状态仍显示运行中则兜底拉一次
+        if (!stopped) startPolling();
+      })
+      .catch(() => { if (!stopped) startPolling(); });
+
+    return () => {
+      stopped = true;
+      ctrl.abort();
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }, [apSession?.session_id, apActive, projectId]);
 
   const startAutopilot = async () => {
@@ -1470,6 +1506,12 @@ function PipelinePanel({
             （第 {apSession.from_chapter}–{apSession.to_chapter} 章）
           </span>
           <span className="rs-chip">模式：<b>{apSession.policy_mode}</b></span>
+          {apActive && apStage && (
+            <span className="rs-chip" title="章内实时进度（SSE）">
+              ✍ 第 {apStage.chapter} 章 · {apStage.stage}
+              <span className="nf-spin" style={{ marginLeft: 4 }} />
+            </span>
+          )}
           <span className="rs-chip">tokens：<b>{apSession.budget_tokens_total}</b></span>
           <span className="rs-chip">usd：<b>${apSession.budget_usd_total.toFixed(4)}</b></span>
           {apSession.pending_reviews > 0 && (

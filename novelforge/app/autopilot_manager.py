@@ -9,12 +9,18 @@
 - 会话写穿到项目库 autopilot_sessions 表（start INSERT / 每章 UPDATE / 终态 UPDATE）
 - 进程重启后残留的 running/degraded 行在 list 路径被标为 'interrupted'
 - resume()：从 DB 行重建启动请求，以断点章为起点开新会话（resumed_from 链回旧会话）
+
+新增（M8 SSE）：
+- subscribe()/unsubscribe()：每会话事件队列广播（线程安全 stdlib queue，独立 _sub_lock
+  防止与 _lock 嵌套死锁）
+- _run_loop 在每章 stage、每章完成、降级、终态处 _emit；终态后发 None 哨兵关流
 """
 from __future__ import annotations
 
 import datetime
 import json
 import os
+import queue as _queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -69,10 +75,65 @@ class AutopilotSession:
         return (time.time() - self._last_heartbeat) > _SESSION_TTL_SECONDS
 
 
+def _session_snapshot(s: AutopilotSession) -> dict:
+    """会话状态快照（字段与 AutopilotSessionInfo 对齐，pending_reviews 流内恒 0）。"""
+    return {
+        "session_id": s.session_id,
+        "project_id": s.project_id,
+        "from_chapter": s.from_chapter,
+        "to_chapter": s.to_chapter,
+        "current_chapter": s.current_chapter,
+        "status": s.status,
+        "policy_mode": s.policy_mode,
+        "chapters_done": s.chapters_done,
+        "chapters_total": s.chapters_total,
+        "budget_tokens_total": s.budget_tokens_total,
+        "budget_usd_total": round(s.budget_usd_total, 6),
+        "pending_reviews": 0,
+        "consecutive_hard_issues": s.consecutive_hard_issues,
+        "last_error": s.last_error,
+        "started_at": s.started_at,
+        "finished_at": s.finished_at,
+    }
+
+
 class AutopilotManager:
     def __init__(self):
         self._sessions: dict[str, AutopilotSession] = {}
         self._lock = threading.Lock()
+        # M8 SSE：订阅者用独立锁——_emit 会在持有 _lock 的代码路径里被调用
+        self._subscribers: dict[str, list[_queue.Queue]] = {}
+        self._sub_lock = threading.Lock()
+
+    # ── 事件订阅（M8 SSE）─────────────────────────────────────────────────────
+
+    def subscribe(self, session_id: str) -> "_queue.Queue":
+        q: _queue.Queue = _queue.Queue(maxsize=256)
+        with self._sub_lock:
+            self._subscribers.setdefault(session_id, []).append(q)
+        return q
+
+    def unsubscribe(self, session_id: str, q: "_queue.Queue") -> None:
+        with self._sub_lock:
+            subs = self._subscribers.get(session_id)
+            if subs and q in subs:
+                subs.remove(q)
+            if subs == []:
+                self._subscribers.pop(session_id, None)
+
+    def _emit(self, session: AutopilotSession, payload) -> None:
+        """广播事件（payload=None 为关流哨兵）。慢消费者丢弃事件而非阻塞写章。"""
+        with self._sub_lock:
+            subs = list(self._subscribers.get(session.session_id) or [])
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except _queue.Full:
+                pass
+
+    def _emit_session(self, session: AutopilotSession, reason: str) -> None:
+        self._emit(session, {"event": "session", "reason": reason,
+                             "session": _session_snapshot(session)})
 
     # ── 公开 API ──────────────────────────────────────────────────────────────
 
@@ -293,6 +354,8 @@ class AutopilotManager:
                     session.status = "canceled"
                     session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
                     self._db_update(session, registry)
+                    self._emit_session(session, "canceled")
+                    self._emit(session, None)
                     return
                 # 检查降级标志
                 if session._degrade_requested and session.policy_mode != "human_gate":
@@ -308,6 +371,8 @@ class AutopilotManager:
                     session.last_error = "session token budget exceeded"
                     session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
                     self._db_update(session, registry)
+                    self._emit_session(session, "circuit_broken")
+                    self._emit(session, None)
                     return
                 if (session.budget_session_max_usd and
                         session.budget_usd_total >= session.budget_session_max_usd):
@@ -315,6 +380,8 @@ class AutopilotManager:
                     session.last_error = "session USD budget exceeded"
                     session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
                     self._db_update(session, registry)
+                    self._emit_session(session, "circuit_broken")
+                    self._emit(session, None)
                     return
 
             conn = None
@@ -351,7 +418,15 @@ class AutopilotManager:
                         chapter_goal, _ = assemble_chapter_goal(conn, chapter)
                     except Exception:
                         chapter_goal = ""
-                outcome = orch.generate_chapter(chapter, conn, chapter_goal=chapter_goal)
+
+                # M8 SSE：章内 stage 级进度实时广播（与单章 SSE 同构）
+                def _on_stage(stage, status, detail, _ch=chapter):
+                    self._emit(session, {"event": "stage", "chapter": _ch,
+                                         "stage": stage, "status": status,
+                                         "detail": detail})
+
+                outcome = orch.generate_chapter(chapter, conn, chapter_goal=chapter_goal,
+                                                progress_cb=_on_stage)
 
                 with self._lock:
                     # 跨章累计（E4：会话级 budget 累加）
@@ -375,6 +450,7 @@ class AutopilotManager:
                     else:
                         session.consecutive_hard_issues = 0
                     self._db_update(session, registry)  # 每章一次写穿（天然 checkpoint）
+                    self._emit_session(session, "chapter_done")
 
             except Exception as exc:
                 from ..control_plane.budget import CircuitTripped
@@ -400,6 +476,8 @@ class AutopilotManager:
             if session.finished_at is None:
                 session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
             self._db_update(session, registry)
+        self._emit_session(session, "finished")
+        self._emit(session, None)
 
 
 # 全局单例（与 deps._registry 模式一致）

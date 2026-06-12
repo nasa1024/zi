@@ -5,8 +5,10 @@
 import type {
   ApproveRequest,
   ApproveResponse,
+  AutopilotSSEEvent,
   AutopilotSessionInfo,
   AutopilotStartRequest,
+  AutopilotStreamHandlers,
   BibleRenderResponse,
   ChapterCard,
   ChapterCardUpdateRequest,
@@ -291,6 +293,47 @@ export const api = {
       'POST',
       `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/resume`,
     );
+  },
+
+  // M8: 挂机进度 SSE（与 runPipelineStream 同款 fetch 流读取）。
+  // 流正常结束（终态）后 resolve；网络/服务异常时 reject，调用方回退轮询。
+  async autopilotEvents(
+    id: string,
+    sessionId: string,
+    handlers: AutopilotStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    const key = getApiKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+
+    const res = await fetch(
+      API_BASE + `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/events`,
+      { headers, signal },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(text || res.statusText, res.status);
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;   // ": ping" 保活行直接忽略
+        try {
+          const ev = JSON.parse(line.slice(6)) as AutopilotSSEEvent;
+          if (ev.event === 'session') handlers.onSession?.(ev);
+          else if (ev.event === 'stage') handlers.onStage?.(ev);
+        } catch { /* malformed line */ }
+      }
+    }
   },
 
   pipelineNext(id: string): Promise<NextChapterSuggestion> {
