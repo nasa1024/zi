@@ -175,6 +175,8 @@ class PipelineRunRequest(BaseModel):
     mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
     budget_max_tokens: Optional[int] = None
     budget_max_usd: Optional[float] = None
+    n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # M3-①: 多候选择优
+    quality_check: Optional[bool] = None  # M5-⑦: 质量评分 + 低分润色
 
 
 class StageResult(BaseModel):
@@ -197,6 +199,8 @@ class PipelineRunResponse(BaseModel):
     draft_text: str = ""
     budget_spent: BudgetSpent
     circuit_breaker_tripped: bool = False
+    quality_score: Optional[float] = None  # M5-⑦
+    cache_read_tokens: int = 0             # M1-⑥: 前缀缓存命中量
     error: Optional[str] = None
 
 
@@ -208,11 +212,102 @@ class PipelineRunRecord(BaseModel):
     started_at: str
     finished_at: Optional[str] = None
     word_count: Optional[int] = None
+    quality_score: Optional[float] = None  # M5-⑦
 
 
 class PipelineRunDetail(PipelineRunRecord):
     """pipeline_run 详情（含完整正文）。"""
     draft_text: str = ""
+    candidates: list["CandidateInfo"] = Field(default_factory=list)  # M6: 多候选时的全部候选
+    winner_index: Optional[int] = None
+    selected_by: Optional[str] = None    # "auto" | "human"
+    patch_stats: Optional[dict] = None   # M7: 补丁式修订统计 {revise|polish: {rounds,patches,applied,failed}}
+
+
+class CandidateInfo(BaseModel):
+    """M6: 单个候选稿（3 选 1 换稿用）。"""
+    index: int
+    draft_text: str
+    length: int
+    score: Optional[float] = None
+    hard_blocks: int = 0
+    is_winner: bool = False
+    proposal_count: int = 0
+
+
+class SelectCandidateRequest(BaseModel):
+    candidate_index: int = Field(ge=0, le=2)
+
+
+# ── Pipeline stats（M6: 质量趋势看板）─────────────────────────────────────────
+
+class ChapterStat(BaseModel):
+    chapter: int
+    word_count: Optional[int] = None
+    quality_score: Optional[float] = None
+    finished_at: Optional[str] = None
+
+
+class PipelineStats(BaseModel):
+    """逐章质量/产量序列（每章取最新一次 completed run）+ 汇总。
+
+    连写 50 章时「第几章开始崩」一眼可见——ConStory 实证错误高发于中段，
+    分数趋势是最直接的监控信号。
+    """
+    series: list[ChapterStat] = Field(default_factory=list)
+    chapters_completed: int = 0
+    total_words: int = 0
+    avg_quality_score: Optional[float] = None
+    low_quality_count: int = 0      # 低于 min_score 阈值的章数
+    min_score_threshold: float = 6.0
+
+
+# ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────
+
+class ForeshadowHealth(BaseModel):
+    open_count: int = 0          # 未回收（planted/reinforced/misled/overdue）
+    overdue_count: int = 0
+    oldest_overdue_chapter: Optional[int] = None   # 最早到期且仍未回收的章号
+    due_soon: list[dict] = Field(default_factory=list)  # 3 章内到期 [{label, due_chapter}]
+    status: str = "green"        # green(无逾期) / yellow(≤2) / red(>2)
+
+
+# ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
+
+class VolumePlanRequest(BaseModel):
+    from_chapter: Optional[int] = None   # 缺省 = max(卷起始章, 已完成最大章+1)
+    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章
+
+
+class PlannedBeat(BaseModel):
+    seq: int
+    beat_type: str
+    summary: str
+    value_axis: Optional[str] = None
+
+
+class ChapterCardModel(BaseModel):
+    chapter: int
+    title: Optional[str] = None
+    goal: Optional[str] = None
+    hook_text: Optional[str] = None
+    status: str = "planned"
+    beats: list[PlannedBeat] = Field(default_factory=list)
+
+
+class VolumePlanResponse(BaseModel):
+    volume_no: int
+    from_chapter: int
+    to_chapter: int
+    planned: list[ChapterCardModel]
+    skipped: list[int] = Field(default_factory=list)  # 已 drafted/committed 受保护的章
+    error: Optional[str] = None
+
+
+class ChapterCardUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    goal: Optional[str] = None
+    hook_text: Optional[str] = None
 
 
 class NextChapterSuggestion(BaseModel):
@@ -249,6 +344,8 @@ class AutopilotStartRequest(BaseModel):
     budget_session_max_tokens: Optional[int] = None   # E4: 会话级跨章 token 封顶
     budget_session_max_usd: Optional[float] = None    # E4: 会话级跨章 USD 封顶
     auto_degrade_after_consecutive_issues: int = 2  # 连续 N 章有 hard issue → 降级
+    quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
+    n_candidates: int = Field(default=1, ge=1, le=3)  # M3-①: 每章候选稿数（择优）
 
 
 class AutopilotSessionInfo(BaseModel):

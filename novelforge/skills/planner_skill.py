@@ -50,15 +50,30 @@ class PlannerSkill:
     def run(self, ctx: SkillContext) -> SkillResult:
         recall: object = ctx.workspace.get("recall_pack")
         chapter_goal: str = ctx.workspace.get("chapter_goal", "")
-        context_str = recall.to_context_str() if recall else "(无召回上下文)"
+
+        # M1-⑥ 收尾：与 draft 同构——稳定前缀在前、本章规划任务在后，
+        # 跨章的 planner 调用共享（system + stable）前缀吃缓存。
+        stable = ctx.workspace.get("stable_context")
+        dynamic = ctx.workspace.get("dynamic_context")
+        if stable is None and recall is not None:
+            _s = recall.to_stable_context_str()
+            stable = f"## 世界设定（稳定）\n{_s}" if _s else ""
+            dynamic = recall.to_dynamic_context_str()
+        context_block = "\n\n".join(
+            p for p in (
+                stable or "",
+                f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
+            ) if p
+        ) or "(无召回上下文)"
 
         user_msg = (
+            f"{context_block}\n\n"
+            f"## 规划任务\n"
             f"当前章节：第 {ctx.target_chapter} 章\n"
-            f"章节目标：{chapter_goal or '按情节自然发展'}\n\n"
-            f"{context_str}"
+            f"章节目标：{chapter_goal or '按情节自然发展'}"
         )
 
-        from ..control_plane.llm.provider import Message
+        from ..control_plane.llm.provider import CacheHint, Message
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 4096)   # Planner 输出短，4096 够用
@@ -67,6 +82,7 @@ class PlannerSkill:
             [Message(role="user", content=user_msg)],
             system=_SYSTEM,
             max_tokens=max_out,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
 
         beats = _parse_beats(resp.text)

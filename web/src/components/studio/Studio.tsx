@@ -7,16 +7,21 @@ import { ApiError, api } from '../../api/client';
 import { useHealth } from '../../api/hooks';
 import type {
   AutopilotSessionInfo,
+  AutopilotStageEvent,
   BibleRenderResponse,
+  ChapterCard,
   NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
+  ForeshadowHealth,
+  PipelineStats,
   ProjectResponse,
   ReviewQueueItem,
   SSEDoneEvent,
   SSEStageEvent,
   SearchFactsResponse,
   SeedRequest,
+  VolumeInfo,
   WorldStateSnapshot,
 } from '../../api/types';
 import '../../styles/studio.css';
@@ -857,6 +862,9 @@ function PipelinePanel({
   const [chapterNo, setChapterNo] = useState<string>('1');
   const [chapterGoal, setChapterGoal] = useState<string>('');
   const [mode, setMode] = useState<'human_gate' | 'auto_promote' | 'hybrid'>('human_gate');
+  const [nCandidates, setNCandidates] = useState<number>(1);
+  const [qualityCheck, setQualityCheck] = useState<boolean>(false);
+  const [fsHealth, setFsHealth] = useState<ForeshadowHealth | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -873,11 +881,25 @@ function PipelinePanel({
   const [apMode, setApMode] = useState<'auto_promote' | 'hybrid'>('auto_promote');
   const [apBusy, setApBusy] = useState<boolean>(false);
   const [apError, setApError] = useState<string | null>(null);
+  const [apStage, setApStage] = useState<AutopilotStageEvent | null>(null);  // M8: 章内实时进度
+
+  // 卷规划（M4-④：批量生成章节卡，供「下一章」最优建议消费）
+  const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
+  const [planVolNo, setPlanVolNo] = useState<string>('');
+  const [planBusy, setPlanBusy] = useState<boolean>(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planSkipped, setPlanSkipped] = useState<number[]>([]);
+  const [cards, setCards] = useState<ChapterCard[]>([]);
+  const [cardSaving, setCardSaving] = useState<number | null>(null);
 
   // SSE 流式状态
   const [liveStages, setLiveStages] = useState<SSEStageEvent[]>([]);
   const [liveDraft, setLiveDraft] = useState<string>('');
   const [doneData, setDoneData] = useState<SSEDoneEvent | null>(null);
+
+  // M6: 多候选 3 选 1 换稿
+  const [runDetail, setRunDetail] = useState<PipelineRunDetail | null>(null);
+  const [selecting, setSelecting] = useState<number | null>(null);
 
   // 历史记录
   const [history, setHistory] = useState<PipelineRunRecord[]>([]);
@@ -888,11 +910,15 @@ function PipelinePanel({
 
   const abortRef = useRef<AbortController | null>(null);
 
+  const [stats, setStats] = useState<PipelineStats | null>(null);
+
   const loadHistory = useCallback(async () => {
     setHistLoading(true);
     try {
       const list = await api.listPipelineRuns(projectId);
       setHistory(list);
+      // 质量趋势随历史一起刷新（轻量聚合）
+      api.pipelineStats(projectId).then(setStats).catch(() => {});
     } catch { /* ignore */ } finally {
       setHistLoading(false);
     }
@@ -906,6 +932,8 @@ function PipelinePanel({
       if (!chapterNoTouched.current) {
         setChapterNo(String(sug.next_chapter));
       }
+      // 伏笔健康度随建议一起刷新（轻量聚合查询）
+      api.foreshadowHealth(projectId).then(setFsHealth).catch(() => {});
       return sug;
     } catch {
       return null;
@@ -930,6 +958,7 @@ function PipelinePanel({
     setLiveStages([]);
     setLiveDraft('');
     setDoneData(null);
+    setRunDetail(null);
 
     let ok = false;
     try {
@@ -939,6 +968,8 @@ function PipelinePanel({
           chapter_no: no,
           chapter_goal: goal.trim() || undefined,
           mode,
+          n_candidates: nCandidates > 1 ? nCandidates : undefined,
+          quality_check: qualityCheck || undefined,
         },
         {
           onStage: (e) => setLiveStages((prev) => [...prev, e]),
@@ -948,6 +979,12 @@ function PipelinePanel({
             setLiveDraft(e.draft_text ?? '');
             onChanged();
             void loadHistory();
+            // 多候选时拉详情供 3 选 1 换稿
+            if (nCandidates > 1 && e.run_id) {
+              api.getPipelineRun(projectId, e.run_id)
+                .then((d) => setRunDetail(d.candidates.length > 1 ? d : null))
+                .catch(() => {});
+            }
           },
           onError: (e) => setError(e.message || '生成失败'),
         },
@@ -1020,27 +1057,61 @@ function PipelinePanel({
     return () => { alive = false; };
   }, [projectId]);
 
-  // 会话运行中每 3s 轮询进度，并同步刷新历史/建议
+  // M8：运行中会话优先 SSE 实时推送（章内 stage + 每章完成 + 终态）；
+  // SSE 不可用时回退 3s 轮询。
   useEffect(() => {
     if (!apSession || !apActive) return;
     const sid = apSession.session_id;
-    const timer = setInterval(() => {
-      void (async () => {
-        try {
-          const sessions = await api.autopilotStatus(projectId);
-          const cur = sessions.find((s) => s.session_id === sid);
-          if (!cur) return;
-          setApSession(cur);
+    const ctrl = new AbortController();
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+
+    const onTerminal = () => {
+      setApStage(null);
+      void loadHistory();
+      chapterNoTouched.current = false;
+      void loadSuggestion();
+      onChanged();
+    };
+
+    const startPolling = () => {
+      if (stopped || pollTimer) return;
+      pollTimer = setInterval(() => {
+        void (async () => {
+          try {
+            const sessions = await api.autopilotStatus(projectId);
+            const cur = sessions.find((s) => s.session_id === sid);
+            if (!cur) return;
+            setApSession(cur);
+            void loadHistory();
+            if (cur.status !== 'running' && cur.status !== 'degraded') onTerminal();
+          } catch { /* 网络抖动忽略，下个周期重试 */ }
+        })();
+      }, 3000);
+    };
+
+    api.autopilotEvents(projectId, sid, {
+      onSession: (e) => {
+        setApSession(e.session);
+        if (e.reason === 'chapter_done') {
+          setApStage(null);
           void loadHistory();
-          if (cur.status !== 'running' && cur.status !== 'degraded') {
-            chapterNoTouched.current = false;
-            void loadSuggestion();
-            onChanged();
-          }
-        } catch { /* 网络抖动忽略，下个周期重试 */ }
-      })();
-    }, 3000);
-    return () => clearInterval(timer);
+        }
+        if (e.session.status !== 'running' && e.session.status !== 'degraded') onTerminal();
+      },
+      onStage: (e) => setApStage(e),
+    }, ctrl.signal)
+      .then(() => {
+        // 流正常关闭（终态）；若状态仍显示运行中则兜底拉一次
+        if (!stopped) startPolling();
+      })
+      .catch(() => { if (!stopped) startPolling(); });
+
+    return () => {
+      stopped = true;
+      ctrl.abort();
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }, [apSession?.session_id, apActive, projectId]);
 
   const startAutopilot = async () => {
@@ -1056,6 +1127,8 @@ function PipelinePanel({
         from_chapter: from,
         to_chapter: from + count - 1,
         mode: apMode,
+        quality_check: qualityCheck || undefined,
+        n_candidates: nCandidates > 1 ? nCandidates : undefined,
       });
       setApSession(session);
     } catch (err) {
@@ -1071,6 +1144,85 @@ function PipelinePanel({
       setApSession(await api.autopilotCancel(projectId, apSession.session_id));
     } catch (err) {
       setApError(errMessage(err, '取消失败'));
+    }
+  };
+
+  // ── 卷规划 ───────────────────────────────────────────────────────────────
+  const selectedVol = volumes.find((v) => String(v.volume_no) === planVolNo) ?? null;
+
+  const loadCards = useCallback(async (vol: VolumeInfo | null) => {
+    if (!vol || vol.start_chapter == null) {
+      setCards([]);
+      return;
+    }
+    try {
+      setCards(await api.listChapterCards(projectId, vol.start_chapter, vol.end_chapter ?? 9999));
+    } catch { /* ignore */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const vols = await api.listVolumes(projectId);
+        if (!alive) return;
+        setVolumes(vols);
+        if (vols.length > 0) setPlanVolNo(String(vols[0].volume_no));
+      } catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [projectId]);
+
+  useEffect(() => { void loadCards(selectedVol); }, [loadCards, selectedVol]);
+
+  const runVolumePlan = async () => {
+    if (!selectedVol) return;
+    setPlanBusy(true);
+    setPlanError(null);
+    setPlanSkipped([]);
+    try {
+      const resp = await api.planVolume(projectId, selectedVol.volume_no, {});
+      if (resp.error) setPlanError(resp.error);
+      setPlanSkipped(resp.skipped);
+      await loadCards(selectedVol);
+      chapterNoTouched.current = false;
+      void loadSuggestion();   // 章节卡入库后「下一章」建议立即升级为大纲驱动
+    } catch (err) {
+      setPlanError(errMessage(err, '卷规划失败'));
+    } finally {
+      setPlanBusy(false);
+    }
+  };
+
+  const saveCard = async (card: ChapterCard) => {
+    setCardSaving(card.chapter);
+    try {
+      await api.updateChapterCard(projectId, card.chapter, {
+        title: card.title, goal: card.goal, hook_text: card.hook_text,
+      });
+      void loadSuggestion();
+    } catch (err) {
+      setPlanError(errMessage(err, '保存失败'));
+    } finally {
+      setCardSaving(null);
+    }
+  };
+
+  const editCard = (chapter: number, field: 'title' | 'goal' | 'hook_text', value: string) => {
+    setCards((prev) => prev.map((c) => (c.chapter === chapter ? { ...c, [field]: value } : c)));
+  };
+
+  // 恢复被中断的会话（进程重启后从断点继续，已完成的章不会重写）
+  const resumeAutopilot = async () => {
+    if (!apSession) return;
+    setApError(null);
+    setApBusy(true);
+    try {
+      setApSession(await api.autopilotResume(projectId, apSession.session_id));
+    } catch (err) {
+      setApError(errMessage(err, '恢复失败'));
+    } finally {
+      setApBusy(false);
     }
   };
 
@@ -1091,9 +1243,27 @@ function PipelinePanel({
     }
   };
 
+  // M6: 人工换稿——选中候选落盘为新修订，提案入 staging 走人审
+  const pickCandidate = async (idx: number) => {
+    if (!runDetail) return;
+    setSelecting(idx);
+    try {
+      const d = await api.selectCandidate(projectId, runDetail.run_id, idx);
+      setRunDetail(d);
+      setLiveDraft(d.draft_text);
+      void loadHistory();
+      onChanged();
+    } catch (err) {
+      setError(errMessage(err, '换稿失败'));
+    } finally {
+      setSelecting(null);
+    }
+  };
+
   const stageOrder = ['recall', 'plan', 'draft', 'check', 'gate'];
   const allStages = stageOrder.map((s) => liveStages.find((e) => e.stage === s));
   const hasLiveResult = liveStages.length > 0 || doneData;
+  const candidatesEvent = liveStages.find((e) => e.stage === 'candidates');
 
   return (
     <div className="studio-panel">
@@ -1138,6 +1308,22 @@ function PipelinePanel({
             <option value="human_gate">human_gate · 人审</option>
             <option value="auto_promote">auto_promote · 全自动</option>
             <option value="hybrid">hybrid · 混合</option>
+          </select>
+        </div>
+        <div className="nf-field">
+          <label htmlFor="pl-cands" title="并行生成多个候选稿，确定性预筛 + 硬校验否决 + LLM 评委自动择优">
+            候选稿数 CANDIDATES
+          </label>
+          <select
+            id="pl-cands"
+            className="nf-select"
+            value={nCandidates}
+            onChange={(e) => setNCandidates(Number(e.target.value))}
+            disabled={busy}
+          >
+            <option value={1}>1 · 单稿（默认）</option>
+            <option value={2}>2 · 双稿择优</option>
+            <option value={3}>3 · 三稿择优</option>
           </select>
         </div>
         <div className="nf-field full">
@@ -1193,6 +1379,19 @@ function PipelinePanel({
             />
           </label>
 
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}
+            title="LLM 评委给每章打 0-10 分；低分或工艺 warn 堆积时自动润色一轮（取分高版本）；挂机时连续低分自动降级人审"
+          >
+            <input
+              type="checkbox"
+              checked={qualityCheck}
+              onChange={(e) => setQualityCheck(e.target.checked)}
+              disabled={busy}
+            />
+            质量评分
+          </label>
+
           {busy && (
             <button type="button" className="nf-btn-sm" onClick={stopChain}>
               ⏹ 停止
@@ -1209,6 +1408,14 @@ function PipelinePanel({
             {suggestion.sources.length > 0 && (
               <>　·　目标依据：{suggestion.sources.join(' / ')}</>
             )}
+            {fsHealth && fsHealth.overdue_count > 0 && (
+              <span
+                title={`最早第 ${fsHealth.oldest_overdue_chapter} 章到期；未回收伏笔共 ${fsHealth.open_count} 条`}
+                style={{ marginLeft: '0.5rem' }}
+              >
+                {fsHealth.status === 'red' ? '🔴' : '🟡'} 逾期伏笔 {fsHealth.overdue_count} 条
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -1220,6 +1427,7 @@ function PipelinePanel({
       <div className="ph-hint">
         后台会话从「下一章」起逐章生成，每章自动选取最优目标（章节卡 / 钩子 / 卷大纲 / 伏笔 / 节拍）；
         连续出现硬一致性问题会自动降级人审，关闭页面不中断。
+        上方「候选稿数 / 质量评分」设置对挂机同样生效。
       </div>
 
       <div className="nf-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
@@ -1267,6 +1475,17 @@ function PipelinePanel({
             ⏹ 取消会话
           </button>
         )}
+        {apSession?.status === 'interrupted' && (
+          <button
+            type="button"
+            className="nf-btn-sm"
+            onClick={() => void resumeAutopilot()}
+            disabled={apBusy}
+            title="会话曾被进程重启中断，从断点章继续（已完成的章不会重写）"
+          >
+            ▶ 恢复会话
+          </button>
+        )}
       </div>
 
       {apError && (
@@ -1287,6 +1506,12 @@ function PipelinePanel({
             （第 {apSession.from_chapter}–{apSession.to_chapter} 章）
           </span>
           <span className="rs-chip">模式：<b>{apSession.policy_mode}</b></span>
+          {apActive && apStage && (
+            <span className="rs-chip" title="章内实时进度（SSE）">
+              ✍ 第 {apStage.chapter} 章 · {apStage.stage}
+              <span className="nf-spin" style={{ marginLeft: 4 }} />
+            </span>
+          )}
           <span className="rs-chip">tokens：<b>{apSession.budget_tokens_total}</b></span>
           <span className="rs-chip">usd：<b>${apSession.budget_usd_total.toFixed(4)}</b></span>
           {apSession.pending_reviews > 0 && (
@@ -1298,6 +1523,106 @@ function PipelinePanel({
             </span>
           )}
         </div>
+      )}
+
+      {/* ── 卷规划（章节卡批量预生成）───────────────────── */}
+      <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+        <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📋 卷规划</span>
+      </div>
+      <div className="ph-hint">
+        按卷大纲一次生成 ≤10 章细纲（目标/钩子/节拍，含爽点与伏笔回收安排），
+        入库后「下一章 · 自动连写」与挂机连写按细纲驱动；已写过的章不会被覆盖。
+      </div>
+
+      {volumes.length === 0 ? (
+        <div className="nf-empty">尚无卷——先在 volumes 中创建卷并填写 synopsis</div>
+      ) : (
+        <>
+          <div className="nf-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
+            <select
+              className="nf-select"
+              value={planVolNo}
+              onChange={(e) => setPlanVolNo(e.target.value)}
+              disabled={planBusy}
+              aria-label="选择卷"
+              style={{ width: 'auto' }}
+            >
+              {volumes.map((v) => (
+                <option key={v.volume_no} value={String(v.volume_no)}>
+                  第 {v.volume_no} 卷 · {v.title}
+                  {v.start_chapter != null && `（${v.start_chapter}-${v.end_chapter ?? '…'}章）`}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="nf-btn"
+              onClick={() => void runVolumePlan()}
+              disabled={planBusy || busy || !selectedVol}
+            >
+              {planBusy ? (<><span className="nf-spin" /> 规划中…</>) : (<>📋 生成细纲</>)}
+            </button>
+            {planSkipped.length > 0 && (
+              <span className="ph-hint">已写章节跳过：{planSkipped.join(', ')}</span>
+            )}
+          </div>
+
+          {planError && (
+            <div className="nf-msg err"><span>⚠</span><span>{planError}</span></div>
+          )}
+
+          {cards.length > 0 && (
+            <div className="pipeline-history" style={{ marginTop: '0.6rem' }}>
+              {cards.map((c) => (
+                <div key={c.chapter} className="ph-row">
+                  <div className="ph-body" style={{ display: 'grid', gridTemplateColumns: '5rem 1fr auto', gap: '0.5rem', alignItems: 'start', padding: '0.5rem 0.75rem' }}>
+                    <div>
+                      <div className="ph-ch">第 {c.chapter} 章</div>
+                      <div className="ph-hint">{c.status}</div>
+                    </div>
+                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                      <input
+                        className="nf-input"
+                        placeholder="章节名"
+                        value={c.title ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'title', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                      />
+                      <textarea
+                        className="nf-textarea"
+                        placeholder="本章目标（冲突/爽点）"
+                        value={c.goal ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'goal', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                        rows={2}
+                      />
+                      <input
+                        className="nf-input"
+                        placeholder="章末钩子"
+                        value={c.hook_text ?? ''}
+                        onChange={(e) => editCard(c.chapter, 'hook_text', e.target.value)}
+                        disabled={c.status !== 'planned'}
+                      />
+                      {c.beats.length > 0 && (
+                        <div className="ph-hint">
+                          节拍：{c.beats.map((b) => `[${b.beat_type}]${b.summary.slice(0, 14)}`).join('　')}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="nf-btn-sm"
+                      onClick={() => void saveCard(c)}
+                      disabled={cardSaving === c.chapter || c.status !== 'planned'}
+                    >
+                      {cardSaving === c.chapter ? '…' : '保存'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {/* ── 实时进度条 ─────────────────────────────────── */}
@@ -1318,6 +1643,68 @@ function PipelinePanel({
             })}
           </div>
 
+          {candidatesEvent && (
+            <div className="run-summary">
+              <span className="rs-chip">
+                🏆 候选择优：<b>{String(candidatesEvent.detail.n)} 选 1</b>
+                ，胜者 #{String(candidatesEvent.detail.winner)}
+                {Array.isArray(candidatesEvent.detail.scores) &&
+                  (candidatesEvent.detail.scores as (number | null)[]).some((s) => s != null) && (
+                  <>　评分 [{(candidatesEvent.detail.scores as (number | null)[])
+                    .map((s) => (s == null ? '—' : String(s))).join(' / ')}]</>
+                )}
+              </span>
+            </div>
+          )}
+
+          {/* M6: 3 选 1 候选卡片（点「采用此稿」人工换稿） */}
+          {runDetail && runDetail.candidates.length > 1 && (
+            <>
+              <div className="ph-hint" style={{ marginTop: '0.5rem' }}>
+                ✍️ 不满意自动择优？可改选其他候选：换稿会作为本章新修订落盘，
+                选中稿的设定提案进入审核队列由你裁决。
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${runDetail.candidates.length}, 1fr)`, gap: '0.6rem', marginTop: '0.4rem' }}>
+                {runDetail.candidates.map((c) => (
+                  <div
+                    key={c.index}
+                    className="ph-row"
+                    style={{
+                      padding: '0.6rem',
+                      border: c.is_winner ? '1px solid var(--nf-accent, #7ef)' : undefined,
+                      borderRadius: 6,
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <b>候选 #{c.index}</b>
+                      {c.is_winner && (
+                        <span className="rs-chip gate">
+                          当前采用{runDetail.selected_by === 'human' ? '（人工）' : '（自动）'}
+                        </span>
+                      )}
+                      {c.score != null && <span className="rs-chip">★{c.score}</span>}
+                      <span className="rs-chip">{c.length} 字</span>
+                      {c.hard_blocks > 0 && (
+                        <span className="rs-chip" title="确定性校验 block 数">⚠{c.hard_blocks}</span>
+                      )}
+                    </div>
+                    <div className="ph-hint" style={{ margin: '0.4rem 0', maxHeight: '6em', overflow: 'hidden' }}>
+                      {c.draft_text.slice(0, 160)}…
+                    </div>
+                    <button
+                      type="button"
+                      className="nf-btn-sm"
+                      onClick={() => void pickCandidate(c.index)}
+                      disabled={c.is_winner || selecting != null}
+                    >
+                      {selecting === c.index ? '换稿中…' : c.is_winner ? '已采用' : '采用此稿'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
           {doneData && (
             <div className="run-summary">
               <span className="rs-chip gate">
@@ -1325,6 +1712,16 @@ function PipelinePanel({
               </span>
               <span className="rs-chip">tokens：<b>{doneData.tokens}</b></span>
               <span className="rs-chip">usd：<b>${doneData.usd.toFixed(4)}</b></span>
+              {(doneData.cache_read_tokens ?? 0) > 0 && (
+                <span className="rs-chip" title="provider 前缀缓存命中的输入 token 数">
+                  cache命中：<b>{doneData.cache_read_tokens}</b>
+                </span>
+              )}
+              {doneData.quality_score != null && (
+                <span className="rs-chip" title="LLM 评委质量分（0-10）">
+                  质量分：<b>{doneData.quality_score.toFixed(1)}</b>
+                </span>
+              )}
             </div>
           )}
 
@@ -1345,6 +1742,51 @@ function PipelinePanel({
           {liveDraft && (
             <div className="bible-box">
               <pre>{liveDraft}</pre>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── 质量趋势（M6）───────────────────────────────── */}
+      {stats && stats.chapters_completed > 0 && (
+        <>
+          <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
+            <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📈 质量趋势</span>
+            <span className="ph-hint" style={{ marginLeft: 'auto' }}>
+              共 {stats.chapters_completed} 章 · {Math.round(stats.total_words / 1000)}k 字
+              {stats.avg_quality_score != null && <>　均分 ★{stats.avg_quality_score}</>}
+              {stats.low_quality_count > 0 && (
+                <span style={{ color: 'var(--nf-warn, #fa0)' }}>
+                  　⚠ {stats.low_quality_count} 章低于 {stats.min_score_threshold} 分
+                </span>
+              )}
+            </span>
+          </div>
+          {stats.series.some((s) => s.quality_score != null) && (
+            <div
+              style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 56, marginTop: '0.4rem' }}
+              title="逐章质量分（0-10）；红色 = 低于阈值——崩坏实证高发于卷中段，趋势下行时及时介入"
+            >
+              {stats.series.map((s) => {
+                const score = s.quality_score;
+                const h = score == null ? 4 : Math.max(4, (score / 10) * 56);
+                const low = score != null && score < stats.min_score_threshold;
+                return (
+                  <div
+                    key={s.chapter}
+                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}`}
+                    style={{
+                      width: 'clamp(4px, 100%, 18px)',
+                      flex: '1 1 0',
+                      height: h,
+                      borderRadius: 2,
+                      background: score == null
+                        ? 'rgba(255,255,255,0.15)'
+                        : low ? 'var(--nf-warn, #f66)' : 'var(--nf-accent, #6cf)',
+                    }}
+                  />
+                );
+              })}
             </div>
           )}
         </>
@@ -1379,6 +1821,9 @@ function PipelinePanel({
               <span className={`ph-status ${rec.status}`}>{rec.status}</span>
               <span className="ph-ch">第 {rec.chapter} 章</span>
               <span className="ph-wc">{rec.word_count != null ? `${rec.word_count} 字` : '—'}</span>
+              {rec.quality_score != null && (
+                <span className="ph-wc" title="质量分">★{rec.quality_score.toFixed(1)}</span>
+              )}
               <span className="ph-time">{rec.started_at.replace('T', ' ').slice(0, 16)}</span>
               <span className="ph-arrow">{expandedRun === rec.run_id ? '▲' : '▼'}</span>
             </button>

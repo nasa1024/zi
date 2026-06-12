@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "7"  # +§13.2: sessions/turns/turn_events（会话/turn 模型）
+SCHEMA_VERSION = "10"  # +M3-①: pipeline_run.detail_json/quality_score

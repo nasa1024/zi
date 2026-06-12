@@ -40,12 +40,30 @@ class RecallConfig:
     max_keywords: int = 30
     context_window_chapters: int = 5     # 往前看多少章关键词
     enable_vector: bool = False          # MVP1 关闭向量召回
+    enable_summaries: bool = True        # M2-②: 分层叙事摘要（章摘要+卷滚动摘要）
+    summary_window_chapters: int = 5     # 注入最近 N 章摘要
 
 
 @dataclass
 class DeduplicationConfig:
     bm25_gap_min: float = 2.0            # FTS BM25 分数差最小值（越大越宽松）
     enable_llm_arbiter: bool = True      # 是否启用 LLM 仲裁模糊 case
+
+
+@dataclass
+class CandidateConfig:
+    """M3-①: 章节多候选 + 评分择优。n_candidates=1 时完全等价于旧行为。"""
+    n_candidates: int = 1                # 候选稿数量（1=关闭；建议生产 2-3，上限 3）
+    judge_tier: str = "mid"              # LLM 评委档位 fast|mid|strong
+    temperature_spread: float = 0.15     # 候选间温度差（多样性）
+
+
+@dataclass
+class QualityConfig:
+    """M5-⑦: 章节质量分门控 + 软问题润色。enabled=False 时零额外 LLM 调用。"""
+    enabled: bool = False
+    min_score: float = 6.0               # 低于此分触发润色 / 计入 autopilot 降级（autonovel 同款阈值）
+    polish_enabled: bool = True          # 低分或 craft warn≥3 时做一轮润色（取分高版本，防润色变差）
 
 
 @dataclass
@@ -57,5 +75,9 @@ class NovelForgeConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     recall: RecallConfig = field(default_factory=RecallConfig)
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
+    candidates: CandidateConfig = field(default_factory=CandidateConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
+    patch_revise: bool = True            # M7: revise/润色先尝试锚点补丁（局部修改），失败回退全文重写
+    midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）

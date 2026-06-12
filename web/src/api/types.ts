@@ -84,6 +84,8 @@ export interface PipelineRunRequest {
   mode?: 'human_gate' | 'auto_promote' | 'hybrid' | null;
   budget_max_tokens?: number | null;
   budget_max_usd?: number | null;
+  n_candidates?: number | null;
+  quality_check?: boolean | null;
 }
 
 export interface StageResult {
@@ -116,10 +118,24 @@ export interface PipelineRunRecord {
   started_at: string;
   finished_at?: string | null;
   word_count?: number | null;
+  quality_score?: number | null;
 }
 
 export interface PipelineRunDetail extends PipelineRunRecord {
   draft_text: string;
+  candidates: CandidateInfo[];
+  winner_index?: number | null;
+  selected_by?: 'auto' | 'human' | string | null;
+}
+
+export interface CandidateInfo {
+  index: number;
+  draft_text: string;
+  length: number;
+  score?: number | null;
+  hard_blocks: number;
+  is_winner: boolean;
+  proposal_count: number;
 }
 
 export interface NextChapterSuggestion {
@@ -127,6 +143,53 @@ export interface NextChapterSuggestion {
   last_completed_chapter: number;
   suggested_goal: string;
   sources: string[];
+}
+
+export interface VolumeInfo {
+  id: string;
+  volume_no: number;
+  title: string;
+  synopsis?: string | null;
+  start_chapter?: number | null;
+  end_chapter?: number | null;
+  status: string;
+  created_at: string;
+}
+
+export interface PlannedBeat {
+  seq: number;
+  beat_type: string;
+  summary: string;
+  value_axis?: string | null;
+}
+
+export interface ChapterCard {
+  chapter: number;
+  title?: string | null;
+  goal?: string | null;
+  hook_text?: string | null;
+  status: string;
+  beats: PlannedBeat[];
+}
+
+export interface VolumePlanRequest {
+  from_chapter?: number | null;
+  to_chapter?: number | null;
+}
+
+export interface VolumePlanResponse {
+  volume_no: number;
+  from_chapter: number;
+  to_chapter: number;
+  planned: ChapterCard[];
+  skipped: number[];
+  error?: string | null;
+}
+
+export interface ChapterCardUpdateRequest {
+  title?: string | null;
+  goal?: string | null;
+  hook_text?: string | null;
 }
 
 export interface AutopilotStartRequest {
@@ -139,6 +202,54 @@ export interface AutopilotStartRequest {
   budget_session_max_tokens?: number | null;
   budget_session_max_usd?: number | null;
   auto_degrade_after_consecutive_issues?: number;
+  quality_check?: boolean;
+  n_candidates?: number;
+}
+
+export interface ChapterStat {
+  chapter: number;
+  word_count?: number | null;
+  quality_score?: number | null;
+  finished_at?: string | null;
+}
+
+export interface PipelineStats {
+  series: ChapterStat[];
+  chapters_completed: number;
+  total_words: number;
+  avg_quality_score?: number | null;
+  low_quality_count: number;
+  min_score_threshold: number;
+}
+
+export interface ForeshadowHealth {
+  open_count: number;
+  overdue_count: number;
+  oldest_overdue_chapter?: number | null;
+  due_soon: { label: string; due_chapter: number }[];
+  status: 'green' | 'yellow' | 'red' | string;
+}
+
+// M8: Autopilot 进度 SSE 事件
+export interface AutopilotSessionEvent {
+  event: 'session';
+  reason: 'snapshot' | 'chapter_done' | 'finished' | 'canceled' | 'circuit_broken' | string;
+  session: AutopilotSessionInfo;
+}
+
+export interface AutopilotStageEvent {
+  event: 'stage';
+  chapter: number;
+  stage: string;
+  status: string;
+  detail: Record<string, unknown>;
+}
+
+export type AutopilotSSEEvent = AutopilotSessionEvent | AutopilotStageEvent;
+
+export interface AutopilotStreamHandlers {
+  onSession?: (e: AutopilotSessionEvent) => void;
+  onStage?: (e: AutopilotStageEvent) => void;
 }
 
 export interface AutopilotSessionInfo {
@@ -147,7 +258,7 @@ export interface AutopilotSessionInfo {
   from_chapter: number;
   to_chapter: number;
   current_chapter: number;
-  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | string;
+  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | 'interrupted' | string;
   policy_mode: string;
   chapters_done: number;
   chapters_total: number;
@@ -176,6 +287,8 @@ export interface SSEDoneEvent {
   final_gate: string;
   tokens: number;
   usd: number;
+  cache_read_tokens?: number;
+  quality_score?: number | null;
   error?: string | null;
 }
 
