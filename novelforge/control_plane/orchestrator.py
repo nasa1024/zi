@@ -42,6 +42,7 @@ class ChapterOutcome:
     cache_read_tokens: int = 0
     quality_score: Optional[float] = None
     quality_dimensions: Optional[dict] = None  # {hook,pacing,character,prose: 0-10}
+    state_degraded: bool = False   # P1#11: 结算块失败但正文已落袋（连载继续，留修复入口）
 
     def summary(self) -> str:
         if not self.ok:
@@ -78,7 +79,6 @@ class Orchestrator:
         ledger = self._gw.ledger
         # 成本快照：落库本章净消耗（调用方复用 ledger 跨章时差值依然正确）
         _tokens0, _usd0 = ledger.tokens_spent, ledger.usd_spent
-        ctx = RunContext(conn=conn, policy_mode=cfg.governance.mode, actor="orchestrator")
 
         # ── 0. init workspace + pipeline_run 状态机 ──────────────────────────
         run_id = new_id("run")
@@ -277,78 +277,58 @@ class Orchestrator:
                     {"source": "craft", **i} for i in craft_issues
                 ]
 
-            # ── 6. DEDUP + CONFLICT + GATE ────────────────────────────────────
+            # ── 6. COMMIT-DRAFT（P1#11：正文先落袋，结算失败不丢章）─────────
             draft_text: str = workspace.get("draft_text", "")
             proposals: list[dict] = workspace.get("proposals", [])
-            candidates = _proposals_to_candidates(proposals, chapter, conn)
-
-            # 近邻去重
-            dedup_gw = self._gw if cfg.dedup.enable_llm_arbiter else None
-            dedup_engine = DeduplicationEngine(
-                bm25_gap_min=cfg.dedup.bm25_gap_min,
-                llm_gateway=dedup_gw,
-            )
-            candidates = _apply_dedup(candidates, dedup_engine, conn)
-
-            # 冲突检测 + 风险重分类
-            conflict_map: dict[str, ConflictSet] = {}
-            for cand in candidates:
-                cset = detect_conflict(cand, conn)
-                cand.risk_tier = classify_risk(cand, cfg)
-                if cset.has_block:
-                    conflict_map[cand.candidate_id] = cset
-                    # 更新 DB 中的 risk_tier
-                    try:
-                        conn.execute(
-                            "UPDATE fact_candidates SET risk_tier=? WHERE candidate_id=?",
-                            (cand.risk_tier, cand.candidate_id),
-                        )
-                    except Exception:
-                        pass
-            conn.commit()
-
-            world = workspace.get("world_state")
-            gate_decision: GateDecision = PromotionPolicy.decide_batch(
-                candidates, world, cfg, conflict_map=conflict_map
-            )
-            gate_outcome: GateOutcome = apply_gate_routes(ctx, gate_decision, {"chapter": chapter})
-
-            # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
+
+            # ── 7. SETTLE（canon 结算 + 写回类结算；失败降级不阻塞连载）──────
+            settle = self._settle_chapter(skill_ctx, conn, chapter, draft_text,
+                                          proposals, pacing, progress_cb)
+
             run_detail = workspace.get("candidate_report")
             if workspace.get("patch_stats"):
                 run_detail = {**(run_detail or {}), "patch_stats": workspace["patch_stats"]}
             if workspace.get("quality_dimensions"):
                 run_detail = {**(run_detail or {}),
                               "quality_dimensions": workspace["quality_dimensions"]}
+            if settle["foreshadow_settle"] is not None:
+                run_detail = {**(run_detail or {}),
+                              "foreshadow_settle": settle["foreshadow_settle"]}
+            if settle["degraded"]:
+                run_detail = {**(run_detail or {}),
+                              "state_degraded": True,
+                              "settle_error": settle["error"],
+                              "failed_steps": settle["failed_steps"],
+                              # 修复入口：未结算 proposals 快照，可经 seed API 重放
+                              "unsettled_proposals": proposals[:50]}
             _complete_pipeline_run(conn, run_id, draft_id,
                                    detail=run_detail,
                                    quality_score=quality_score,
                                    tokens_spent=ledger.tokens_spent - _tokens0,
                                    usd_spent=ledger.usd_spent - _usd0)
-            beats = workspace.get("beats", [])
-            pacing.update(chapter, beats, len(draft_text), conn)
-            if getattr(cfg.recall, "enable_summaries", True) and draft_text:
-                _persist_chapter_summary(conn, self._gw, chapter, draft_text)
-            _flip_overdue_foreshadow(conn, chapter)
 
-            committed_ids = [fid for _, fid in gate_outcome.committed]
             if progress_cb:
-                progress_cb("gate", "ok", {"committed": len(committed_ids), "queued": len(gate_outcome.queued)})
+                progress_cb("gate", "degraded" if settle["degraded"] else "ok",
+                            {"committed": len(settle["committed_ids"]),
+                             "queued": len(settle["queued"]),
+                             "state_degraded": settle["degraded"]})
             return ChapterOutcome(
                 chapter=chapter,
                 ok=True,
                 run_id=run_id,
                 draft_text=draft_text,
-                fact_ids_committed=committed_ids,
-                candidates_queued=gate_outcome.queued,
+                fact_ids_committed=settle["committed_ids"],
+                candidates_queued=settle["queued"],
                 issues=all_issues,
-                gate=gate_outcome,
+                gate=settle["gate_outcome"],
+                error=settle["error"] if settle["degraded"] else None,
                 usage_tokens=ledger.tokens_spent,
                 usage_usd=ledger.usd_spent,
                 cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
                 quality_score=quality_score,
                 quality_dimensions=workspace.get("quality_dimensions"),
+                state_degraded=settle["degraded"],
             )
 
         except Exception as e:
@@ -357,6 +337,112 @@ class Orchestrator:
                 error=str(e),
                 usage_tokens=ledger.tokens_spent,
             )
+
+    def _settle_chapter(
+        self, skill_ctx: SkillContext, conn: sqlite3.Connection, chapter: int,
+        draft_text: str, proposals: list[dict], pacing: PacingController,
+        progress_cb=None,
+    ) -> dict:
+        """P1#11（inkos state-degraded）：结算块降级保护——正文已落袋，结算
+        任一步失败只标记降级、不丢章。
+
+        步骤 A（canon 结算：candidates→dedup→conflict→gate）失败时清理本次
+        创建的候选行后重试一次——重放安全性：候选行已删、dedup 会把与既提交
+        事实重复的提案判 merge。步骤 B-E（pacing/摘要/伏笔翻转/伏笔结算）
+        各自单次、单独降级，互不阻塞。含 CircuitTripped：正文已花钱生成，
+        熔断时丢整章是最差结局，同样走降级。
+        """
+        cfg = self._cfg
+        workspace = skill_ctx.workspace
+        out: dict = {"degraded": False, "error": None, "failed_steps": [],
+                     "gate_outcome": None, "committed_ids": [], "queued": [],
+                     "foreshadow_settle": None}
+
+        # ── 步骤 A：canon 结算（失败清理后重试一次）──────────────────────────
+        for attempt in (1, 2):
+            created: list[str] = []
+            try:
+                ctx = RunContext(conn=conn, policy_mode=cfg.governance.mode,
+                                 actor="orchestrator")
+                candidates = _proposals_to_candidates(proposals, chapter, conn)
+                created = [c.candidate_id for c in candidates]
+                dedup_gw = self._gw if cfg.dedup.enable_llm_arbiter else None
+                dedup_engine = DeduplicationEngine(
+                    bm25_gap_min=cfg.dedup.bm25_gap_min, llm_gateway=dedup_gw)
+                candidates = _apply_dedup(candidates, dedup_engine, conn)
+
+                conflict_map: dict[str, ConflictSet] = {}
+                for cand in candidates:
+                    cset = detect_conflict(cand, conn)
+                    cand.risk_tier = classify_risk(cand, cfg)
+                    if cset.has_block:
+                        conflict_map[cand.candidate_id] = cset
+                        try:
+                            conn.execute(
+                                "UPDATE fact_candidates SET risk_tier=? WHERE candidate_id=?",
+                                (cand.risk_tier, cand.candidate_id))
+                        except Exception:
+                            pass
+                conn.commit()
+
+                world = workspace.get("world_state")
+                gate_decision: GateDecision = PromotionPolicy.decide_batch(
+                    candidates, world, cfg, conflict_map=conflict_map)
+                gate_outcome: GateOutcome = apply_gate_routes(
+                    ctx, gate_decision, {"chapter": chapter})
+                out["gate_outcome"] = gate_outcome
+                out["committed_ids"] = [fid for _, fid in gate_outcome.committed]
+                out["queued"] = gate_outcome.queued
+                break
+            except Exception as e:
+                try:
+                    if created:
+                        ph = ",".join("?" * len(created))
+                        conn.execute(
+                            f"DELETE FROM fact_candidates WHERE candidate_id IN ({ph})",
+                            created)
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if attempt == 2:
+                    out["degraded"] = True
+                    out["failed_steps"].append("gate")
+                    out["error"] = f"gate: {e}"
+
+        # ── 步骤 B-E：写回类结算，各自降级互不阻塞 ───────────────────────────
+        def _step(name: str, fn) -> None:
+            try:
+                fn()
+            except Exception as e:
+                out["degraded"] = True
+                out["failed_steps"].append(name)
+                if out["error"] is None:
+                    out["error"] = f"{name}: {e}"
+
+        beats = workspace.get("beats", [])
+        _step("pacing", lambda: pacing.update(chapter, beats, len(draft_text), conn))
+        if getattr(cfg.recall, "enable_summaries", True) and draft_text:
+            _step("summary", lambda: _persist_chapter_summary(
+                conn, self._gw, chapter, draft_text))
+        _step("foreshadow_flip", lambda: _flip_overdue_foreshadow(conn, chapter))
+
+        scfg = getattr(cfg, "settle", None)
+        if scfg is not None and scfg.enabled and draft_text:
+            def _do_settle() -> None:
+                from ..craft.foreshadow_settle import settle_foreshadow
+                out["foreshadow_settle"] = settle_foreshadow(
+                    self._gw, scfg.tier, conn, chapter, draft_text,
+                    max_new_hooks=scfg.max_new_hooks)
+            _step("foreshadow_settle", _do_settle)
+            if progress_cb:
+                progress_cb("settle",
+                            "degraded" if "foreshadow_settle" in out["failed_steps"]
+                            else "ok",
+                            out["foreshadow_settle"] or {})
+        return out
 
     def _quality_pass(
         self, ctx: SkillContext, cfg, hard_blocks: list[dict],

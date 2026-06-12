@@ -381,3 +381,121 @@ class TestForeshadowSettle:
         assert _similarity("断剑之谜 陆天捡到的断剑来历不明",
                            "断剑之谜 陆天捡到的断剑来历成谜") >= 0.5
         assert _similarity("断剑之谜", "黑袍人身份之谜雪夜") < 0.25
+
+
+# ── #11 结算降级 + SETTLE 集成 ───────────────────────────────────────────────
+
+def _plain_factory(messages, model="", temperature=1.0):
+    user = str(messages[-1].content) if messages else ""
+    if "规划任务" in user:
+        return _BEATS_JSON
+    if "本章任务" in user:
+        return _draft_response("平稳正文。" * 200)
+    if "未解伏笔" in user:
+        return '{"settlements": [], "new_hooks": []}'
+    return "[]"
+
+
+class TestSettleDegradation:
+    def test_gate_failure_degrades_not_kills(self, client, project, monkeypatch):
+        """gate 持续抛错 → 重试一次后降级：草稿仍持久化、ok=True、state_degraded。"""
+        import novelforge.control_plane.orchestrator as orch_mod
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            raise RuntimeError("gate 编造故障")
+        monkeypatch.setattr(orch_mod.PromotionPolicy, "decide_batch", boom)
+
+        orch, _ = _build_orch(project, _plain_factory)
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+            assert outcome.ok, f"结算失败不应整章报废: {outcome.error}"
+            assert outcome.state_degraded
+            assert calls["n"] == 2, "canon 结算应重试一次"
+            assert outcome.draft_text                      # 正文还在
+            row = conn.execute("SELECT COUNT(*) AS n FROM draft_index"
+                               " WHERE chapter=1").fetchone()
+            assert row["n"] == 1, "草稿必须已落袋"
+            run = conn.execute("SELECT status, detail_json FROM pipeline_run"
+                               " WHERE run_id=?", (outcome.run_id,)).fetchone()
+            assert run["status"] == "completed"
+            detail = json.loads(run["detail_json"])
+            assert detail["state_degraded"] is True
+            assert "gate" in detail["failed_steps"]
+            assert detail["unsettled_proposals"], "需留 proposals 快照供修复"
+        finally:
+            conn.close()
+
+    def test_settle_stage_runs_and_reports(self, client, project):
+        """settle 开启：调用发生、报告落 detail_json、伏笔被结算。"""
+        conn = _open_conn(project)
+        try:
+            conn.execute(
+                "INSERT INTO foreshadow(id, label, description, state, planted_chapter)"
+                " VALUES('fs_x','试探','某个未解之谜','planted',1)")
+            conn.commit()
+
+            def factory(messages, model="", temperature=1.0):
+                user = str(messages[-1].content) if messages else ""
+                if "规划任务" in user:
+                    return _BEATS_JSON
+                if "本章任务" in user:
+                    return _draft_response("剧情推进，谜团浮现线索。" * 100)
+                if "未解伏笔" in user:
+                    return json.dumps({"settlements": [
+                        {"id": "fs_x", "action": "mention", "evidence": ""}],
+                        "new_hooks": []}, ensure_ascii=False)
+                return "[]"
+
+            orch, fake = _build_orch(project, factory, settle=True)
+            outcome = orch.generate_chapter(2, conn, chapter_goal="测试")
+            assert outcome.ok and not outcome.state_degraded
+            settle_calls = [c for c in fake.calls
+                            if "未解伏笔" in str(c["messages"][-1].content)]
+            assert len(settle_calls) == 1
+            detail = json.loads(conn.execute(
+                "SELECT detail_json FROM pipeline_run WHERE run_id=?",
+                (outcome.run_id,)).fetchone()["detail_json"])
+            assert detail["foreshadow_settle"]["mentions"] == 1
+            row = conn.execute("SELECT last_mentioned_chapter FROM foreshadow"
+                               " WHERE id='fs_x'").fetchone()
+            assert row["last_mentioned_chapter"] == 2
+        finally:
+            conn.close()
+
+    def test_settle_disabled_zero_calls(self, client, project):
+        orch, fake = _build_orch(project, _plain_factory, settle=False)
+        conn = _open_conn(project)
+        try:
+            orch.generate_chapter(1, conn, chapter_goal="测试")
+        finally:
+            conn.close()
+        assert not any("未解伏笔" in str(c["messages"][-1].content) for c in fake.calls)
+
+    def test_settle_llm_failure_degrades_only_that_step(self, client, project):
+        """伏笔结算炸了 → 章仍 ok，degraded 标记，canon 结算不受影响。"""
+        def factory(messages, model="", temperature=1.0):
+            user = str(messages[-1].content) if messages else ""
+            if "规划任务" in user:
+                return _BEATS_JSON
+            if "本章任务" in user:
+                return _draft_response("平稳正文。" * 200)
+            if "未解伏笔" in user:
+                return "这不是 JSON"
+            return "[]"
+
+        orch, _ = _build_orch(project, factory, settle=True)
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+            assert outcome.ok and outcome.state_degraded
+            detail = json.loads(conn.execute(
+                "SELECT detail_json FROM pipeline_run WHERE run_id=?",
+                (outcome.run_id,)).fetchone()["detail_json"])
+            assert detail["failed_steps"] == ["foreshadow_settle"]
+            assert outcome.fact_ids_committed or outcome.candidates_queued, \
+                "canon 结算应已正常完成"
+        finally:
+            conn.close()
