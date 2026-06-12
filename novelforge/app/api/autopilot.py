@@ -146,6 +146,99 @@ def autopilot_get_session(
         conn.close()
 
 
+# ── GET /{project_id}/autopilot/{session_id}/events（M8 SSE）─────────────────
+
+@router.get("/{project_id}/autopilot/{session_id}/events")
+async def autopilot_events(
+    project_id: str,
+    session_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """挂机会话进度 SSE：先发当前快照，随后实时推送章内 stage / 每章完成 / 终态。
+
+    事件：
+      data: {"event":"session","reason":"snapshot|chapter_done|finished|canceled|circuit_broken","session":{...}}
+      data: {"event":"stage","chapter":N,"stage":"draft","status":"ok","detail":{...}}
+    已结束的会话只发一条快照即关流；空闲期每 15s 发 ": ping" 注释行保活。
+    """
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    from ..autopilot_manager import _session_snapshot
+
+    mgr = get_autopilot_manager()
+    live = mgr.get(session_id)
+    if live is not None and live.project_id != project_id:
+        raise HTTPException(404, f"会话不存在: {session_id}")
+
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    # 内存里没有 → 查 DB 历史会话：发快照后即关流（无后续事件可推）
+    if live is None or live.status not in ("running", "degraded"):
+        snapshot = None
+        if live is not None:
+            snapshot = _session_snapshot(live)
+        else:
+            conn = registry.open_conn(project_id)
+            try:
+                db_sessions = [x for x in mgr.load_db_sessions(project_id, conn)
+                               if x.session_id == session_id]
+            finally:
+                conn.close()
+            if not db_sessions:
+                raise HTTPException(404, f"会话不存在: {session_id}")
+            snapshot = _session_snapshot(db_sessions[0])
+
+        async def gen_static():
+            yield _sse({"event": "session", "reason": "snapshot", "session": snapshot})
+
+        return StreamingResponse(gen_static(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    # 运行中会话：先订阅再发快照（防止订阅前的事件窗口丢失终态）
+    q = mgr.subscribe(session_id)
+    loop = asyncio.get_running_loop()
+
+    def _drain():
+        import queue as _queue
+        try:
+            return q.get(timeout=15)
+        except _queue.Empty:
+            return _PING
+
+    async def event_gen():
+        try:
+            yield _sse({"event": "session", "reason": "snapshot",
+                        "session": _session_snapshot(live)})
+            while True:
+                item = await loop.run_in_executor(None, _drain)
+                if item is _PING:
+                    yield ": ping\n\n"   # SSE 注释行保活
+                    s = mgr.get(session_id)
+                    if s is None or s.status not in ("running", "degraded"):
+                        # 订阅窗口外结束的兜底：补终态快照后关流
+                        if s is not None:
+                            yield _sse({"event": "session", "reason": "finished",
+                                        "session": _session_snapshot(s)})
+                        break
+                    continue
+                if item is None:
+                    break
+                yield _sse(item)
+        finally:
+            mgr.unsubscribe(session_id, q)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+_PING = object()   # 队列超时哨兵（与事件/None 区分）
+
+
 # ── POST /{project_id}/autopilot/{session_id}/resume ─────────────────────────
 
 @router.post("/{project_id}/autopilot/{session_id}/resume",
