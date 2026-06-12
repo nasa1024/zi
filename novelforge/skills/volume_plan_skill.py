@@ -39,6 +39,7 @@ _CONTRACT = SkillContract(
     description="按卷大纲批量生成逐章细纲（章节卡 + planned beats），网文工艺字段显式化",
 )
 
+# 钩子枚举两处同步：菜单字符串与 craft/hooks.py 的枚举保持一致（枚举变更时同改）
 _SYSTEM = """\
 你是 NovelForge 的卷规划师，为网文一卷生成逐章细纲（章节卡）。
 
@@ -51,6 +52,10 @@ _SYSTEM = """\
     "title": "章节名",
     "goal": "本章目标：必须含明确冲突或爽点",
     "hook_text": "章末悬念一句话（必填）",
+    "target_emotion": "本章目标情绪词（如 紧张/扬眉吐气/悲怆）",
+    "opening_hook_type": "章首钩子，7 式选一: suspense(悬念)/conflict(冲突)/dialogue(对话切入)/action(动作)/anomaly(反常)/crisis(危机)/flashback(倒叙)",
+    "hook_type": "章尾钩子，13 式选一: cliffhanger(命悬一线)/reversal(反转)/reveal(揭秘)/new_threat(新威胁)/mystery(新谜团)/promise(承诺约战)/arrival(神秘登场)/decision(重大抉择)/countdown(倒计时)/loss(失去代价)/power_tease(力量预告)/relationship(关系变化)/humiliation(受辱蓄势)",
+    "expectation_score": 4,
     "beats": [
       {"beat_type": "setup|turn|tension_point|payoff_beat|hook", "summary": "...", "value_axis": "如 安全→危机"}
     ]
@@ -61,6 +66,7 @@ _SYSTEM = """\
 ## 规划规则（网文工艺）
 - 每章 goal 必须包含明确的冲突或爽点，禁止纯过渡章
 - hook_text 必填：让读者点开下一章的钩子
+- 相邻两章 hook_type 不得相同（钩子同质化让读者疲劳）；expectation_score 是章尾钩子期待度 1-5
 - beats 每章 3-5 条，最后一条必须是 hook 类型
 - 若给出"待回收伏笔"，必须在其到期章或之前安排回收（payoff_beat）
 - 章节号严格按给定范围连续编号，不重不漏
@@ -149,6 +155,8 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
     if not isinstance(parsed, list):
         return []
 
+    from ..craft.hooks import normalize_hook_type
+
     plans: list[dict] = []
     for p in parsed:
         if not isinstance(p, dict):
@@ -172,11 +180,21 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
                 "summary": str(b.get("summary", ""))[:500],
                 "value_axis": str(b.get("value_axis", ""))[:100] or None,
             })
+        exp = p.get("expectation_score")
+        try:
+            exp = max(1, min(5, int(exp))) if exp is not None else None
+        except (TypeError, ValueError):
+            exp = None
         plans.append({
             "chapter": ch,
             "title": str(p.get("title", ""))[:100],
             "goal": str(p.get("goal", ""))[:1000],
             "hook_text": str(p.get("hook_text", ""))[:300],
+            "target_emotion": (str(p.get("target_emotion"))[:50]
+                               if p.get("target_emotion") else None),
+            "opening_hook_type": normalize_hook_type(p.get("opening_hook_type"), "opening"),
+            "hook_type": normalize_hook_type(p.get("hook_type"), "ending"),
+            "expectation_score": exp,
             "beats": beats,
         })
     plans.sort(key=lambda x: x["chapter"])

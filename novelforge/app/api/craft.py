@@ -24,6 +24,7 @@ from ..deps import ProjectRegistry, get_registry
 from ..models import (
     ExemptionCreateRequest, ExemptionResponse,
     ForeshadowCreateRequest, ForeshadowResponse, ForeshadowUpdateRequest,
+    StyleAnchorCreate, StyleAnchorResponse, StyleAnchorUpdate,
 )
 
 router = APIRouter(tags=["craft"])
@@ -333,6 +334,101 @@ def delete_foreshadow(
         conn.commit()
         if result.rowcount == 0:
             raise HTTPException(404, f"foreshadow_id={foreshadow_id} 不存在")
+        return Response(status_code=204)
+    finally:
+        conn.close()
+
+
+# ── Style anchors（P1#9 文风锚点）─────────────────────────────────────────────
+
+def _row_to_anchor(row) -> StyleAnchorResponse:
+    return StyleAnchorResponse(
+        id=row["id"], emotion=row["emotion"], title=row["title"],
+        content=row["content"], enabled=bool(row["enabled"]),
+        created_at=row["created_at"],
+    )
+
+
+@router.post("/{project_id}/style-anchors", status_code=201)
+def create_style_anchor(
+    project_id: str,
+    req: StyleAnchorCreate,
+    registry: ProjectRegistry = Depends(get_registry),
+) -> StyleAnchorResponse:
+    conn = registry.open_conn(project_id)
+    try:
+        aid = f"anchor_{uuid.uuid4().hex[:12]}"
+        conn.execute(
+            "INSERT INTO style_anchors(id, emotion, title, content) VALUES(?,?,?,?)",
+            (aid, req.emotion, req.title, req.content))
+        conn.commit()
+        row = conn.execute("SELECT * FROM style_anchors WHERE id=?", (aid,)).fetchone()
+        return _row_to_anchor(row)
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/style-anchors")
+def list_style_anchors(
+    project_id: str,
+    emotion: str | None = None,
+    registry: ProjectRegistry = Depends(get_registry),
+) -> list[StyleAnchorResponse]:
+    conn = registry.open_conn(project_id)
+    try:
+        if emotion:
+            rows = conn.execute(
+                "SELECT * FROM style_anchors WHERE emotion=? ORDER BY created_at DESC",
+                (emotion,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM style_anchors ORDER BY created_at DESC").fetchall()
+        return [_row_to_anchor(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@router.patch("/{project_id}/style-anchors/{anchor_id}")
+def update_style_anchor(
+    project_id: str,
+    anchor_id: str,
+    req: StyleAnchorUpdate,
+    registry: ProjectRegistry = Depends(get_registry),
+) -> StyleAnchorResponse:
+    conn = registry.open_conn(project_id)
+    try:
+        updates = {k: v for k, v in req.model_dump().items() if v is not None}
+        if "enabled" in updates:
+            updates["enabled"] = int(updates["enabled"])
+        if updates:
+            set_clause = ", ".join(f"{k}=?" for k in updates)
+            cur = conn.execute(
+                f"UPDATE style_anchors SET {set_clause} WHERE id=?",
+                list(updates.values()) + [anchor_id])
+            conn.commit()
+            if cur.rowcount == 0:
+                raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
+        row = conn.execute(
+            "SELECT * FROM style_anchors WHERE id=?", (anchor_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
+        return _row_to_anchor(row)
+    finally:
+        conn.close()
+
+
+@router.delete("/{project_id}/style-anchors/{anchor_id}", status_code=204)
+def delete_style_anchor(
+    project_id: str,
+    anchor_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    conn = registry.open_conn(project_id)
+    try:
+        cur = conn.execute("DELETE FROM style_anchors WHERE id=?", (anchor_id,))
+        conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
         return Response(status_code=204)
     finally:
         conn.close()

@@ -370,9 +370,24 @@ CREATE TABLE IF NOT EXISTS chapter_cards (
     status          TEXT NOT NULL DEFAULT 'planned'
                         CHECK(status IN ('planned','drafted','reviewed','committed')),
     draft_id        TEXT,
+    target_emotion    TEXT,                        -- v13: 本章目标情绪词
+    opening_hook_type TEXT,                        -- v13: 章首钩子（7 式或 other）
+    hook_type         TEXT,                        -- v13: 章尾钩子（13 式或 other）
+    expectation_score INTEGER,                     -- v13: 期待度 1-5
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(pov_entity_id) REFERENCES entities(id)
 );
+
+-- v13: 文风锚点（P1#9——手动录入范文段，按情绪做 few-shot）
+CREATE TABLE IF NOT EXISTS style_anchors (
+    id          TEXT PRIMARY KEY,
+    emotion     TEXT NOT NULL,
+    title       TEXT,
+    content     TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_style_anchors_emotion ON style_anchors(emotion);
 
 CREATE TABLE IF NOT EXISTS character_cards (
     id              TEXT PRIMARY KEY,
