@@ -302,6 +302,11 @@ class ChapterCardModel(BaseModel):
     goal: Optional[str] = None
     hook_text: Optional[str] = None
     status: str = "planned"
+    # P1#7 细纲契约
+    target_emotion: Optional[str] = None
+    opening_hook_type: Optional[str] = None
+    hook_type: Optional[str] = None
+    expectation_score: Optional[int] = None
     beats: list[PlannedBeat] = Field(default_factory=list)
 
 
@@ -318,6 +323,11 @@ class ChapterCardUpdateRequest(BaseModel):
     title: Optional[str] = None
     goal: Optional[str] = None
     hook_text: Optional[str] = None
+    # P1#7 细纲契约（人审可改）
+    target_emotion: Optional[str] = None
+    opening_hook_type: Optional[str] = None
+    hook_type: Optional[str] = None
+    expectation_score: Optional[int] = Field(default=None, ge=1, le=5)
 
 
 class NextChapterSuggestion(BaseModel):
