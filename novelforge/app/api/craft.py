@@ -64,6 +64,10 @@ def _row_to_foreshadow(row) -> ForeshadowResponse:
         related_entity_id=row["related_entity_id"],
         importance=row["importance"],
         updated_at=row["updated_at"],
+        last_mentioned_chapter=row["last_mentioned_chapter"],
+        advance_count=row["advance_count"],
+        last_advanced_chapter=row["last_advanced_chapter"],
+        origin=row["origin"],
     )
 
 

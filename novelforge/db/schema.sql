@@ -315,11 +315,26 @@ CREATE TABLE IF NOT EXISTS foreshadow (
     related_entity_id TEXT,
     importance      INTEGER NOT NULL DEFAULT 3,
     fact_id         TEXT,
+    last_mentioned_chapter INTEGER,                -- v12: 最近被提及章（mention 不改 state）
+    advance_count   INTEGER NOT NULL DEFAULT 0,    -- v12: 实质推进次数
+    last_advanced_chapter INTEGER,                 -- v12: 最近实质推进章
+    origin          TEXT NOT NULL DEFAULT 'manual',-- v12: manual=人工建档 settle=结算仲裁自动建档
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(related_entity_id) REFERENCES entities(id)
 );
 CREATE INDEX IF NOT EXISTS idx_fs_state ON foreshadow(state);
 CREATE INDEX IF NOT EXISTS idx_fs_due   ON foreshadow(due_chapter);
+
+-- v12: 伏笔结算审计轨迹（P1#6——mention/advance 二分防假回收）
+CREATE TABLE IF NOT EXISTS foreshadow_log (
+    id            TEXT PRIMARY KEY,
+    foreshadow_id TEXT NOT NULL REFERENCES foreshadow(id),
+    chapter       INTEGER NOT NULL,
+    action        TEXT NOT NULL CHECK(action IN ('plant','mention','advance','payoff')),
+    evidence      TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_fslog_fs ON foreshadow_log(foreshadow_id, chapter);
 
 CREATE TABLE IF NOT EXISTS beats (
     id              TEXT PRIMARY KEY,
