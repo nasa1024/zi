@@ -432,9 +432,9 @@ class Orchestrator:
 
         M7：优先锚点补丁（局部润色），失败回退全文润色。
         """
+        from ..craft.findings import findings_to_issues_str
         draft_text: str = ctx.workspace.get("draft_text", "")
-        warns_str = "\n".join(f"- [{w.get('check', '?')}] {w.get('detail', '')}"
-                              for w in craft_warns) or "- 整体打磨节奏与钩子"
+        warns_str = findings_to_issues_str(craft_warns) or "- 整体打磨节奏与钩子"
         stable = ctx.workspace.get("stable_context", "")
 
         if getattr(self._cfg, "patch_revise", True):
@@ -466,12 +466,16 @@ class Orchestrator:
         return resp.text.strip()
 
     def _revise(self, ctx: SkillContext, hard_blocks: list[dict]) -> dict:
+        from ..craft.findings import findings_to_issues_str
         draft_text: str = ctx.workspace.get("draft_text", "")
-        issues_str = "\n".join(f"- {i.get('desc', i)}" for i in hard_blocks)
+        issues_str = findings_to_issues_str(hard_blocks)
         stable = ctx.workspace.get("stable_context", "")
 
+        # P0#2/P1#8（inkos repair_scope 路由）：结构性问题（OOC/主线偏离/时间线）
+        # 补丁救不了，跳过锚点补丁直接全文重写；全 local 才走补丁。
         # M7：先尝试锚点补丁（输出短、不碰好段落）；锚定失败回退全文重写
-        if getattr(self._cfg, "patch_revise", True):
+        structural = any(i.get("repair_scope") == "structural" for i in hard_blocks)
+        if not structural and getattr(self._cfg, "patch_revise", True):
             from ..craft.patch_revise import apply_patches, generate_patches
             patches = generate_patches(
                 self._gw, ModelTier.STRONG,
