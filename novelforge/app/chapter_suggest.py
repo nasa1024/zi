@@ -38,12 +38,29 @@ def assemble_chapter_goal(conn: sqlite3.Connection, chapter: int) -> tuple[str, 
     sources: list[str] = []
 
     card = conn.execute(
-        "SELECT title, goal, summary FROM chapter_cards WHERE chapter=?", (chapter,)
+        "SELECT title, goal, summary, target_emotion, opening_hook_type,"
+        "       hook_type, expectation_score"
+        " FROM chapter_cards WHERE chapter=?", (chapter,)
     ).fetchone()
     if card and (card["goal"] or card["summary"]):
         prefix = f"本章《{card['title']}》：" if card["title"] else "本章目标："
         goal_parts.append(prefix + (card["goal"] or card["summary"]))
         sources.append("chapter_card")
+
+    # P1#7：细纲契约注入——目标情绪 + 钩子承诺，draft 照着写、评委照着验
+    if card and (card["target_emotion"] or card["hook_type"]):
+        from ..craft.hooks import hook_label
+        parts = []
+        if card["target_emotion"]:
+            parts.append(f"目标情绪「{card['target_emotion']}」")
+        if card["opening_hook_type"] and card["opening_hook_type"] != "other":
+            parts.append(f"章首钩子={hook_label(card['opening_hook_type'])}式（开篇 100 字内）")
+        if card["hook_type"] and card["hook_type"] != "other":
+            exp = f"（期待度 {card['expectation_score']}/5）" if card["expectation_score"] else ""
+            parts.append(f"章尾钩子={hook_label(card['hook_type'])}式{exp}")
+        if parts:
+            goal_parts.append("本章细纲契约：" + "；".join(parts))
+            sources.append("chapter_card_contract")
 
     if chapter > 1:
         prev = conn.execute(

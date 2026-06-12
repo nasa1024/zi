@@ -83,3 +83,33 @@ class TestVolumePlanContract:
         plans = _parse_plans(f"```plans\n{raw}\n```", 3, 3)
         assert plans[0]["hook_type"] == "other"
         assert plans[0]["expectation_score"] is None
+
+
+# ── #7 消费侧：chapter_goal 注入 + 评委 ground truth ──────────────────────────
+
+class TestContractConsumption:
+    def test_chapter_goal_includes_contract_line(self, conn):
+        from novelforge.app.chapter_suggest import assemble_chapter_goal
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, title, goal, target_emotion,"
+            " opening_hook_type, hook_type, expectation_score)"
+            " VALUES('c1', 5, '风起', '主角入城', '紧张', 'crisis', 'reversal', 4)")
+        conn.commit()
+        goal, sources = assemble_chapter_goal(conn, 5)
+        assert "细纲契约" in goal
+        assert "紧张" in goal and "危机" in goal and "反转" in goal and "4/5" in goal
+        assert "chapter_card_contract" in sources
+
+    def test_chapter_goal_no_contract_when_fields_empty(self, conn):
+        from novelforge.app.chapter_suggest import assemble_chapter_goal
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, title, goal) VALUES('c1', 5, 't', 'g')")
+        conn.commit()
+        goal, sources = assemble_chapter_goal(conn, 5)
+        assert "细纲契约" not in goal
+        assert "chapter_card_contract" not in sources
+
+    def test_judge_prompts_mention_contract(self):
+        from novelforge.craft.candidate_judge import _JUDGE_SYSTEM, _SCORE_SYSTEM
+        assert "承诺" in _JUDGE_SYSTEM
+        assert "承诺" in _SCORE_SYSTEM
