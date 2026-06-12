@@ -254,6 +254,7 @@ class ChapterStat(BaseModel):
     finished_at: Optional[str] = None
     tokens_spent: Optional[int] = None   # 逐章成本（v11）
     usd_spent: Optional[float] = None
+    payoff_closed: bool = False          # P1#10: 本章有确定性爽点闭环证据
 
 
 class PipelineStats(BaseModel):
@@ -270,6 +271,7 @@ class PipelineStats(BaseModel):
     min_score_threshold: float = 6.0
     total_tokens_spent: int = 0     # 成本曲线汇总（v11；旧数据无成本列时为 0）
     total_usd_spent: float = 0.0
+    payoff_loop_rate: Optional[float] = None   # P1#10: 闭环章/完成章（≥0.7 高 0.5-0.7 中 <0.5 低）
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────

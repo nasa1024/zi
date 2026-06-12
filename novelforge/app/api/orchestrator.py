@@ -243,6 +243,27 @@ def pipeline_next(
         conn.close()
 
 
+def _payoff_closed_chapters(conn) -> set[int]:
+    """P1#10 爽点闭环章集合（纯确定性证据，零 LLM）。
+
+    任一即闭环：伏笔 payoff / 正向实力变动（breakthrough/unseal）/ 道具入手（acquire/craft）。
+    injury_drop/seal/init、transfer/consume/destroy/lose 不算爽点。
+    """
+    closed: set[int] = set()
+    for sql in (
+        "SELECT DISTINCT chapter AS c FROM foreshadow_log WHERE action='payoff'",
+        "SELECT DISTINCT change_chapter AS c FROM character_power_log"
+        " WHERE change_type IN ('breakthrough','unseal')",
+        "SELECT DISTINCT change_chapter AS c FROM item_log"
+        " WHERE change_type IN ('acquire','craft')",
+    ):
+        try:
+            closed |= {r["c"] for r in conn.execute(sql).fetchall()}
+        except Exception:
+            continue   # 老库缺表 → 该证据源退出口径
+    return closed
+
+
 @router.get("/{project_id}/pipeline/stats", response_model=PipelineStats)
 def pipeline_stats(
     project_id: str,
@@ -270,10 +291,12 @@ def pipeline_stats(
             (project_id,),
         ).fetchall()
 
+        closed = _payoff_closed_chapters(conn)
         series = [ChapterStat(
             chapter=r["chapter"], word_count=r["word_count"],
             quality_score=r["quality_score"], finished_at=r["finished_at"],
             tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
+            payoff_closed=r["chapter"] in closed,
         ) for r in rows]
         scores = [s.quality_score for s in series if s.quality_score is not None]
         return PipelineStats(
@@ -285,6 +308,8 @@ def pipeline_stats(
             min_score_threshold=threshold,
             total_tokens_spent=sum(s.tokens_spent or 0 for s in series),
             total_usd_spent=round(sum(s.usd_spent or 0.0 for s in series), 4),
+            payoff_loop_rate=(round(sum(1 for s in series if s.payoff_closed)
+                                    / len(series), 3) if series else None),
         )
     finally:
         conn.close()
