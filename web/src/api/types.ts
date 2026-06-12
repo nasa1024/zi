@@ -187,6 +187,11 @@ export interface ChapterCard {
   goal?: string | null;
   hook_text?: string | null;
   status: string;
+  // P1#7 细纲契约
+  target_emotion?: string | null;
+  opening_hook_type?: string | null;
+  hook_type?: string | null;
+  expectation_score?: number | null;
   beats: PlannedBeat[];
 }
 
@@ -208,6 +213,10 @@ export interface ChapterCardUpdateRequest {
   title?: string | null;
   goal?: string | null;
   hook_text?: string | null;
+  target_emotion?: string | null;
+  opening_hook_type?: string | null;
+  hook_type?: string | null;
+  expectation_score?: number | null;
 }
 
 export interface AutopilotStartRequest {
@@ -231,6 +240,7 @@ export interface ChapterStat {
   finished_at?: string | null;
   tokens_spent?: number | null;   // 逐章成本（v11）
   usd_spent?: number | null;
+  payoff_closed?: boolean;        // P1#10: 本章有确定性爽点闭环证据
 }
 
 export interface PipelineStats {
@@ -242,6 +252,7 @@ export interface PipelineStats {
   min_score_threshold: number;
   total_tokens_spent: number;     // 成本曲线汇总（v11）
   total_usd_spent: number;
+  payoff_loop_rate?: number | null;  // P1#10: 闭环章/完成章
 }
 
 export interface ForeshadowHealth {

@@ -1923,6 +1923,17 @@ function PipelinePanel({
                   　💰 ${stats.total_usd_spent.toFixed(2)}
                 </span>
               )}
+              {stats.payoff_loop_rate != null && (
+                <span
+                  title="爽点循环完成率：有确定性爽点闭环证据（伏笔回收/突破/得宝）的章数占比。≥70% 高 / 50-70% 中 / <50% 低"
+                  style={{
+                    color: stats.payoff_loop_rate >= 0.7 ? '#4ade80'
+                      : stats.payoff_loop_rate >= 0.5 ? '#fbbf24' : '#f87171',
+                  }}
+                >
+                  　⚡ 爽点闭环 {Math.round(stats.payoff_loop_rate * 100)}%
+                </span>
+              )}
               {stats.low_quality_count > 0 && (
                 <span style={{ color: 'var(--nf-warn, #fa0)' }}>
                   　⚠ {stats.low_quality_count} 章低于 {stats.min_score_threshold} 分
@@ -1942,7 +1953,7 @@ function PipelinePanel({
                 return (
                   <div
                     key={s.chapter}
-                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}`}
+                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}${s.payoff_closed ? ' · ⚡爽点闭环' : ''}`}
                     style={{
                       width: 'clamp(4px, 100%, 18px)',
                       flex: '1 1 0',
@@ -1951,6 +1962,8 @@ function PipelinePanel({
                       background: score == null
                         ? 'rgba(255,255,255,0.15)'
                         : low ? 'var(--nf-warn, #f66)' : 'var(--nf-accent, #6cf)',
+                      // P1#10：闭环章底部金色描边（与低分红色区分）
+                      boxShadow: s.payoff_closed ? 'inset 0 -2px 0 rgba(250,204,21,0.9)' : undefined,
                     }}
                   />
                 );
