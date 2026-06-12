@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "12"  # +伏笔结算: foreshadow 结算列 + foreshadow_log
+SCHEMA_VERSION = "13"  # +细纲契约列 + style_anchors

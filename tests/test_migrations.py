@@ -123,6 +123,13 @@ class TestMigrations:
             assert column_exists(conn, "foreshadow", col), f"缺列 {col}"
         assert table_exists(conn, "foreshadow_log")
 
+        # v13: 细纲契约列 + style_anchors（chapter_cards 同样从未被迁移创建过——缺表整建）
+        assert table_exists(conn, "chapter_cards")
+        for col in ("target_emotion", "opening_hook_type",
+                    "hook_type", "expectation_score"):
+            assert column_exists(conn, "chapter_cards", col), f"缺列 {col}"
+        assert table_exists(conn, "style_anchors")
+
         # 版本号已更新
         from novelforge.db.connection import get_meta
         assert get_meta(conn, "schema_version") == SCHEMA_VERSION
@@ -220,6 +227,52 @@ class TestMigrations:
         assert row is not None and row["label"] == "旧伏笔"
         assert row["advance_count"] == 0 and row["origin"] == "manual"
         assert column_exists(conn, "foreshadow", "last_mentioned_chapter")
+        conn.close()
+
+    def test_v13_fresh_db_has_contract_columns_and_style_anchors(self, tmp_path):
+        """新库走 schema.sql 基线，必须直接含 v13 列/表（不经迁移链）。"""
+        from novelforge.db.connection import init_db
+        from novelforge.db.migrations import column_exists, table_exists
+
+        conn = init_db(tmp_path / "fresh13.db")
+        for col in ("target_emotion", "opening_hook_type",
+                    "hook_type", "expectation_score"):
+            assert column_exists(conn, "chapter_cards", col), f"schema.sql 基线缺列 {col}"
+        assert table_exists(conn, "style_anchors")
+        anchor_cols = {r["name"] for r in conn.execute("PRAGMA table_info(style_anchors)")}
+        assert {"id", "emotion", "title", "content", "enabled", "created_at"} <= anchor_cols
+        conn.close()
+
+    def test_v13_alters_existing_chapter_cards(self, tmp_path):
+        """已有 chapter_cards 表（v12 形态）的库：v13 走 ALTER 补列且保数据。"""
+        from novelforge.db.migrations import migrate, column_exists
+
+        conn = _make_v4_db(tmp_path / "v4cc.db")
+        conn.executescript("""
+            CREATE TABLE chapter_cards (
+                id              TEXT PRIMARY KEY,
+                chapter         INTEGER NOT NULL UNIQUE,
+                title           TEXT,
+                pov_entity_id   TEXT,
+                goal            TEXT,
+                summary         TEXT,
+                word_count      INTEGER,
+                hook_text       TEXT,
+                status          TEXT NOT NULL DEFAULT 'planned',
+                draft_id        TEXT,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        conn.execute(
+            "INSERT INTO chapter_cards(id, chapter, title) VALUES('cc_old', 1, '旧章')")
+        conn.commit()
+
+        migrate(conn)
+
+        row = conn.execute("SELECT * FROM chapter_cards WHERE id='cc_old'").fetchone()
+        assert row is not None and row["title"] == "旧章"
+        assert row["hook_type"] is None and row["expectation_score"] is None
+        assert column_exists(conn, "chapter_cards", "target_emotion")
         conn.close()
 
     def test_get_db_version(self, tmp_path):
