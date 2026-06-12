@@ -37,6 +37,13 @@ def _open_conn(project_id):
     return get_registry().open_conn(project_id)
 
 
+_BEATS_JSON = json.dumps([
+    {"beat_type": "setup", "summary": "开场", "value_axis": "平静→波澜"},
+    {"beat_type": "turn", "summary": "转折", "value_axis": "守→攻"},
+    {"beat_type": "hook", "summary": "章末悬念", "value_axis": "悬念↑"},
+], ensure_ascii=False)
+
+
 def _draft_response(body: str) -> str:
     return (
         f"```draft\n{body}\n```\n"
@@ -122,3 +129,43 @@ class TestNormalizeFindings:
         from novelforge.craft.findings import findings_to_issues_str
         s = findings_to_issues_str([{"check": "hook", "detail": "旧格式问题", "span": ""}])
         assert "旧格式问题" in s
+
+
+# ── #8 check skill 输出 findings 字段 ────────────────────────────────────────
+
+class TestFindingsInChecks:
+    def test_soft_finding_without_evidence_dropped_in_pipeline(self, client, project):
+        """软检查报了无证据问题 → 管线内被丢弃，不触发 revise。"""
+        body = "平静叙事正文。" * 200
+
+        def factory(messages, model="", temperature=1.0):
+            user = str(messages[-1].content) if messages else ""
+            if "规划任务" in user:
+                return _BEATS_JSON
+            if "本章任务" in user:
+                return _draft_response(body)
+            if "草稿：" in user:   # continuity 软检查
+                return json.dumps([{"category": "2.3", "severity": "block",
+                                    "issue": "捏造的问题", "evidence": "草稿里没有这句话",
+                                    "repair_scope": "local"}], ensure_ascii=False)
+            return "[]"
+
+        orch, fake = _build_orch(project, factory)
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="测试")
+        finally:
+            conn.close()
+        assert outcome.ok
+        # 无证据 block 被丢弃 → 没有任何修订调用
+        revise_calls = [c for c in fake.calls
+                        if "一致性问题" in str(c["messages"][-1].content)
+                        or "修订补丁任务" in str(c["messages"][-1].content)]
+        assert revise_calls == []
+
+    def test_craft_issue_dict_carries_new_fields(self):
+        from novelforge.skills.craft_check_skill import CraftIssue, _issue_dict
+        d = _issue_dict(CraftIssue(check="hook", severity="block", detail="无钩子"))
+        assert d["check"] == "hook" and d["detail"] == "无钩子"          # 旧字段保留
+        assert d["category"] == "craft.hook" and d["issue"] == "无钩子"  # 新字段
+        assert d["repair_scope"] == "local" and d["source"] == "craft"

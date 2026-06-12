@@ -96,7 +96,9 @@ def _run_hard_validators(proposals: list[dict], world: Optional[WorldState], ctx
 
     except ImportError:
         pass  # validators 包未找到时降级
-    return issues
+    # P1#8：归一为 findings 形（source=validator 不强制 evidence；desc→issue 等映射）
+    from ..craft.findings import normalize_findings
+    return normalize_findings(issues, ctx.workspace.get("draft_text", ""), "validator")
 
 
 # ── LLM 软检查 ────────────────────────────────────────────────────────────────
@@ -122,8 +124,12 @@ _SOFT_SYSTEM = """\
   5.1 视角混乱（POV 漂移）  5.2 基调不一致  5.3 风格漂移（文风突变/超纲词汇）
 
 输出 JSON 数组，每条：
-{"type":"soft","subclass":"2.3-能力波动","severity":"warn|block","desc":"...","span":"引用原文片段"}
+{"category":"2.3-能力波动","severity":"warn|block","issue":"问题描述",
+ "evidence":"逐字引用草稿原文片段","fix":"一句话修改建议","repair_scope":"local|structural"}
+repair_scope 判定：OOC（人物根本性走形）/主线偏离/时间线结构性矛盾/视角混乱 → structural；
+措辞、局部逻辑、称谓、数值等点状问题 → local。
 severity 规则：仅当问题**明确违反上文给出的设定**（禁忌/境界/知情/数值）时用 block，其余用 warn。
+evidence 必须逐字摘自草稿原文；没有原文证据的问题不要输出。
 若无问题，输出 []。只输出 JSON 数组。
 """
 
@@ -148,7 +154,8 @@ def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -
         )
         text = resp.text.strip()
         if text.startswith("["):
-            return json.loads(text)
+            from ..craft.findings import normalize_findings
+            return normalize_findings(json.loads(text), draft_text, "llm_soft")
     except Exception:
         pass
     return []

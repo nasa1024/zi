@@ -165,8 +165,9 @@ def _check_beat_contract(beats: list[dict]) -> list[CraftIssue]:
 _FLAT_SYSTEM = """\
 你是网文工艺审稿员。检查草稿中是否存在"纸片人"问题：
 角色行为只为推动情节，缺乏自主动机或真实情感反应。
-输出 JSON 数组，每条：{"check":"flat_character","severity":"warn","detail":"...","span":"原文片段"}
-若无问题输出 []。只输出 JSON 数组。"""
+输出 JSON 数组，每条：{"category":"flat_character","severity":"warn","issue":"问题描述",
+"evidence":"逐字引用草稿原文片段","fix":"一句话修改建议"}
+evidence 必须逐字摘自草稿原文，没有证据的问题不要输出。若无问题输出 []。只输出 JSON 数组。"""
 
 
 def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftIssue]:
@@ -189,15 +190,13 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
         )
         raw = resp.text.strip()
         if raw.startswith("["):
-            parsed = json.loads(raw)
+            # P1#8：证据强制 + 宽容解析（无 evidence 的 finding 整条丢弃）
+            from ..craft.findings import normalize_findings
+            parsed = normalize_findings(json.loads(raw), draft_text, "craft_llm")
             return [
-                CraftIssue(
-                    check=p.get("check", "flat_character"),
-                    severity=p.get("severity", "warn"),
-                    detail=p.get("detail", ""),
-                    span=p.get("span", ""),
-                )
-                for p in parsed if isinstance(p, dict)
+                CraftIssue(check="flat_character", severity=p["severity"],
+                           detail=p["issue"], span=p["evidence"])
+                for p in parsed
             ]
     except Exception:
         pass
@@ -205,4 +204,7 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
 
 
 def _issue_dict(i: CraftIssue) -> dict:
-    return {"check": i.check, "severity": i.severity, "detail": i.detail, "span": i.span}
+    return {"check": i.check, "severity": i.severity, "detail": i.detail, "span": i.span,
+            # P1#8 findings 字段（旧字段保留，只增不删）
+            "category": f"craft.{i.check}", "issue": i.detail, "evidence": i.span,
+            "fix": "", "repair_scope": "local", "source": "craft"}
