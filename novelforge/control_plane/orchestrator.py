@@ -122,6 +122,20 @@ class Orchestrator:
             workspace["stable_context"] = f"## 世界设定（稳定）\n{_stable}" if _stable else ""
             workspace["dynamic_context"] = recall_pack.to_dynamic_context_str()
 
+            # P1#9：文风锚点 few-shot——按本章细纲目标情绪选段，注入动态段。
+            # 无情绪/无匹配锚点 → 空块（fail-fast 不瞎编）；不碰稳定前缀，缓存无损。
+            from ..craft.style_anchor import pick_style_anchors, render_anchor_block
+            try:
+                emo_row = conn.execute(
+                    "SELECT target_emotion FROM chapter_cards WHERE chapter=?",
+                    (chapter,),
+                ).fetchone()
+                target_emotion = emo_row["target_emotion"] if emo_row else None
+            except sqlite3.OperationalError:
+                target_emotion = None   # 老库无 v13 列
+            workspace["style_anchor_block"] = render_anchor_block(
+                pick_style_anchors(conn, target_emotion))
+
             # PacingController：读取节拍状态，附加建议到 chapter_goal
             pacing_state = pacing.get_state(conn)
             workspace["pacing_state"] = pacing_state
@@ -540,10 +554,15 @@ class Orchestrator:
         system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
                   "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
         prefix = f"{stable}\n\n" if stable else ""
+        # P1#9：润色是文风敏感环节，注入锚点块（锚点补丁分支不注入——局部修复
+        # 引入风格样本反而引导改写过多）
+        anchor_block = ctx.workspace.get("style_anchor_block", "")
         resp = ctx.llm.generate(
             ModelTier.MID,
             [Message(role="user", content=(
-                f"{prefix}工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
+                f"{prefix}"
+                + (f"{anchor_block}\n\n" if anchor_block else "")
+                + f"工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
             ))],
             system=system,
             max_tokens=8192,

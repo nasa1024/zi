@@ -202,3 +202,92 @@ class TestStyleAnchorApi:
     def test_patch_missing_404(self, client, project):
         r = client.patch(f"/v1/{project}/style-anchors/nope", json={"enabled": False})
         assert r.status_code == 404
+
+
+# ── #9 锚点选取与注入 ─────────────────────────────────────────────────────────
+
+def _seed_anchor(conn, emotion, content, enabled=1):
+    from novelforge.ids import new_id
+    aid = new_id("anchor")
+    conn.execute(
+        "INSERT INTO style_anchors(id, emotion, content, enabled) VALUES(?,?,?,?)",
+        (aid, emotion, content, enabled))
+    conn.commit()
+    return aid
+
+
+class TestStyleAnchorPick:
+    def test_exact_emotion_match(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors
+        _seed_anchor(conn, "紧张", "刀光一闪，他后背瞬间绷紧。" * 10)
+        picked = pick_style_anchors(conn, "紧张")
+        assert len(picked) == 1
+        assert picked[0]["emotion"] == "紧张"
+
+    def test_fuzzy_emotion_match_bigram(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors
+        _seed_anchor(conn, "紧张刺激", "内容" * 50)
+        picked = pick_style_anchors(conn, "紧张")
+        assert len(picked) == 1
+
+    def test_no_match_returns_empty_fail_fast(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors
+        _seed_anchor(conn, "悲怆", "内容" * 50)
+        assert pick_style_anchors(conn, "扬眉吐气") == []   # 不退化为随便选
+
+    def test_empty_emotion_returns_empty(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors
+        _seed_anchor(conn, "紧张", "内容" * 50)
+        assert pick_style_anchors(conn, "") == []
+        assert pick_style_anchors(conn, None) == []
+
+    def test_disabled_excluded_and_limit_2(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors
+        _seed_anchor(conn, "紧张", "A" * 100, enabled=0)
+        for i in range(3):
+            _seed_anchor(conn, "紧张", f"B{i}" * 60)
+        picked = pick_style_anchors(conn, "紧张")
+        assert len(picked) == 2
+        assert all("A" not in p["content"] for p in picked)
+
+    def test_render_block_format(self, conn):
+        from novelforge.craft.style_anchor import pick_style_anchors, render_anchor_block
+        _seed_anchor(conn, "紧张", "刀光一闪。" * 20)
+        block = render_anchor_block(pick_style_anchors(conn, "紧张"))
+        assert "文风参考" in block and "禁止照搬" in block and "紧张" in block
+        assert render_anchor_block([]) == ""
+
+
+class TestStyleAnchorInjection:
+    def _run_draft(self, conn, workspace):
+        from novelforge.skills.chapter_draft_skill import ChapterDraftSkill
+        from novelforge.control_plane.skill_base import SkillContext
+        from novelforge.control_plane.budget import BudgetLedger
+        from novelforge.control_plane.llm.gateway import LLMGateway
+        from novelforge.control_plane.llm.fake_provider import FakeProvider
+
+        provider = FakeProvider(responses=[
+            "```draft\n" + "正文" * 600 + "\n```\n```proposals\n[]\n```"])
+        gw = LLMGateway(provider, BudgetLedger())
+        ctx = SkillContext(
+            "proj", 1, "auto_promote", 0, BudgetLedger(), gw, conn,
+            workspace=workspace)
+        ChapterDraftSkill().run(ctx)
+        # FakeProvider.calls 记录全部调用——取唯一一次 draft 调用的 user 消息
+        return provider.calls[0]["messages"][-1].content
+
+    def test_draft_prompt_contains_anchor_block(self, conn):
+        sent = self._run_draft(conn, {
+            "beats": [{"beat_type": "hook", "summary": "s"}],
+            "style_anchor_block": (
+                "## 文风参考（仿其笔触与节奏，禁止照搬内容/人名/情节）\n"
+                "【参考段 1】测试锚点"),
+        })
+        assert "文风参考" in sent and "测试锚点" in sent
+        # 锚点块在本章任务之前（动态段，不挤进稳定前缀逻辑）
+        assert sent.index("文风参考") < sent.index("本章任务")
+
+    def test_draft_prompt_clean_without_anchor(self, conn):
+        sent = self._run_draft(conn, {
+            "beats": [{"beat_type": "hook", "summary": "s"}]})
+        assert "文风参考" not in sent
