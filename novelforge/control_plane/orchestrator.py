@@ -286,8 +286,11 @@ class Orchestrator:
 
             # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
+            run_detail = workspace.get("candidate_report")
+            if workspace.get("patch_stats"):
+                run_detail = {**(run_detail or {}), "patch_stats": workspace["patch_stats"]}
             _complete_pipeline_run(conn, run_id, draft_id,
-                                   detail=workspace.get("candidate_report"),
+                                   detail=run_detail,
                                    quality_score=quality_score)
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
@@ -379,15 +382,31 @@ class Orchestrator:
         return score
 
     def _polish(self, ctx: SkillContext, craft_warns: list[dict]) -> str:
-        """单轮工艺润色：不改情节/人物行为/事实设定，只解决 craft warn。"""
+        """单轮工艺润色：不改情节/人物行为/事实设定，只解决 craft warn。
+
+        M7：优先锚点补丁（局部润色），失败回退全文润色。
+        """
         draft_text: str = ctx.workspace.get("draft_text", "")
         warns_str = "\n".join(f"- [{w.get('check', '?')}] {w.get('detail', '')}"
                               for w in craft_warns) or "- 整体打磨节奏与钩子"
+        stable = ctx.workspace.get("stable_context", "")
+
+        if getattr(self._cfg, "patch_revise", True):
+            from ..craft.patch_revise import apply_patches, generate_patches
+            patches = generate_patches(
+                self._gw, ModelTier.MID,
+                stable_context=stable, draft_text=draft_text[:8000],
+                issues_str=warns_str, task_label="润色补丁任务",
+            )
+            if patches:
+                result = apply_patches(draft_text, patches)
+                _record_patch_stats(ctx.workspace, "polish", result, len(patches))
+                if result.applied > 0:
+                    return result.text
 
         from .llm.provider import CacheHint, Message
         system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
                   "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
-        stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
         resp = ctx.llm.generate(
             ModelTier.MID,
@@ -403,10 +422,24 @@ class Orchestrator:
     def _revise(self, ctx: SkillContext, hard_blocks: list[dict]) -> dict:
         draft_text: str = ctx.workspace.get("draft_text", "")
         issues_str = "\n".join(f"- {i.get('desc', i)}" for i in hard_blocks)
+        stable = ctx.workspace.get("stable_context", "")
+
+        # M7：先尝试锚点补丁（输出短、不碰好段落）；锚定失败回退全文重写
+        if getattr(self._cfg, "patch_revise", True):
+            from ..craft.patch_revise import apply_patches, generate_patches
+            patches = generate_patches(
+                self._gw, ModelTier.STRONG,
+                stable_context=stable, draft_text=draft_text[:8000],
+                issues_str=issues_str, task_label="修订补丁任务",
+            )
+            if patches:
+                result = apply_patches(draft_text, patches)
+                _record_patch_stats(ctx.workspace, "revise", result, len(patches))
+                if result.applied > 0:
+                    return {"draft_text": result.text}
 
         from .llm.provider import CacheHint, Message
         system = "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。"
-        stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
         user_msg = (
             f"{prefix}"
@@ -548,6 +581,16 @@ def _flip_overdue_foreshadow(conn: sqlite3.Connection, chapter: int) -> None:
         conn.commit()
     except Exception:
         pass
+
+
+def _record_patch_stats(workspace: dict, kind: str, result, n_patches: int) -> None:
+    """M7：累计补丁应用统计（kind = revise|polish），随 detail_json 落库供观测。"""
+    stats = workspace.setdefault("patch_stats", {})
+    s = stats.setdefault(kind, {"rounds": 0, "patches": 0, "applied": 0, "failed": 0})
+    s["rounds"] += 1
+    s["patches"] += n_patches
+    s["applied"] += result.applied
+    s["failed"] += result.failed
 
 
 def _volume_progress(conn: sqlite3.Connection, chapter: int) -> Optional[float]:
