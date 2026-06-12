@@ -200,6 +200,7 @@ class PipelineRunResponse(BaseModel):
     budget_spent: BudgetSpent
     circuit_breaker_tripped: bool = False
     quality_score: Optional[float] = None  # M5-⑦
+    quality_dimensions: Optional[dict] = None  # 维度分 {hook,pacing,character,prose}
     cache_read_tokens: int = 0             # M1-⑥: 前缀缓存命中量
     error: Optional[str] = None
 
@@ -213,6 +214,8 @@ class PipelineRunRecord(BaseModel):
     finished_at: Optional[str] = None
     word_count: Optional[int] = None
     quality_score: Optional[float] = None  # M5-⑦
+    tokens_spent: Optional[int] = None     # 逐章成本（v11）
+    usd_spent: Optional[float] = None
 
 
 class PipelineRunDetail(PipelineRunRecord):
@@ -222,6 +225,7 @@ class PipelineRunDetail(PipelineRunRecord):
     winner_index: Optional[int] = None
     selected_by: Optional[str] = None    # "auto" | "human"
     patch_stats: Optional[dict] = None   # M7: 补丁式修订统计 {revise|polish: {rounds,patches,applied,failed}}
+    quality_dimensions: Optional[dict] = None  # 维度分 {hook,pacing,character,prose}
 
 
 class CandidateInfo(BaseModel):
@@ -246,6 +250,8 @@ class ChapterStat(BaseModel):
     word_count: Optional[int] = None
     quality_score: Optional[float] = None
     finished_at: Optional[str] = None
+    tokens_spent: Optional[int] = None   # 逐章成本（v11）
+    usd_spent: Optional[float] = None
 
 
 class PipelineStats(BaseModel):
@@ -260,6 +266,8 @@ class PipelineStats(BaseModel):
     avg_quality_score: Optional[float] = None
     low_quality_count: int = 0      # 低于 min_score 阈值的章数
     min_score_threshold: float = 6.0
+    total_tokens_spent: int = 0     # 成本曲线汇总（v11；旧数据无成本列时为 0）
+    total_usd_spent: float = 0.0
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────

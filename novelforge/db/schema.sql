@@ -633,6 +633,8 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     draft_id        TEXT,   -- draft_index.id，成功后填入
     detail_json     TEXT,   -- M3-①: 候选择优报告等运行明细（JSON）
     quality_score   REAL,   -- M5-⑦: 章节质量分 0-10（LLM 评委）
+    tokens_spent    INTEGER, -- v11: 逐章成本（账本净增量）
+    usd_spent       REAL,    -- v11: 逐章成本（估算 USD）
     started_at      TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at     TEXT
 );
