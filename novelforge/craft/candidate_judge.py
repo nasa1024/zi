@@ -154,14 +154,31 @@ def _llm_judge(
 
 
 _SCORE_SYSTEM = """\
-你是网文主编。给这一章打分（0-10），从四个维度综合：
-① 钩子力度 ② 节奏张弛 ③ 人物声音 ④ 与本章目标的契合度
-输出 JSON 对象（不要其他说明）：{"score": 7.5, "reason": "30字内理由"}
+你是网文主编。给这一章打分（0-10，可一位小数），先按四个维度分别评分，再给总分：
+hook=钩子力度（章末悬念是否抓人）　pacing=节奏张弛
+character=人物声音（对话/行为是否符合人设）　prose=文笔表现力（含与本章目标的契合）
+输出 JSON 对象（不要其他说明）：
+{"score": 7.5, "dimensions": {"hook": 8.0, "pacing": 7.0, "character": 7.5, "prose": 7.0}, "reason": "30字内理由"}
 """
+
+# WebNovelBench 式维度白名单（解析时只认这几个 key）
+_SCORE_DIMENSIONS = ("hook", "pacing", "character", "prose")
 
 
 def score_chapter(gateway, judge_tier: str, chapter_goal: str, draft_text: str) -> Optional[float]:
-    """单稿质量分 0-10（M5-⑦）。失败返回 None（调用方按未启用处理）。"""
+    """单稿质量总分 0-10（M5-⑦）。失败返回 None（调用方按未启用处理）。"""
+    detail = score_chapter_detailed(gateway, judge_tier, chapter_goal, draft_text)
+    return detail["score"] if detail else None
+
+
+def score_chapter_detailed(
+    gateway, judge_tier: str, chapter_goal: str, draft_text: str,
+) -> Optional[dict]:
+    """单稿质量分 + 维度分（钩子/节奏/人物/文笔，WebNovelBench 思路）。
+
+    Returns {"score": float, "dimensions": {dim: float}, "reason": str}；
+    失败返回 None。dimensions 可能为空 dict（评委未按格式输出维度时退化为只有总分）。
+    """
     if not draft_text:
         return None
     try:
@@ -184,8 +201,23 @@ def score_chapter(gateway, judge_tier: str, chapter_goal: str, draft_text: str) 
         if not m:
             return None
         data = json.loads(m.group(0))
-        score = float(data.get("score"))
-        return max(0.0, min(10.0, score))
+        dims: dict[str, float] = {}
+        raw_dims = data.get("dimensions")
+        if isinstance(raw_dims, dict):
+            for k in _SCORE_DIMENSIONS:
+                try:
+                    dims[k] = max(0.0, min(10.0, float(raw_dims[k])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        try:
+            score = max(0.0, min(10.0, float(data.get("score"))))
+        except (TypeError, ValueError):
+            # 总分缺失但维度齐全 → 取均值兜底
+            if not dims:
+                return None
+            score = round(sum(dims.values()) / len(dims), 2)
+        return {"score": score, "dimensions": dims,
+                "reason": str(data.get("reason", ""))}
     except Exception:
         return None
 

@@ -131,10 +131,14 @@ class TestPipelineWithCandidates:
 
         drafts = list(draft_responses)
 
-        def factory(messages, model=""):
+        # 并行候选生成后调用顺序不再确定，按温度映射候选序号（i → 1.0 - i*0.15）
+        def factory(messages, model="", temperature=1.0):
             user = str(messages[-1].content) if messages else ""
             if "本章任务" in user:
-                return drafts.pop(0) if drafts else _draft_response("兜底" * 600)
+                idx = round((1.0 - temperature) / 0.15)
+                if 0 <= idx < len(drafts):
+                    return drafts[idx]
+                return _draft_response("兜底" * 600)
             if "### 候选" in user:
                 return judge_response or '{"winner": 0, "scores": [7], "reason": "默认"}'
             if "一致性问题" in user:
@@ -191,10 +195,12 @@ class TestPipelineWithCandidates:
         cand_events = [d for (s, _, d) in stages if s == "candidates"]
         assert cand_events and cand_events[0]["winner"] == 1
 
-        # 3 次 draft 调用且温度梯度生效
+        # 3 次 draft 调用且温度梯度生效（并行下顺序不定，比对集合）
         draft_calls = [c for c in fake.calls
                        if "本章任务" in str(c["messages"][-1].content)]
         assert len(draft_calls) == 3
+        temps = sorted(round(c["temperature"], 2) for c in draft_calls)
+        assert temps == [0.7, 0.85, 1.0]
 
     def test_single_candidate_no_judge_no_detail(self, client, project):
         """n=1：行为同旧版，无候选事件、无 detail_json。"""
