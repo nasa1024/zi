@@ -95,7 +95,8 @@ def pipeline_run(
                                 "queued": len(outcome.candidates_queued)}),
         ]
         final_gate = (
-            "committed_canon" if outcome.fact_ids_committed
+            "state_degraded" if getattr(outcome, "state_degraded", False)
+            else "committed_canon" if outcome.fact_ids_committed
             else "enqueued_review" if outcome.candidates_queued
             else "no_candidates"
         )
@@ -170,7 +171,8 @@ async def pipeline_run_stream(
                 progress_cb=on_stage,
             )
             final_gate = (
-                "committed_canon" if outcome.fact_ids_committed
+                "state_degraded" if getattr(outcome, "state_degraded", False)
+                else "committed_canon" if outcome.fact_ids_committed
                 else "enqueued_review" if outcome.candidates_queued
                 else "no_candidates"
             )
@@ -368,6 +370,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     selected_by = None
     patch_stats = None
     quality_dimensions = None
+    state_degraded = False
+    foreshadow_settle = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
@@ -375,6 +379,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
             selected_by = detail.get("selected_by")
             patch_stats = detail.get("patch_stats")
             quality_dimensions = detail.get("quality_dimensions")
+            state_degraded = bool(detail.get("state_degraded"))
+            foreshadow_settle = detail.get("foreshadow_settle")
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             for i, c in enumerate(detail.get("candidates") or []):
@@ -407,6 +413,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         selected_by=selected_by,
         patch_stats=patch_stats,
         quality_dimensions=quality_dimensions,
+        state_degraded=state_degraded,
+        foreshadow_settle=foreshadow_settle,
     )
 
 
