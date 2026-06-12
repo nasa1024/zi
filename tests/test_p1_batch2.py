@@ -49,3 +49,37 @@ class TestHookNormalize:
         from novelforge.craft.hooks import hook_label
         assert hook_label("reversal") == "反转"
         assert hook_label("other") == "other"
+
+
+# ── #7 volume_plan 生产侧 ─────────────────────────────────────────────────────
+
+class TestVolumePlanContract:
+    def test_system_prompt_lists_hook_enums(self):
+        from novelforge.skills.volume_plan_skill import _SYSTEM
+        for marker in ("target_emotion", "opening_hook_type", "hook_type",
+                       "expectation_score", "悬念", "反转", "相邻两章"):
+            assert marker in _SYSTEM, f"prompt 缺契约标记: {marker}"
+
+    def test_parse_normalizes_and_clamps(self):
+        from novelforge.skills.volume_plan_skill import _parse_plans
+        raw = json.dumps([{
+            "chapter": 3, "title": "t", "goal": "g", "hook_text": "h",
+            "target_emotion": "紧张",
+            "opening_hook_type": "危机开局",
+            "hook_type": "大反转",
+            "expectation_score": 9,
+            "beats": [{"beat_type": "hook", "summary": "s"}],
+        }], ensure_ascii=False)
+        plans = _parse_plans(f"```plans\n{raw}\n```", 3, 3)
+        assert plans[0]["opening_hook_type"] == "crisis"
+        assert plans[0]["hook_type"] == "reversal"
+        assert plans[0]["expectation_score"] == 5      # clamp 到 1-5
+        assert plans[0]["target_emotion"] == "紧张"
+
+    def test_parse_missing_fields_tolerant(self):
+        from novelforge.skills.volume_plan_skill import _parse_plans
+        raw = json.dumps([{"chapter": 3, "title": "t", "goal": "g",
+                           "hook_text": "h", "beats": []}], ensure_ascii=False)
+        plans = _parse_plans(f"```plans\n{raw}\n```", 3, 3)
+        assert plans[0]["hook_type"] == "other"
+        assert plans[0]["expectation_score"] is None

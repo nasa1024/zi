@@ -175,7 +175,9 @@ def delete_volume(
 
 def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
     row = conn.execute(
-        "SELECT chapter, title, goal, hook_text, status FROM chapter_cards WHERE chapter=?",
+        "SELECT chapter, title, goal, hook_text, status,"
+        "       target_emotion, opening_hook_type, hook_type, expectation_score"
+        " FROM chapter_cards WHERE chapter=?",
         (chapter,),
     ).fetchone()
     if row is None:
@@ -188,6 +190,10 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
     return ChapterCardModel(
         chapter=row["chapter"], title=row["title"], goal=row["goal"],
         hook_text=row["hook_text"], status=row["status"],
+        target_emotion=row["target_emotion"],
+        opening_hook_type=row["opening_hook_type"],
+        hook_type=row["hook_type"],
+        expectation_score=row["expectation_score"],
         beats=[PlannedBeat(seq=b["seq"], beat_type=b["beat_type"],
                            summary=b["summary"], value_axis=b["value_axis"]) for b in beats],
     )
@@ -306,12 +312,20 @@ def plan_volume(
                 skipped.append(ch)
                 continue
             conn.execute(
-                "INSERT INTO chapter_cards(id, chapter, title, goal, hook_text, status)"
-                " VALUES(?,?,?,?,?,'planned')"
+                "INSERT INTO chapter_cards(id, chapter, title, goal, hook_text,"
+                " target_emotion, opening_hook_type, hook_type, expectation_score, status)"
+                " VALUES(?,?,?,?,?,?,?,?,?,'planned')"
                 " ON CONFLICT(chapter) DO UPDATE SET"
                 "   title=excluded.title, goal=excluded.goal,"
-                "   hook_text=excluded.hook_text, status='planned'",
-                (new_id("card"), ch, p.get("title"), p.get("goal"), p.get("hook_text")),
+                "   hook_text=excluded.hook_text,"
+                "   target_emotion=excluded.target_emotion,"
+                "   opening_hook_type=excluded.opening_hook_type,"
+                "   hook_type=excluded.hook_type,"
+                "   expectation_score=excluded.expectation_score,"
+                "   status='planned'",
+                (new_id("card"), ch, p.get("title"), p.get("goal"), p.get("hook_text"),
+                 p.get("target_emotion"), p.get("opening_hook_type"),
+                 p.get("hook_type"), p.get("expectation_score")),
             )
             conn.execute("DELETE FROM beats WHERE chapter=? AND status='planned'", (ch,))
             for b in p.get("beats", []):
