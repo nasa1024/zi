@@ -78,5 +78,6 @@ class NovelForgeConfig:
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
+    patch_revise: bool = True            # M7: revise/润色先尝试锚点补丁（局部修改），失败回退全文重写
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）

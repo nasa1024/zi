@@ -221,6 +221,7 @@ class PipelineRunDetail(PipelineRunRecord):
     candidates: list["CandidateInfo"] = Field(default_factory=list)  # M6: 多候选时的全部候选
     winner_index: Optional[int] = None
     selected_by: Optional[str] = None    # "auto" | "human"
+    patch_stats: Optional[dict] = None   # M7: 补丁式修订统计 {revise|polish: {rounds,patches,applied,failed}}
 
 
 class CandidateInfo(BaseModel):

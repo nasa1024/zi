@@ -357,11 +357,13 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     candidates: list[CandidateInfo] = []
     winner_index = None
     selected_by = None
+    patch_stats = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
             winner_index = detail.get("winner")
             selected_by = detail.get("selected_by")
+            patch_stats = detail.get("patch_stats")
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             for i, c in enumerate(detail.get("candidates") or []):
@@ -390,6 +392,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         candidates=candidates,
         winner_index=winner_index,
         selected_by=selected_by,
+        patch_stats=patch_stats,
     )
 
 
