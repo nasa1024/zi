@@ -80,18 +80,33 @@ class ChapterDraftSkill:
         chapter_goal: str = ctx.workspace.get("chapter_goal", "")
         target_chars: int = ctx.extra.get("draft_target_chars", 3000)
 
-        context_str = recall.to_context_str() if recall else "(无召回上下文)"
+        # M1-⑥：稳定前缀（慢变设定）在前、动态状态居中、本章任务最后——
+        # 同章 draft/check/revise 与多候选生成的 user 消息共享首段字节，
+        # 吃 provider 前缀缓存。stable_context 由 orchestrator 构建（已含标题头）。
+        stable = ctx.workspace.get("stable_context")
+        dynamic = ctx.workspace.get("dynamic_context")
+        if stable is None and recall is not None:
+            _s = recall.to_stable_context_str()
+            stable = f"## 世界设定（稳定）\n{_s}" if _s else ""
+            dynamic = recall.to_dynamic_context_str()
+        context_block = "\n\n".join(
+            p for p in (
+                stable or "",
+                f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
+            ) if p
+        ) or "(无召回上下文)"
         beats_str = _fmt_beats(beats)
 
         user_msg = (
+            f"{context_block}\n\n"
+            f"## 本章任务\n"
             f"第 {ctx.target_chapter} 章\n"
             f"目标字数：约 {target_chars} 字\n"
             f"章节目标：{chapter_goal or '按情节发展'}\n\n"
-            f"## Beat Sheet\n{beats_str}\n\n"
-            f"## 世界状态召回\n{context_str}"
+            f"## Beat Sheet\n{beats_str}"
         )
 
-        from ..control_plane.llm.provider import Message
+        from ..control_plane.llm.provider import CacheHint, Message
         # 根据 provider 能力动态选 max_tokens：取模型上限的一半（留余量），最少 8192
         model_id = ctx.llm.model_for(ModelTier.STRONG)
         caps = ctx.llm._provider.capabilities(model_id)
@@ -102,6 +117,9 @@ class ChapterDraftSkill:
             [Message(role="user", content=user_msg)],
             system=_SYSTEM,
             max_tokens=max_out,
+            # M3-①: 多候选时由 orchestrator 注入不同温度制造多样性
+            temperature=ctx.extra.get("temperature", 1.0),
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
 
         draft_text, proposals = _parse_output(resp.text, ctx.target_chapter)

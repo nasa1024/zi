@@ -188,6 +188,52 @@ def list_overdue_foreshadow(
         conn.close()
 
 
+@router.get("/{project_id}/foreshadow/health")
+def foreshadow_health(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """M5-⑧ 伏笔回收健康度（inkos hookAgenda 思路）：逾期堆积全局视图。"""
+    from ..chapter_suggest import next_chapter_no
+    from ..models import ForeshadowHealth
+
+    conn = registry.open_conn(project_id)
+    try:
+        next_ch, _ = next_chapter_no(conn, project_id)
+        open_states = ("planted", "reinforced", "misled", "overdue")
+        ph = ",".join("?" * len(open_states))
+
+        open_count = conn.execute(
+            f"SELECT COUNT(*) AS n FROM foreshadow WHERE state IN ({ph})", open_states
+        ).fetchone()["n"]
+        # 逾期 = 显式 overdue 状态 ∪ due 已过但状态未翻转的行（容错）
+        overdue_rows = conn.execute(
+            f"SELECT label, due_chapter FROM foreshadow"
+            f" WHERE state IN ({ph}) AND due_chapter IS NOT NULL AND due_chapter<?"
+            f" ORDER BY due_chapter",
+            open_states + (next_ch,),
+        ).fetchall()
+        due_soon = conn.execute(
+            f"SELECT label, due_chapter FROM foreshadow"
+            f" WHERE state IN ({ph}) AND due_chapter IS NOT NULL"
+            f"   AND due_chapter>=? AND due_chapter<=?"
+            f" ORDER BY due_chapter LIMIT 10",
+            open_states + (next_ch, next_ch + 3),
+        ).fetchall()
+
+        overdue_count = len(overdue_rows)
+        status = "green" if overdue_count == 0 else ("yellow" if overdue_count <= 2 else "red")
+        return ForeshadowHealth(
+            open_count=open_count,
+            overdue_count=overdue_count,
+            oldest_overdue_chapter=overdue_rows[0]["due_chapter"] if overdue_rows else None,
+            due_soon=[dict(r) for r in due_soon],
+            status=status,
+        )
+    finally:
+        conn.close()
+
+
 @router.get("/{project_id}/foreshadow")
 def list_foreshadow(
     project_id: str,

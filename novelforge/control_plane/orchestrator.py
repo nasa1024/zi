@@ -39,6 +39,8 @@ class ChapterOutcome:
     error: Optional[str] = None
     usage_tokens: int = 0
     usage_usd: float = 0.0
+    cache_read_tokens: int = 0
+    quality_score: Optional[float] = None
 
     def summary(self) -> str:
         if not self.ok:
@@ -105,10 +107,17 @@ class Orchestrator:
                 keyword_query=keyword_query,
                 max_keywords=cfg.recall.max_keywords,
                 context_window=cfg.recall.context_window_chapters,
+                summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
+                enable_summaries=getattr(cfg.recall, "enable_summaries", True),
             )
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
             workspace["world_state"] = world_state
+            # M1-⑥：稳定前缀一次构建（含标题头，保证各 skill 的 user 消息从第 0 字节
+            # 起完全一致），draft/check/revise 共享，吃 provider 前缀缓存
+            _stable = recall_pack.to_stable_context_str()
+            workspace["stable_context"] = f"## 世界设定（稳定）\n{_stable}" if _stable else ""
+            workspace["dynamic_context"] = recall_pack.to_dynamic_context_str()
 
             # PacingController：读取节拍状态，附加建议到 chapter_goal
             pacing_state = pacing.get_state(conn)
@@ -127,16 +136,64 @@ class Orchestrator:
             if not plan_result.ok:
                 workspace["beats"] = []
 
-            # ── 3. DRAFT ──────────────────────────────────────────────────────
-            draft_result = self._reg.invoke("chapter_draft", skill_ctx)
+            # ── 3. DRAFT（M3-①: n_candidates>1 时多候选 + 三级漏斗择优）──────
+            n_cands = max(1, min(3, getattr(getattr(cfg, "candidates", None),
+                                            "n_candidates", 1) or 1))
+            if n_cands <= 1:
+                draft_result = self._reg.invoke("chapter_draft", skill_ctx)
+                draft_ok = draft_result.ok
+            else:
+                from ..craft.candidate_judge import select_best
+                spread = getattr(cfg.candidates, "temperature_spread", 0.15)
+                cand_list: list[dict] = []
+                for i in range(n_cands):
+                    skill_ctx.extra["temperature"] = max(0.1, 1.0 - i * spread)
+                    r = self._reg.invoke("chapter_draft", skill_ctx)
+                    cand_list.append({
+                        "draft_text": workspace.get("draft_text", ""),
+                        "proposals": workspace.get("proposals", []),
+                        "ok": r.ok,
+                    })
+                skill_ctx.extra.pop("temperature", None)
+                report = select_best(
+                    cand_list,
+                    world=workspace.get("world_state"),
+                    chapter_goal=workspace.get("chapter_goal", ""),
+                    gateway=self._gw,
+                    judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
+                )
+                winner = cand_list[report["winner"]]
+                workspace["draft_text"] = winner["draft_text"]
+                workspace["proposals"] = winner["proposals"]
+                workspace["candidate_report"] = {
+                    **report,
+                    "n_candidates": n_cands,
+                    "lengths": [len(c["draft_text"]) for c in cand_list],
+                    "selected_by": "auto",
+                    # 候选全文 + 提案持久化（M6: human_gate 下前端 3 选 1 换稿的数据源）
+                    "candidates": [
+                        {"draft_text": c["draft_text"][:20000],
+                         "proposals": c["proposals"]}
+                        for c in cand_list
+                    ],
+                }
+                draft_ok = winner["ok"]
+                if progress_cb:
+                    progress_cb("candidates", "ok", {
+                        "n": n_cands,
+                        "winner": report["winner"],
+                        "scores": report["scores"],
+                        "reason": report["reason"],
+                    })
+
             _draft_chars = len(workspace.get("draft_text", ""))
             if progress_cb:
-                progress_cb("draft", "ok" if (draft_result.ok or workspace.get("draft_text")) else "blocked",
+                progress_cb("draft", "ok" if (draft_ok or workspace.get("draft_text")) else "blocked",
                             {"chars": _draft_chars})
-            if not draft_result.ok and not workspace.get("draft_text"):
+            if not draft_ok and not workspace.get("draft_text"):
                 return ChapterOutcome(
                     chapter=chapter, ok=False, run_id=run_id,
-                    error=f"draft 失败: {draft_result.error}",
+                    error="draft 失败: 所有候选均无产出",
                     usage_tokens=ledger.tokens_spent,
                 )
 
@@ -153,8 +210,15 @@ class Orchestrator:
                 progress_cb("check", "ok", {"issues": len(all_issues)})
 
             # ── 5. REVISE loop ────────────────────────────────────────────────
+            # M2-⑤ 中段加压：ConStory-Bench 实证一致性错误集中在叙事进程 40-60% 处，
+            # 卷中段章节 revise 上限 +1
+            revise_budget = cfg.max_revise_loops
+            if getattr(cfg, "midpoint_boost", True):
+                _prog = _volume_progress(conn, chapter)
+                if _prog is not None and 0.4 <= _prog <= 0.6:
+                    revise_budget += 1
             hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
-            for _iter in range(cfg.max_revise_loops):
+            for _iter in range(revise_budget):
                 if not hard_blocks:
                     break
                 if ledger and hasattr(ledger, "charge_revise_round"):
@@ -170,6 +234,19 @@ class Orchestrator:
                     {"source": "craft", **i} for i in craft_issues
                 ]
                 hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
+
+            # ── 5b. 质量评分 + 软问题润色（M5-⑦，enabled=False 时零额外调用）──
+            quality_score: Optional[float] = None
+            qcfg = getattr(cfg, "quality", None)
+            if qcfg is not None and qcfg.enabled and workspace.get("draft_text"):
+                quality_score = self._quality_pass(
+                    skill_ctx, cfg, hard_blocks, all_issues, progress_cb
+                )
+                continuity_issues = workspace.get("continuity_issues", [])
+                craft_issues = workspace.get("craft_issues", [])
+                all_issues = continuity_issues + [
+                    {"source": "craft", **i} for i in craft_issues
+                ]
 
             # ── 6. DEDUP + CONFLICT + GATE ────────────────────────────────────
             draft_text: str = workspace.get("draft_text", "")
@@ -207,11 +284,19 @@ class Orchestrator:
             )
             gate_outcome: GateOutcome = apply_gate_routes(ctx, gate_decision, {"chapter": chapter})
 
-            # ── 7. COMMIT（持久化草稿 + 更新节拍游标）────────────────────────
+            # ── 7. COMMIT（持久化草稿 + 更新节拍游标 + 分层摘要）─────────────
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
-            _complete_pipeline_run(conn, run_id, draft_id)
+            run_detail = workspace.get("candidate_report")
+            if workspace.get("patch_stats"):
+                run_detail = {**(run_detail or {}), "patch_stats": workspace["patch_stats"]}
+            _complete_pipeline_run(conn, run_id, draft_id,
+                                   detail=run_detail,
+                                   quality_score=quality_score)
             beats = workspace.get("beats", [])
             pacing.update(chapter, beats, len(draft_text), conn)
+            if getattr(cfg.recall, "enable_summaries", True) and draft_text:
+                _persist_chapter_summary(conn, self._gw, chapter, draft_text)
+            _flip_overdue_foreshadow(conn, chapter)
 
             committed_ids = [fid for _, fid in gate_outcome.committed]
             if progress_cb:
@@ -227,6 +312,8 @@ class Orchestrator:
                 gate=gate_outcome,
                 usage_tokens=ledger.tokens_spent,
                 usage_usd=ledger.usd_spent,
+                cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
+                quality_score=quality_score,
             )
 
         except Exception as e:
@@ -236,13 +323,126 @@ class Orchestrator:
                 usage_tokens=ledger.tokens_spent,
             )
 
+    def _quality_pass(
+        self, ctx: SkillContext, cfg, hard_blocks: list[dict],
+        all_issues: list[dict], progress_cb=None,
+    ) -> Optional[float]:
+        """M5-⑦：质量评分；低分或 craft warn 堆积时做一轮润色，取分高版本。
+
+        Returns 最终质量分（评分失败返回 None，等同未启用）。
+        """
+        from ..craft.candidate_judge import score_chapter
+
+        qcfg = cfg.quality
+        judge_tier = getattr(cfg.candidates, "judge_tier", "mid")
+        chapter_goal = ctx.workspace.get("chapter_goal", "")
+
+        # 多候选模式下评委已给胜者打过分 → 复用，避免重复调用
+        score: Optional[float] = None
+        report = ctx.workspace.get("candidate_report") or {}
+        w = report.get("winner")
+        scores = report.get("scores") or []
+        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
+            score = float(scores[w])
+        if score is None:
+            score = score_chapter(self._gw, judge_tier, chapter_goal,
+                                  ctx.workspace.get("draft_text", ""))
+        if score is None:
+            return None
+
+        craft_warns = [i for i in ctx.workspace.get("craft_issues", [])
+                       if i.get("severity") == "warn"]
+        need_polish = (qcfg.polish_enabled and not hard_blocks and
+                       (score < qcfg.min_score or len(craft_warns) >= 3))
+        if need_polish:
+            try:
+                old_draft = ctx.workspace.get("draft_text", "")
+                old_craft = list(ctx.workspace.get("craft_issues", []))
+                if self._gw.ledger and hasattr(self._gw.ledger, "charge_revise_round"):
+                    self._gw.ledger.charge_revise_round()
+                polished = self._polish(ctx, craft_warns)
+                if polished and polished != old_draft:
+                    ctx.workspace["draft_text"] = polished
+                    self._reg.invoke("craft_check", ctx)
+                    new_score = score_chapter(self._gw, judge_tier, chapter_goal, polished)
+                    if new_score is not None and new_score >= score:
+                        score = new_score
+                    else:
+                        # 润色变差 → 回退（HoLLMwood 渐进精炼 + 保底）
+                        ctx.workspace["draft_text"] = old_draft
+                        ctx.workspace["craft_issues"] = old_craft
+            except Exception:
+                pass  # 预算熔断等 → 保留原稿原分
+
+        if progress_cb:
+            progress_cb("quality", "ok", {
+                "score": score, "polished": need_polish,
+                "min_score": qcfg.min_score,
+            })
+        return score
+
+    def _polish(self, ctx: SkillContext, craft_warns: list[dict]) -> str:
+        """单轮工艺润色：不改情节/人物行为/事实设定，只解决 craft warn。
+
+        M7：优先锚点补丁（局部润色），失败回退全文润色。
+        """
+        draft_text: str = ctx.workspace.get("draft_text", "")
+        warns_str = "\n".join(f"- [{w.get('check', '?')}] {w.get('detail', '')}"
+                              for w in craft_warns) or "- 整体打磨节奏与钩子"
+        stable = ctx.workspace.get("stable_context", "")
+
+        if getattr(self._cfg, "patch_revise", True):
+            from ..craft.patch_revise import apply_patches, generate_patches
+            patches = generate_patches(
+                self._gw, ModelTier.MID,
+                stable_context=stable, draft_text=draft_text[:8000],
+                issues_str=warns_str, task_label="润色补丁任务",
+            )
+            if patches:
+                result = apply_patches(draft_text, patches)
+                _record_patch_stats(ctx.workspace, "polish", result, len(patches))
+                if result.applied > 0:
+                    return result.text
+
+        from .llm.provider import CacheHint, Message
+        system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
+                  "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
+        prefix = f"{stable}\n\n" if stable else ""
+        resp = ctx.llm.generate(
+            ModelTier.MID,
+            [Message(role="user", content=(
+                f"{prefix}工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
+            ))],
+            system=system,
+            max_tokens=8192,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
+        )
+        return resp.text.strip()
+
     def _revise(self, ctx: SkillContext, hard_blocks: list[dict]) -> dict:
         draft_text: str = ctx.workspace.get("draft_text", "")
         issues_str = "\n".join(f"- {i.get('desc', i)}" for i in hard_blocks)
+        stable = ctx.workspace.get("stable_context", "")
 
-        from .llm.provider import Message
+        # M7：先尝试锚点补丁（输出短、不碰好段落）；锚定失败回退全文重写
+        if getattr(self._cfg, "patch_revise", True):
+            from ..craft.patch_revise import apply_patches, generate_patches
+            patches = generate_patches(
+                self._gw, ModelTier.STRONG,
+                stable_context=stable, draft_text=draft_text[:8000],
+                issues_str=issues_str, task_label="修订补丁任务",
+            )
+            if patches:
+                result = apply_patches(draft_text, patches)
+                _record_patch_stats(ctx.workspace, "revise", result, len(patches))
+                if result.applied > 0:
+                    return {"draft_text": result.text}
+
+        from .llm.provider import CacheHint, Message
         system = "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。"
+        prefix = f"{stable}\n\n" if stable else ""
         user_msg = (
+            f"{prefix}"
             f"一致性问题：\n{issues_str}\n\n"
             f"当前草稿：\n{draft_text[:4000]}"
         )
@@ -251,6 +451,7 @@ class Orchestrator:
             [Message(role="user", content=user_msg)],
             system=system,
             max_tokens=5000,
+            cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         return {"draft_text": resp.text.strip()}
 
@@ -349,17 +550,184 @@ def _begin_pipeline_run(conn: sqlite3.Connection, chapter: int, project_id: str,
         pass
 
 
-def _complete_pipeline_run(conn: sqlite3.Connection, run_id: str, draft_id: Optional[str]) -> None:
-    """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。"""
+def _complete_pipeline_run(
+    conn: sqlite3.Connection, run_id: str, draft_id: Optional[str],
+    detail: Optional[dict] = None,
+    quality_score: Optional[float] = None,
+) -> None:
+    """将 pipeline_run 行更新为 'completed'（F6 状态机结束）。detail=候选择优报告等明细。"""
     try:
+        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         conn.execute(
-            "UPDATE pipeline_run SET status='completed', draft_id=?, finished_at=datetime('now')"
+            "UPDATE pipeline_run SET status='completed', draft_id=?, detail_json=?,"
+            " quality_score=?, finished_at=datetime('now')"
             " WHERE run_id=?",
-            (draft_id, run_id),
+            (draft_id, detail_json, quality_score, run_id),
         )
         conn.commit()
     except Exception:
         pass
+
+
+def _flip_overdue_foreshadow(conn: sqlite3.Connection, chapter: int) -> None:
+    """M5-⑧：把已过期未回收的伏笔翻转为 overdue（此前无任何代码翻转此状态）。"""
+    try:
+        conn.execute(
+            "UPDATE foreshadow SET state='overdue', updated_at=datetime('now')"
+            " WHERE state IN ('planted','reinforced','misled')"
+            "   AND due_chapter IS NOT NULL AND due_chapter<?",
+            (chapter,),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _record_patch_stats(workspace: dict, kind: str, result, n_patches: int) -> None:
+    """M7：累计补丁应用统计（kind = revise|polish），随 detail_json 落库供观测。"""
+    stats = workspace.setdefault("patch_stats", {})
+    s = stats.setdefault(kind, {"rounds": 0, "patches": 0, "applied": 0, "failed": 0})
+    s["rounds"] += 1
+    s["patches"] += n_patches
+    s["applied"] += result.applied
+    s["failed"] += result.failed
+
+
+def _volume_progress(conn: sqlite3.Connection, chapter: int) -> Optional[float]:
+    """章节在所属卷中的进度 [0,1]；无卷信息或卷未闭区间时返回 None。"""
+    try:
+        row = conn.execute(
+            "SELECT start_chapter, end_chapter FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND end_chapter IS NOT NULL"
+            "   AND start_chapter<=? AND end_chapter>=?"
+            " ORDER BY volume_no LIMIT 1",
+            (chapter, chapter),
+        ).fetchone()
+        if row is None:
+            return None
+        start, end = row["start_chapter"], row["end_chapter"]
+        if end <= start:
+            return None
+        return (chapter - start) / (end - start)
+    except Exception:
+        return None
+
+
+_SUMMARY_SYSTEM = """\
+你是 NovelForge 的前情摘要助手。用不超过 250 字概括本章，必须覆盖三点：
+① 发生了什么（关键事件）；② 谁的状态/关系变了；③ 章末悬念或情绪落点。
+只输出摘要正文，不要标题、不要解释。"""
+
+
+def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, draft_text: str) -> None:
+    """M2-②：章摘要 + 每 5 章卷级滚动摘要。失败静默，不阻断主流程。"""
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+
+    try:
+        resp = gateway.generate(
+            ModelTier.FAST,
+            [Message(role="user", content=f"第 {chapter} 章正文：\n\n{draft_text[:6000]}")],
+            system=_SUMMARY_SYSTEM,
+            max_tokens=400,
+        )
+        summary = resp.text.strip()
+        if not summary:
+            return
+
+        vol_row = conn.execute(
+            "SELECT volume_no FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
+            "   AND (end_chapter IS NULL OR end_chapter>=?)"
+            " ORDER BY volume_no LIMIT 1",
+            (chapter, chapter),
+        ).fetchone()
+        volume_no = vol_row["volume_no"] if vol_row else None
+
+        conn.execute(
+            "INSERT INTO chapter_summaries(id, chapter, summary, volume_no)"
+            " VALUES(?,?,?,?)"
+            " ON CONFLICT(chapter) DO UPDATE SET"
+            "   summary=excluded.summary, volume_no=excluded.volume_no,"
+            "   created_at=datetime('now')",
+            (new_id("csum"), chapter, summary, volume_no),
+        )
+        conn.commit()
+
+        # 卷级 rollup：每 5 章或写到卷末时刷新本卷滚动摘要
+        at_volume_end = False
+        if volume_no is not None:
+            vol = conn.execute(
+                "SELECT end_chapter FROM volumes WHERE volume_no=?", (volume_no,)
+            ).fetchone()
+            at_volume_end = bool(vol and vol["end_chapter"] == chapter)
+            if chapter % 5 == 0 or at_volume_end:
+                _rollup_volume_summary(conn, gateway, volume_no)
+
+        # 全局梗概：每 10 章或卷末刷新（M2-② 第三层，跨卷长程记忆的地基）
+        if chapter % 10 == 0 or at_volume_end:
+            _update_global_synopsis(conn, gateway)
+    except Exception:
+        pass
+
+
+def _rollup_volume_summary(conn: sqlite3.Connection, gateway, volume_no: int) -> None:
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+
+    rows = conn.execute(
+        "SELECT chapter, summary FROM chapter_summaries"
+        " WHERE volume_no=? ORDER BY chapter",
+        (volume_no,),
+    ).fetchall()
+    if not rows:
+        return
+    joined = "\n".join(f"第{r['chapter']}章：{r['summary']}" for r in rows)
+    resp = gateway.generate(
+        ModelTier.FAST,
+        [Message(role="user", content=f"以下是本卷各章摘要：\n\n{joined[:8000]}")],
+        system="你是 NovelForge 的卷情节梳理助手。把各章摘要压缩成不超过 300 字的本卷剧情概要，"
+               "保留主线推进、关键转折与当前悬而未决的冲突。只输出概要正文。",
+        max_tokens=500,
+    )
+    summary = resp.text.strip()
+    if summary:
+        conn.execute(
+            "UPDATE volumes SET rolling_summary=? WHERE volume_no=?",
+            (summary, volume_no),
+        )
+        conn.commit()
+
+
+def _update_global_synopsis(conn: sqlite3.Connection, gateway) -> None:
+    """M2-② 第三层：把各卷滚动摘要 + 近期章摘要压成 ≤400 字全书梗概，存 meta_kv。"""
+    from .llm.provider import Message
+    from .llm.tiers import ModelTier
+    from ..db.connection import set_meta
+
+    vol_rows = conn.execute(
+        "SELECT volume_no, title, rolling_summary FROM volumes"
+        " WHERE rolling_summary IS NOT NULL ORDER BY volume_no",
+    ).fetchall()
+    ch_rows = conn.execute(
+        "SELECT chapter, summary FROM chapter_summaries ORDER BY chapter DESC LIMIT 5",
+    ).fetchall()
+    parts = [f"第{r['volume_no']}卷《{r['title']}》：{r['rolling_summary']}" for r in vol_rows]
+    parts += [f"第{r['chapter']}章：{r['summary']}" for r in reversed(ch_rows)]
+    if not parts:
+        return
+    resp = gateway.generate(
+        ModelTier.FAST,
+        [Message(role="user", content="\n".join(parts)[:8000])],
+        system="你是 NovelForge 的全书梗概助手。把以下各卷概要与近期章节摘要压缩成"
+               "不超过 400 字的全书至此梗概：主线推进、主要人物当前处境、最大的未解冲突。"
+               "只输出梗概正文。",
+        max_tokens=600,
+    )
+    synopsis = resp.text.strip()
+    if synopsis:
+        set_meta(conn, "global_synopsis", synopsis)
+        conn.commit()
 
 
 def _persist_draft(

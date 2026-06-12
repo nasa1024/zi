@@ -394,6 +394,18 @@ CREATE TABLE IF NOT EXISTS pacing_cursor (
     updated_at                TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 7b) 分层叙事摘要（M2-②）：章摘要 → 卷滚动摘要(volumes.rolling_summary) → 全局梗概(meta_kv)
+-- 每章 COMMIT 后由 FAST tier 生成 150-300 字摘要；召回时按 chapter<=as_of 注入
+-- 最近 N 章（防剧透语义与其余查询一致）。
+CREATE TABLE IF NOT EXISTS chapter_summaries (
+    id          TEXT PRIMARY KEY,
+    chapter     INTEGER NOT NULL UNIQUE,
+    summary     TEXT NOT NULL,
+    volume_no   INTEGER,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_summaries_chapter ON chapter_summaries(chapter);
+
 -- 8) L0 draft index + L1/L2 source tables ------------------------------------
 CREATE TABLE IF NOT EXISTS draft_index (
     id              TEXT PRIMARY KEY,
@@ -589,6 +601,7 @@ CREATE TABLE IF NOT EXISTS volumes (
     end_chapter     INTEGER,                    -- 最后一章（含），NULL = 仍在写
     status          TEXT NOT NULL DEFAULT 'writing'
                         CHECK(status IN ('writing','completed','archived')),
+    rolling_summary TEXT,                       -- M2-②: 本卷至今滚动摘要（FAST tier 每5章更新）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_no)
 );
@@ -618,11 +631,39 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     status          TEXT NOT NULL DEFAULT 'running'
                         CHECK(status IN ('running','completed','crashed')),
     draft_id        TEXT,   -- draft_index.id，成功后填入
+    detail_json     TEXT,   -- M3-①: 候选择优报告等运行明细（JSON）
+    quality_score   REAL,   -- M5-⑦: 章节质量分 0-10（LLM 评委）
     started_at      TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_chapter ON pipeline_run(project_id, chapter);
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_status  ON pipeline_run(status);
+
+-- 13b) autopilot_sessions 持久化（M1-③ 断点恢复）------------------------------
+-- AutopilotManager 写穿：start 时 INSERT，每章完成 UPDATE，终态 UPDATE。
+-- 进程重启后 running/degraded 残留行由 list 路径标记为 'interrupted'，
+-- 用户经 /autopilot/{sid}/resume 显式恢复（新会话，resumed_from 指向旧会话）。
+CREATE TABLE IF NOT EXISTS autopilot_sessions (
+    session_id      TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    from_chapter    INTEGER NOT NULL,
+    to_chapter      INTEGER NOT NULL,
+    current_chapter INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    policy_mode     TEXT NOT NULL,
+    chapters_done   INTEGER NOT NULL DEFAULT 0,
+    budget_tokens_total INTEGER NOT NULL DEFAULT 0,
+    budget_usd_total    REAL    NOT NULL DEFAULT 0.0,
+    consecutive_hard_issues INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    req_json        TEXT NOT NULL DEFAULT '{}',
+    resumed_from    TEXT,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    heartbeat_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_autopilot_sessions_status
+    ON autopilot_sessions(project_id, status);
 
 -- 14) sessions + turns + turn_events（§13.2 会话/turn 模型 + SSE 断线续传）--------
 CREATE TABLE IF NOT EXISTS sessions (

@@ -23,6 +23,26 @@ def _to_sdk_messages(messages: list[Message]) -> list[dict]:
     return out
 
 
+def _apply_user_prefix_cache(sdk_messages: list[dict], prefix_chars: int, breakpoint: str) -> None:
+    """把首条 user 消息的前 prefix_chars 字符切为独立 block 并标 cache_control（M1-⑥）。
+
+    仅当 content 是 str 且长于前缀时生效；原地修改。
+    """
+    if prefix_chars <= 0:
+        return
+    for m in sdk_messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str) and len(content) > prefix_chars:
+            m["content"] = [
+                {"type": "text", "text": content[:prefix_chars],
+                 "cache_control": {"type": breakpoint}},
+                {"type": "text", "text": content[prefix_chars:]},
+            ]
+        return  # 只处理第一条 user 消息
+
+
 def _tool_to_sdk(t: Tool) -> dict:
     return {
         "name": t.name,
@@ -64,6 +84,10 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             "messages": _to_sdk_messages(messages),
         }
+        if cache_hint and cache_hint.user_prefix_chars > 0:
+            _apply_user_prefix_cache(
+                sdk_kw["messages"], cache_hint.user_prefix_chars, cache_hint.breakpoint
+            )
         # system prompt（可附 cache_control）
         if system:
             if cache_hint:

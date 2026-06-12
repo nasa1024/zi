@@ -45,6 +45,7 @@ class BudgetLedger:
     _tokens_spent: int = field(default=0, init=False, repr=False)
     _usd_spent: float = field(default=0.0, init=False, repr=False)
     _revise_rounds: int = field(default=0, init=False, repr=False)
+    _cache_read_tokens: int = field(default=0, init=False, repr=False)
 
     def charge(self, usage) -> None:
         """接受 provider.Usage 或含 input/output 属性的对象。"""
@@ -53,9 +54,15 @@ class BudgetLedger:
         model = getattr(usage, "model", "") or ""
         self._tokens_spent += ti + to
         self._usd_spent += _estimate_cost(ti, to, model)
+        # M1-⑥ 观测：前缀缓存命中量（DeepSeek prompt_cache_hit / Anthropic cache_read）
+        self._cache_read_tokens += getattr(usage, "cache_read", 0) or 0
 
     def charge_revise_round(self) -> None:
         self._revise_rounds += 1
+
+    @property
+    def cache_read_tokens(self) -> int:
+        return self._cache_read_tokens
 
     @property
     def tokens_spent(self) -> int:

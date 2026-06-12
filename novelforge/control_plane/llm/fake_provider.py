@@ -30,7 +30,8 @@ class FakeProvider:
         temperature: float = 1.0,
         cache_hint: CacheHint | None = None,
     ) -> Response:
-        self._calls.append(dict(messages=messages, model=model, system=system))
+        self._calls.append(dict(messages=messages, model=model, system=system,
+                                cache_hint=cache_hint))
         if self._factory:
             text = self._factory(messages, model=model)
         elif self._responses:

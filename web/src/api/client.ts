@@ -5,15 +5,21 @@
 import type {
   ApproveRequest,
   ApproveResponse,
+  AutopilotSSEEvent,
   AutopilotSessionInfo,
   AutopilotStartRequest,
+  AutopilotStreamHandlers,
   BibleRenderResponse,
+  ChapterCard,
+  ChapterCardUpdateRequest,
+  ForeshadowHealth,
   HealthResponse,
   NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
   PipelineRunRequest,
   PipelineRunResponse,
+  PipelineStats,
   PipelineStreamHandlers,
   ProjectCreateRequest,
   ProjectResponse,
@@ -24,6 +30,9 @@ import type {
   SeedResponse,
   SSEPipelineEvent,
   StateQueryRequest,
+  VolumeInfo,
+  VolumePlanRequest,
+  VolumePlanResponse,
   WorldStateSnapshot,
 } from './types';
 
@@ -219,6 +228,44 @@ export const api = {
     }
   },
 
+  foreshadowHealth(id: string): Promise<ForeshadowHealth> {
+    return request<ForeshadowHealth>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/foreshadow/health`,
+    );
+  },
+
+  listVolumes(id: string): Promise<VolumeInfo[]> {
+    return request<VolumeInfo[]>('GET', `/v1/${encodeURIComponent(id)}/volumes`);
+  },
+
+  planVolume(id: string, volumeNo: number, req: VolumePlanRequest): Promise<VolumePlanResponse> {
+    return request<VolumePlanResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/volumes/${volumeNo}/plan`,
+      req,
+    );
+  },
+
+  listChapterCards(id: string, from?: number, to?: number): Promise<ChapterCard[]> {
+    const params = new URLSearchParams();
+    if (from !== undefined) params.set('from_chapter', String(from));
+    if (to !== undefined) params.set('to_chapter', String(to));
+    const qs = params.toString();
+    return request<ChapterCard[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapter-cards${qs ? `?${qs}` : ''}`,
+    );
+  },
+
+  updateChapterCard(id: string, chapter: number, req: ChapterCardUpdateRequest): Promise<ChapterCard> {
+    return request<ChapterCard>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/chapter-cards/${chapter}`,
+      req,
+    );
+  },
+
   autopilotStart(id: string, req: AutopilotStartRequest): Promise<AutopilotSessionInfo> {
     return request<AutopilotSessionInfo>(
       'POST',
@@ -241,10 +288,65 @@ export const api = {
     );
   },
 
+  autopilotResume(id: string, sessionId: string): Promise<AutopilotSessionInfo> {
+    return request<AutopilotSessionInfo>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/resume`,
+    );
+  },
+
+  // M8: 挂机进度 SSE（与 runPipelineStream 同款 fetch 流读取）。
+  // 流正常结束（终态）后 resolve；网络/服务异常时 reject，调用方回退轮询。
+  async autopilotEvents(
+    id: string,
+    sessionId: string,
+    handlers: AutopilotStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    const key = getApiKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+
+    const res = await fetch(
+      API_BASE + `/v1/${encodeURIComponent(id)}/autopilot/${encodeURIComponent(sessionId)}/events`,
+      { headers, signal },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(text || res.statusText, res.status);
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;   // ": ping" 保活行直接忽略
+        try {
+          const ev = JSON.parse(line.slice(6)) as AutopilotSSEEvent;
+          if (ev.event === 'session') handlers.onSession?.(ev);
+          else if (ev.event === 'stage') handlers.onStage?.(ev);
+        } catch { /* malformed line */ }
+      }
+    }
+  },
+
   pipelineNext(id: string): Promise<NextChapterSuggestion> {
     return request<NextChapterSuggestion>(
       'GET',
       `/v1/${encodeURIComponent(id)}/pipeline/next`,
+    );
+  },
+
+  pipelineStats(id: string): Promise<PipelineStats> {
+    return request<PipelineStats>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/stats`,
     );
   },
 
@@ -259,6 +361,14 @@ export const api = {
     return request<PipelineRunDetail>(
       'GET',
       `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}`,
+    );
+  },
+
+  selectCandidate(id: string, runId: string, candidateIndex: number): Promise<PipelineRunDetail> {
+    return request<PipelineRunDetail>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}/select-candidate`,
+      { candidate_index: candidateIndex },
     );
   },
 

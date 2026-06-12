@@ -23,12 +23,43 @@ class RecallPack:
     canon_facts: list[dict] = field(default_factory=list)       # facts where status='canon'
     recent_beats: list[dict] = field(default_factory=list)      # 最近 N 章 beats
     gimmick_rules: list[dict] = field(default_factory=list)
+    chapter_summaries: list[dict] = field(default_factory=list)  # M2-②: 最近 N 章前情摘要（时间正序）
+    volume_summary: str = ""                                     # M2-②: 本卷至今滚动摘要
+    global_synopsis: str = ""                                    # M2-②: 全书至此梗概（meta_kv）
 
-    def to_context_str(self) -> str:
-        """将召回结果序列化为 prompt 上下文字符串（简化版）。"""
+    def to_stable_context_str(self) -> str:
+        """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
+
+        放在所有 prompt 的最前面作为**稳定前缀**——provider 前缀缓存
+        （DeepSeek 自动 / Anthropic cache_control）按字节级前缀匹配命中，
+        同章多次调用与多候选生成共享此前缀（M1-⑥）。
+        底层 SQL 均带 ORDER BY，序列化输出确定性。
+        """
         parts = []
+        if self.taboos:
+            parts.append("## 常驻禁忌（绝对不可违反）\n" + _fmt_rows(self.taboos, ["rule_text", "reason"]))
+        if self.gimmick_rules:
+            parts.append("## 金手指规则\n" + _fmt_rows(self.gimmick_rules, ["gimmick_name", "cooldown_chapters"]))
         if self.entities:
             parts.append("## 核心实体\n" + _fmt_rows(self.entities, ["canonical_name", "entity_type"]))
+        if self.canon_facts:
+            parts.append("## 既定事实（canon）\n" + _fmt_rows(self.canon_facts, ["subject", "fact_type", "object", "valid_from_chapter"]))
+        return "\n\n".join(parts)
+
+    def to_dynamic_context_str(self) -> str:
+        """快变层：逐章演进的世界状态，放在稳定前缀之后。
+
+        前情摘要置于动态层最前——这是 LLM 最缺的叙事语境
+        （硬状态管得住等级数值，管不住上一章的情绪余韵）。
+        """
+        parts = []
+        if self.global_synopsis:
+            parts.append(f"## 全书至此\n{self.global_synopsis}")
+        if self.volume_summary:
+            parts.append(f"## 本卷至今\n{self.volume_summary}")
+        if self.chapter_summaries:
+            lines = [f"  第{r['chapter']}章：{r['summary']}" for r in self.chapter_summaries]
+            parts.append("## 前情摘要（近几章）\n" + "\n".join(lines))
         if self.power_states:
             parts.append("## 当前境界\n" + _fmt_rows(self.power_states, ["entity_id", "rank_name", "rank_order"]))
         if self.knowledge_edges:
@@ -39,15 +70,17 @@ class RecallPack:
             parts.append("## 数值事实\n" + _fmt_rows(self.numeric_facts, ["entity_id", "metric_key", "value", "unit"]))
         if self.timeline_events:
             parts.append("## 时间线事件\n" + _fmt_rows(self.timeline_events, ["title", "chapter", "story_time_start"]))
-        if self.taboos:
-            parts.append("## 常驻禁忌（绝对不可违反）\n" + _fmt_rows(self.taboos, ["rule_text", "reason"]))
-        if self.gimmick_rules:
-            parts.append("## 金手指规则\n" + _fmt_rows(self.gimmick_rules, ["gimmick_name", "cooldown_chapters"]))
         if self.keyword_hits:
             parts.append("## 关键词召回段落\n" + _fmt_rows(self.keyword_hits, ["chapter", "snippet"]))
         if self.recent_beats:
             parts.append("## 近期 beats\n" + _fmt_rows(self.recent_beats, ["chapter", "beat_type", "summary"]))
         return "\n\n".join(parts)
+
+    def to_context_str(self) -> str:
+        """全量序列化 = 稳定层 + 动态层（保持单入口兼容）。"""
+        stable = self.to_stable_context_str()
+        dynamic = self.to_dynamic_context_str()
+        return "\n\n".join(p for p in (stable, dynamic) if p)
 
 
 def _fmt_rows(rows: list, keys: list[str]) -> str:
@@ -71,6 +104,8 @@ def gather_hard_context(
     keyword_query: Optional[str] = None,
     max_keywords: int = 30,
     context_window: int = 5,
+    summary_window: int = 5,
+    enable_summaries: bool = True,
 ) -> RecallPack:
     """结构化 SQL 召回（§06.3 硬上下文）。"""
     pack = RecallPack()
@@ -87,6 +122,11 @@ def gather_hard_context(
     pack.gimmick_rules = _fetch_gimmicks(as_of, conn)
     pack.recent_beats = _fetch_recent_beats(as_of, conn, context_window)
     pack.canon_facts = _fetch_canon_facts(entity_ids, conn)
+
+    if enable_summaries:
+        pack.chapter_summaries = _fetch_recent_summaries(as_of, conn, summary_window)
+        pack.volume_summary = _fetch_volume_summary(as_of, conn)
+        pack.global_synopsis = _fetch_global_synopsis(conn)
 
     if keyword_query:
         pack.keyword_hits = _fts_search(keyword_query, max_keywords, conn)
@@ -219,6 +259,46 @@ def _fetch_canon_facts(ids: list[str], conn) -> list[dict]:
         f" ORDER BY valid_from_chapter DESC",
         tuple(ids),
     )
+
+
+def _fetch_recent_summaries(as_of: int, conn, window: int) -> list[dict]:
+    """最近 N 章前情摘要（chapter<=as_of 继承 as-of 防剧透语义），按时间正序返回。"""
+    try:
+        rows = _rows(
+            conn,
+            "SELECT chapter, summary FROM chapter_summaries"
+            " WHERE chapter<=? ORDER BY chapter DESC LIMIT ?",
+            (as_of, window),
+        )
+        return list(reversed(rows))
+    except Exception:
+        return []  # 旧库未迁移时静默降级
+
+
+def _fetch_volume_summary(as_of: int, conn) -> str:
+    """as_of 所在卷的滚动摘要。"""
+    try:
+        row = conn.execute(
+            "SELECT rolling_summary FROM volumes"
+            " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
+            "   AND (end_chapter IS NULL OR end_chapter>=?)"
+            " ORDER BY volume_no LIMIT 1",
+            (as_of, as_of),
+        ).fetchone()
+        return (row["rolling_summary"] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def _fetch_global_synopsis(conn) -> str:
+    """全书梗概（meta_kv，由 orchestrator 每 10 章/卷末刷新）。"""
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta_kv WHERE key='global_synopsis'"
+        ).fetchone()
+        return (row["value"] or "") if row else ""
+    except Exception:
+        return ""
 
 
 def _fts_search(query: str, limit: int, conn) -> list[dict]:
