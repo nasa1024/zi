@@ -52,16 +52,21 @@ class TestSoftConflict:
         assert len(warns) >= 1
 
     def test_soft_issues_merged_into_workspace(self, conn):
-        """LLM 返回的软问题写入 workspace['continuity_issues']。"""
+        """LLM 返回的软问题写入 workspace['continuity_issues']。
+
+        P1#8 起证据强制：span/evidence 必须是草稿子串，否则整条丢弃；
+        非法 severity（info）宽容归一为 warn。
+        """
         from novelforge.skills.continuity_check_skill import ContinuityCheckSkill
         issues_json = json.dumps([
-            {"type": "soft", "severity": "info", "desc": "可以加强人物动机描写", "span": "..."},
+            {"type": "soft", "severity": "info", "desc": "可以加强人物动机描写", "span": "他沉默不语"},
             {"type": "soft", "severity": "warn", "desc": "道具出现未铺垫", "span": "神秘宝物"},
         ], ensure_ascii=False)
-        ctx = _make_ctx(conn, "章节草稿正文。", [], issues_json)
+        ctx = _make_ctx(conn, "章节草稿正文。他沉默不语，掏出神秘宝物。", [], issues_json)
         ContinuityCheckSkill().run(ctx)
         issues = ctx.workspace.get("continuity_issues", [])
         assert len(issues) >= 2
+        assert all(i["severity"] in ("block", "warn") for i in issues)  # info→warn
 
     def test_empty_llm_response_no_issues(self, conn):
         """LLM 返回空数组 → 无软问题（baseline）。"""
@@ -121,11 +126,11 @@ class TestSoftConflict:
         """多条软问题全部保留（不去重/截断）。"""
         from novelforge.skills.continuity_check_skill import ContinuityCheckSkill
         issues = [
-            {"type": "soft", "severity": "warn", "desc": f"问题{i}", "span": "..."}
+            {"type": "soft", "severity": "warn", "desc": f"问题{i}", "span": "草稿内容"}
             for i in range(5)
         ]
         ctx = _make_ctx(conn, "草稿内容。", [], json.dumps(issues, ensure_ascii=False))
         ContinuityCheckSkill().run(ctx)
         all_issues = ctx.workspace.get("continuity_issues", [])
-        soft = [i for i in all_issues if i.get("type") == "soft"]
+        soft = [i for i in all_issues if i.get("source") == "llm_soft"]
         assert len(soft) == 5

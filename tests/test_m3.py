@@ -157,6 +157,7 @@ class TestPipelineWithCandidates:
         cfg = NovelForgeConfig(project_id=project)
         cfg.provider.provider = "fake"
         cfg.candidates.n_candidates = n_candidates
+        cfg.settle.enabled = False   # M3 只测候选机制；伏笔结算见 test_p1_core
         return Orchestrator(gw, reg, cfg), fake
 
     def test_three_candidates_winner_selected_and_persisted(self, client, project):
