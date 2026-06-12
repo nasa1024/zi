@@ -139,6 +139,11 @@ export interface PipelineRunDetail extends PipelineRunRecord {
   selected_by?: 'auto' | 'human' | string | null;
   patch_stats?: PatchStats | null;
   quality_dimensions?: Record<string, number> | null;  // {hook,pacing,character,prose}
+  state_degraded?: boolean;            // P1#11: 结算降级（正文已落袋，世界状态待修复）
+  foreshadow_settle?: {                // P1#6: 伏笔结算报告
+    mentions?: number; advances?: number; payoffs?: number;
+    new_created?: string[]; rejected?: string[];
+  } | null;
 }
 
 export interface CandidateInfo {

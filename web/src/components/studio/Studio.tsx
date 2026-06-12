@@ -898,6 +898,26 @@ function PatchStatsChips({ stats }: { stats?: PatchStats | null }): JSX.Element 
   );
 }
 
+// P1#6: 伏笔结算摘要 chip（mention/advance 二分 + 确定性仲裁的产出）
+function ForeshadowSettleChip({
+  settle,
+}: { settle?: PipelineRunDetail['foreshadow_settle'] }): JSX.Element | null {
+  if (!settle) return null;
+  const created = settle.new_created ?? [];
+  const total = (settle.payoffs ?? 0) + (settle.advances ?? 0) +
+    (settle.mentions ?? 0) + created.length;
+  if (total === 0) return null;
+  return (
+    <span
+      className="rs-chip"
+      title={`本章伏笔结算：回收=payoff（证据验证）、推进=advance、提及=mention（不改状态）${created.length ? `；新建：${created.join('、')}` : ''}`}
+    >
+      🪝 回收 {settle.payoffs ?? 0} · 推进 {settle.advances ?? 0} · 提及 {settle.mentions ?? 0}
+      {created.length > 0 && ` · 新建 ${created.length}`}
+    </span>
+  );
+}
+
 // M6: 3 选 1 候选卡片（实时区与历史详情共用）
 function CandidateCards({
   detail,
@@ -2017,10 +2037,22 @@ function PipelinePanel({
                 ) : runDetails[rec.run_id] ? (
                   <>
                     {(runDetails[rec.run_id].quality_dimensions ||
-                      runDetails[rec.run_id].patch_stats) && (
+                      runDetails[rec.run_id].patch_stats ||
+                      runDetails[rec.run_id].state_degraded ||
+                      runDetails[rec.run_id].foreshadow_settle) && (
                       <div className="run-summary" style={{ marginBottom: '0.5rem' }}>
+                        {runDetails[rec.run_id].state_degraded && (
+                          <span
+                            className="rs-chip"
+                            title="结算降级：正文已保存，世界状态写回失败；可经 seed API 重放 detail 中的 unsettled_proposals 修复"
+                            style={{ color: '#b45309' }}
+                          >
+                            ⚠ 结算降级
+                          </span>
+                        )}
                         <DimensionChips dims={runDetails[rec.run_id].quality_dimensions} />
                         <PatchStatsChips stats={runDetails[rec.run_id].patch_stats} />
+                        <ForeshadowSettleChip settle={runDetails[rec.run_id].foreshadow_settle} />
                       </div>
                     )}
                     {/* 历史 run 的候选卡片：随时可回头 3 选 1 换稿 */}
