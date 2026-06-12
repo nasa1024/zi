@@ -1,6 +1,6 @@
 """CraftCheckSkill：网文工艺层检验（§05.8）。
 
-7 项校验（部分确定性，部分 LLM 辅助）：
+8 项校验（部分确定性，部分 LLM 辅助）：
   1. value_shift       有无价值轴变化            block
   2. hook              章末有无钩子               block
   3. pacing            节奏是否符合规划           warn
@@ -8,6 +8,7 @@
   5. payoff            爽点兑现校验（防假爽点）   block
   6. flat_character    纸片人检测                 warn (LLM)
   7. beat_contract     beats 契约对齐             block
+  8. hook_repeat       连续两章同型章尾钩子       warn (P1#7)
 
 与 ContinuityCheckSkill 并行运行（Orchestrator 负责调度）。
 """
@@ -88,6 +89,9 @@ class CraftCheckSkill:
         # ⑦ beat_contract：beats 条数与 beat_type 合规
         issues += _check_beat_contract(beats)
 
+        # ⑧ hook_repeat：连续两章同型章尾钩子（P1#7，确定性零成本）
+        issues += _check_hook_repeat(ctx.conn, ctx.target_chapter)
+
         ctx.workspace["craft_issues"] = [_issue_dict(i) for i in issues]
         blocks = [i for i in issues if i.severity == "block"]
 
@@ -158,6 +162,33 @@ def _check_beat_contract(beats: list[dict]) -> list[CraftIssue]:
             issues.append(CraftIssue(check="beat_contract", severity="block",
                                       detail=f"beats[{i}].beat_type={bt!r} 不在合法集合 {valid_types}"))
     return issues
+
+
+def _check_hook_repeat(conn, chapter: int) -> list[CraftIssue]:
+    """P1#7：连续两章同型章尾钩子（oh-story 硬规则的 warn 化）。
+
+    本章与上一章 hook_type 均为有效枚举（非 NULL/other）且相同 → warn。
+    规划数据不全时静默跳过，不误报。
+    """
+    if conn is None or chapter < 2:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT chapter, hook_type FROM chapter_cards"
+            " WHERE chapter IN (?, ?)", (chapter - 1, chapter),
+        ).fetchall()
+    except Exception:
+        return []   # 老库无该列 → 跳过
+    by_ch = {r["chapter"]: r["hook_type"] for r in rows}
+    cur, prev = by_ch.get(chapter), by_ch.get(chapter - 1)
+    if not cur or not prev or "other" in (cur, prev) or cur != prev:
+        return []
+    from ..craft.hooks import hook_label
+    return [CraftIssue(
+        check="hook_repeat", severity="warn",
+        detail=f"连续两章使用同型章尾钩子（{hook_label(cur)}式，第{chapter-1}→{chapter}章），"
+               f"建议本章换型防读者疲劳",
+    )]
 
 
 # ── LLM 软检查 ────────────────────────────────────────────────────────────────
