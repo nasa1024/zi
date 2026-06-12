@@ -103,22 +103,38 @@ def select_best(
 
 
 def _count_hard_blocks(draft_text: str, world) -> int:
-    """对单个候选跑确定性 validator，返回 block 级问题数。失败按 0 计。"""
-    try:
-        from ..validators.claims import extract_claims_rule
-        from ..validators.items import validate_item_conservation
-        from ..validators.power import validate_power_monotonicity
+    """对单个候选跑确定性 validator，返回 critical 级问题数。失败按 0 计。
 
-        claims = extract_claims_rule(draft_text)
+    P2#12 修复：原 import 名错（validate_item_conservation）+ extract_claims_rule
+    缺参 + 数 'block'（Issue 域是 critical/major/...）——该否决层从未生效过。
+    主语绑定复用 continuity_check 的接线逻辑，保证两处判定口径一致。
+    """
+    if world is None:
+        return 0
+    try:
+        from ..skills.continuity_check_skill import _bind_power_subjects
+        from ..validators import (
+            extract_claims_rule, refine_knowledge_claims,
+            validate_item_inventory, validate_knowledge_edges,
+            validate_power_monotonicity,
+        )
+
+        conn = world._conn
+        chapter = world.as_of + 1
+        raw = extract_claims_rule(draft_text, chapter, conn)
+        claims = (refine_knowledge_claims(raw, conn)
+                  + _bind_power_subjects(
+                      [c for c in raw
+                       if getattr(c.ctype, "value", c.ctype) == "power_level"],
+                      draft_text, conn)
+                  + [c for c in raw
+                     if getattr(c.ctype, "value", c.ctype) not in ("power_level", "knowledge")])
         blocks = 0
-        for validate in (validate_power_monotonicity, validate_item_conservation):
+        for validate in (validate_power_monotonicity, validate_item_inventory,
+                         validate_knowledge_edges):
             try:
-                issues = validate(claims, world)
-                blocks += sum(
-                    1 for i in issues
-                    if (getattr(i, "severity", None) or
-                        (i.get("severity") if isinstance(i, dict) else "")) == "block"
-                )
+                blocks += sum(1 for i in validate(claims, world, conn)
+                              if i.severity == "critical")
             except Exception:
                 pass
         return blocks

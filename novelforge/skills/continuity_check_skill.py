@@ -70,35 +70,98 @@ class ContinuityCheckSkill:
 # ── 确定性检查 ────────────────────────────────────────────────────────────────
 
 def _run_hard_validators(proposals: list[dict], world: Optional[WorldState], ctx: SkillContext) -> list[dict]:
-    """复用 validators/power.py 等检测边界违反。"""
-    issues: list[dict] = []
+    """确定性硬校验：power / item / knowledge / presence（P2#12 接通）。
+
+    历史 bug（修复于 P2#12）：import 名错（validate_item_conservation 不存在）+
+    extract_claims_rule 缺 chapter/conn 参 + Issue.severity 域与 findings 不匹配，
+    三个 validator 在管线里从未跑过。
+    numeric validator 故意不接：数值 claims 噪声最大，原型期先观察。
+    """
+    if world is None:
+        return []
+    issues: list = []
+    claims_by_id: dict = {}
     try:
-        from ..validators.claims import extract_claims_rule
-        from ..validators.power import validate_power_monotonicity
-        from ..validators.items import validate_item_conservation
+        from ..validators import (
+            extract_claims_rule, refine_knowledge_claims,
+            validate_event_visibility, validate_item_inventory,
+            validate_knowledge_edges, validate_power_monotonicity,
+        )
 
         draft_text = ctx.workspace.get("draft_text", "")
-        claims = extract_claims_rule(draft_text)
+        raw_claims = extract_claims_rule(draft_text, ctx.target_chapter, ctx.conn)
+        # KNOWLEDGE：正则抽取的自由文本主语/信息词归一到账本（失败丢弃防误报）；
+        # POWER：rank 词前文窗口绑定主语（无主语的 power claim 等于白跑）
+        knowledge = refine_knowledge_claims(raw_claims, ctx.conn)
+        power = _bind_power_subjects(
+            [c for c in raw_claims if getattr(c.ctype, "value", c.ctype) == "power_level"],
+            draft_text, ctx.conn)
+        others = [c for c in raw_claims
+                  if getattr(c.ctype, "value", c.ctype) not in ("power_level", "knowledge")]
+        claims = knowledge + power + others
+        claims_by_id = {c.claim_id: c for c in claims}
 
-        # 境界单调性
-        try:
-            power_issues = validate_power_monotonicity(claims, world)
-            issues.extend([i.dict() if hasattr(i, "dict") else vars(i) for i in power_issues])
-        except Exception:
-            pass
-
-        # 道具守恒
-        try:
-            item_issues = validate_item_conservation(claims, world)
-            issues.extend([i.dict() if hasattr(i, "dict") else vars(i) for i in item_issues])
-        except Exception:
-            pass
-
+        for validate in (validate_power_monotonicity, validate_item_inventory,
+                         validate_knowledge_edges, validate_event_visibility):
+            try:
+                issues.extend(validate(claims, world, ctx.conn))
+            except Exception:
+                continue   # 单个 validator 故障不拖累其余
     except ImportError:
-        pass  # validators 包未找到时降级
-    # P1#8：归一为 findings 形（source=validator 不强制 evidence；desc→issue 等映射）
-    from ..craft.findings import normalize_findings
-    return normalize_findings(issues, ctx.workspace.get("draft_text", ""), "validator")
+        return []  # validators 包未找到时降级
+
+    return [_issue_to_finding(i, claims_by_id) for i in issues]
+
+
+def _bind_power_subjects(power_claims: list, draft_text: str, conn) -> list:
+    """POWER claim 主语绑定：rank 词前 30 字窗口内最后出现的已知角色名。
+
+    绑定不上的丢弃——没有主语的境界词可能在说任何人（招式名/他人/回忆），
+    送 validator 只会误报。
+    """
+    if not power_claims or conn is None:
+        return []
+    try:
+        names = {r["canonical_name"]: r["id"] for r in conn.execute(
+            "SELECT id, canonical_name FROM entities WHERE entity_type='character'"
+        ).fetchall()}
+        for r in conn.execute(
+                "SELECT a.alias, a.entity_id FROM entity_aliases a"
+                " JOIN entities e ON e.id=a.entity_id"
+                " WHERE e.entity_type='character'").fetchall():
+            names.setdefault(r["alias"], r["entity_id"])
+    except Exception:
+        return []
+    if not names:
+        return []
+    out = []
+    for c in power_claims:
+        off = c.span_offset or 0
+        window = draft_text[max(0, off - 30):off]
+        found = [(window.rfind(n), eid) for n, eid in names.items() if n in window]
+        if not found:
+            continue
+        eid = max(found)[1]   # 离 rank 词最近的角色
+        out.append(c.model_copy(update={"subject_entity": eid}))
+    return out
+
+
+# validator Issue.severity({critical,major,minor,info}) → finding severity({block,warn})
+_SEVERITY_TO_FINDING = {"critical": "block"}
+
+
+def _issue_to_finding(issue, claims_by_id: dict) -> dict:
+    """validators.Issue → P1#8 finding。evidence 回查 claim.span（锚点补丁的锚点）。"""
+    claim = claims_by_id.get(issue.claim_id)
+    return {
+        "severity": _SEVERITY_TO_FINDING.get(issue.severity, "warn"),
+        "category": issue.code,
+        "evidence": (claim.span if claim else "")[:300],
+        "issue": issue.message[:500],
+        "fix": (issue.suggested_fix or "")[:200],
+        "repair_scope": "local",
+        "source": "validator",
+    }
 
 
 # ── LLM 软检查 ────────────────────────────────────────────────────────────────

@@ -105,9 +105,11 @@ def _run_validators(cand: FactCandidate, prop: dict, conn) -> list[ConflictItem]
 
         draft_text = (prop.get("new") or {}).get("object", "")
         if draft_text:
-            claims = extract_claims_rule(draft_text)
-            world = WorldState(as_of=prop.get("valid_from_chapter", 0), conn=conn)
-            for issue in validate_power_monotonicity(claims, world):
+            # P2#12 修复：原调用缺 chapter 必填参，TypeError 被外层吞掉从未生效
+            chapter = prop.get("valid_from_chapter", 0) or 0
+            claims = extract_claims_rule(draft_text, chapter, conn)
+            world = WorldState(as_of=chapter, conn=conn)
+            for issue in validate_power_monotonicity(claims, world, conn):
                 items.append(ConflictItem(
                     kind="validator",
                     fact_id=cand.target_fact_id or "",
