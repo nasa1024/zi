@@ -98,6 +98,17 @@ def settle_foreshadow(
 
 # ── LLM 调用与解析 ────────────────────────────────────────────────────────────
 
+def _parse_settle_json(text: str) -> Optional[dict]:
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _call_settler(gateway, tier: str, open_rows: list[dict],
                   chapter: int, draft_text: str) -> Optional[dict]:
     from ..control_plane.llm.provider import Message
@@ -116,23 +127,19 @@ def _call_settler(gateway, tier: str, open_rows: list[dict],
         excerpt = draft_text[:2500] + "\n……（中略）……\n" + draft_text[-3500:]
     else:
         excerpt = draft_text
-    resp = gateway.generate(
+    # P2#14：FAST 默认、解析失败升 MID 抢救（结算不值得烧 STRONG）。
+    result = gateway.generate_validated(
         mt,
         [Message(role="user", content=(
             f"## 未解伏笔列表\n{fs_lines}\n\n"
             f"## 本章（第 {chapter} 章）终稿（节选）\n{excerpt}"
         ))],
+        parse=_parse_settle_json,
         system=_SETTLE_SYSTEM,
         max_tokens=2048,
+        max_tier=ModelTier.MID,
     )
-    m = re.search(r"\{.*\}", resp.text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    return result.value
 
 
 # ── 确定性写回 ────────────────────────────────────────────────────────────────

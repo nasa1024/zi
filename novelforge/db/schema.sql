@@ -632,6 +632,8 @@ CREATE TABLE IF NOT EXISTS volumes (
     status          TEXT NOT NULL DEFAULT 'writing'
                         CHECK(status IN ('writing','completed','archived')),
     rolling_summary TEXT,                       -- M2-②: 本卷至今滚动摘要（FAST tier 每5章更新）
+    objective       TEXT,                        -- v14: 本卷可验证目标（P2#13）
+    key_results     TEXT,                        -- v14: JSON [{id,text,status,evidence}]
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_no)
 );
