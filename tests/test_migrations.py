@@ -130,6 +130,10 @@ class TestMigrations:
             assert column_exists(conn, "chapter_cards", col), f"缺列 {col}"
         assert table_exists(conn, "style_anchors")
 
+        # v14: volumes 卷级 Objective + KR
+        for col in ("objective", "key_results"):
+            assert column_exists(conn, "volumes", col), f"缺列 {col}"
+
         # 版本号已更新
         from novelforge.db.connection import get_meta
         assert get_meta(conn, "schema_version") == SCHEMA_VERSION
@@ -273,6 +277,47 @@ class TestMigrations:
         assert row is not None and row["title"] == "旧章"
         assert row["hook_type"] is None and row["expectation_score"] is None
         assert column_exists(conn, "chapter_cards", "target_emotion")
+        conn.close()
+
+    def test_v14_fresh_db_has_objective_kr(self, tmp_path):
+        """新库基线（schema.sql）直接含 v14 volumes 列。"""
+        from novelforge.db.connection import init_db
+        from novelforge.db.migrations import column_exists
+
+        conn = init_db(tmp_path / "fresh14.db")
+        for col in ("objective", "key_results"):
+            assert column_exists(conn, "volumes", col), f"schema.sql 基线缺列 {col}"
+        conn.close()
+
+    def test_v14_alters_existing_volumes(self, tmp_path):
+        """已有 volumes 表（v5 形态）的库：v14 走 ALTER 补列且保数据。"""
+        from novelforge.db.migrations import migrate, column_exists
+
+        conn = _make_v4_db(tmp_path / "v4vol.db")
+        conn.executescript("""
+            CREATE TABLE volumes (
+                id              TEXT PRIMARY KEY,
+                volume_no       INTEGER NOT NULL,
+                title           TEXT NOT NULL,
+                synopsis        TEXT,
+                start_chapter   INTEGER,
+                end_chapter     INTEGER,
+                status          TEXT NOT NULL DEFAULT 'writing',
+                rolling_summary TEXT,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(volume_no)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO volumes(id, volume_no, title) VALUES('v1', 1, '第一卷')")
+        conn.commit()
+
+        migrate(conn)
+
+        row = conn.execute("SELECT * FROM volumes WHERE id='v1'").fetchone()
+        assert row is not None and row["title"] == "第一卷"
+        assert row["objective"] is None and row["key_results"] is None
+        assert column_exists(conn, "volumes", "objective")
         conn.close()
 
     def test_get_db_version(self, tmp_path):

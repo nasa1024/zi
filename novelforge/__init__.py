@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "13"  # +细纲契约列 + style_anchors
+SCHEMA_VERSION = "14"  # +卷级 Objective/KR
