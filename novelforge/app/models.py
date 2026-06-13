@@ -425,6 +425,9 @@ class VolumeCreateRequest(BaseModel):
     synopsis: Optional[str] = None
     start_chapter: Optional[int] = Field(None, ge=1)
     end_chapter: Optional[int] = Field(None, ge=1)
+    # P2#13 卷级 Objective + KR（key_results 接受字符串列表或 {text,...} 列表）
+    objective: Optional[str] = None
+    key_results: Optional[list] = None
 
 
 class VolumeUpdateRequest(BaseModel):
@@ -433,6 +436,8 @@ class VolumeUpdateRequest(BaseModel):
     start_chapter: Optional[int] = Field(None, ge=1)
     end_chapter: Optional[int] = Field(None, ge=1)
     status: Optional[Literal["writing", "completed", "archived"]] = None
+    objective: Optional[str] = None
+    key_results: Optional[list] = None
 
 
 class VolumeResponse(BaseModel):
@@ -444,6 +449,9 @@ class VolumeResponse(BaseModel):
     end_chapter: Optional[int] = None
     status: str
     created_at: str
+    # P2#13
+    objective: Optional[str] = None
+    key_results: list[dict] = Field(default_factory=list)
 
 
 # ── Branches ──────────────────────────────────────────────────────────────────

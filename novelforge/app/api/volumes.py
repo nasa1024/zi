@@ -33,7 +33,19 @@ router = APIRouter(tags=["volumes"])
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def _parse_kr(raw) -> list[dict]:
+    if not raw:
+        return []
+    try:
+        import json
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 def _volume_row_to_resp(row) -> VolumeResponse:
+    keys = row.keys() if hasattr(row, "keys") else []
     return VolumeResponse(
         id=row["id"],
         volume_no=row["volume_no"],
@@ -43,7 +55,24 @@ def _volume_row_to_resp(row) -> VolumeResponse:
         end_chapter=row["end_chapter"],
         status=row["status"],
         created_at=row["created_at"],
+        objective=row["objective"] if "objective" in keys else None,
+        key_results=_parse_kr(row["key_results"] if "key_results" in keys else None),
     )
+
+
+def _build_kr_gateway(project_id: str, registry):
+    """构建 LLM 网关供 KR 结算用（与 plan_volume 同款 provider 装配）。"""
+    import os
+    from ...config import NovelForgeConfig
+    from ...control_plane.llm import factory as llm_factory
+
+    cfg = NovelForgeConfig(project_id=project_id,
+                           db_path=registry.get(project_id).db_path)
+    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    if api_key:
+        cfg.provider.api_key = api_key
+        cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+    return llm_factory.build_gateway(cfg)
 
 
 def _branch_row_to_resp(row) -> BranchResponse:
@@ -69,13 +98,19 @@ def create_volume(
     conn = registry.open_conn(project_id)
     try:
         vol_id = str(uuid.uuid4())
+        import json as _json
+        from ...craft.volume_kr import normalize_key_results
+        kr_json = (_json.dumps(normalize_key_results(req.key_results),
+                               ensure_ascii=False)
+                   if req.key_results is not None else None)
         try:
             conn.execute(
                 """INSERT INTO volumes(id, volume_no, title, synopsis,
-                                       start_chapter, end_chapter)
-                   VALUES (?,?,?,?,?,?)""",
+                                       start_chapter, end_chapter,
+                                       objective, key_results)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (vol_id, req.volume_no, req.title, req.synopsis,
-                 req.start_chapter, req.end_chapter),
+                 req.start_chapter, req.end_chapter, req.objective, kr_json),
             )
             conn.commit()
         except sqlite3.IntegrityError as e:
@@ -138,16 +173,58 @@ def update_volume(
         if not updates:
             return _volume_row_to_resp(row)
 
+        # P2#13：key_results 列表 → JSON 串入库（归一补全 id/status）
+        if "key_results" in updates:
+            import json as _json
+            from ...craft.volume_kr import normalize_key_results
+            updates["key_results"] = _json.dumps(
+                normalize_key_results(updates["key_results"]), ensure_ascii=False)
+
         set_clause = ", ".join(f"{k}=?" for k in updates)
         conn.execute(
             f"UPDATE volumes SET {set_clause} WHERE volume_no=?",
             list(updates.values()) + [volume_no],
         )
         conn.commit()
+
+        # P2#13：卷 status→completed 时自动结算 KR（best-effort，失败不阻断状态更新）
+        if updates.get("status") == "completed":
+            try:
+                from ...craft.volume_kr import settle_volume_kr
+                gw = _build_kr_gateway(project_id, registry)
+                if gw is not None:
+                    settle_volume_kr(gw, conn, volume_no)
+            except Exception:
+                pass
+
         row = conn.execute(
             "SELECT * FROM volumes WHERE volume_no=?", (volume_no,)
         ).fetchone()
         return _volume_row_to_resp(row)
+    finally:
+        conn.close()
+
+
+@router.post("/{project_id}/volumes/{volume_no}/settle-kr")
+def settle_volume_kr_endpoint(
+    project_id: str,
+    volume_no: int,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """P2#13：手动触发本卷 KR 结算（对照卷情节判每条 KR 兑现度并写回）。"""
+    from ...craft.volume_kr import settle_volume_kr
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        if conn.execute("SELECT 1 FROM volumes WHERE volume_no=?",
+                        (volume_no,)).fetchone() is None:
+            raise HTTPException(404, f"volume_no={volume_no} 不存在")
+        gw = _build_kr_gateway(project_id, registry)
+        if gw is None:
+            raise HTTPException(503, "LLM 网关不可用（缺 API key）")
+        return settle_volume_kr(gw, conn, volume_no)
     finally:
         conn.close()
 
