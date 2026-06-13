@@ -83,3 +83,35 @@ class TestGenerateValidated:
             ModelTier.MID, [Message(role="user", content="x")], parse=_parse_json)
         assert r.value == {"ok": 4}
         assert r.tier_used == "strong"
+
+
+class TestForeshadowSettleUpgrade:
+    """FAST 返畸形 JSON、MID 返合法 → 结算靠升级救活（P2#14 接入 settle）。"""
+
+    def _conn(self):
+        import sqlite3
+        from novelforge.db.connection import init_db_from_conn
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        init_db_from_conn(c)
+        return c
+
+    def test_settle_recovers_via_mid(self):
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+        from novelforge.ids import new_id
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, planted_chapter, state)"
+            " VALUES(?,?,?,?, 'planted')",
+            (new_id("fs"), "断剑来历", "十年前血案凶器", 1))
+        conn.commit()
+        good = json.dumps({"settlements": [], "new_hooks": []}, ensure_ascii=False)
+
+        def factory(messages, model="", temperature=1.0):
+            return "坏json{{{" if "haiku" in model else good
+
+        gw = _gw(factory=factory)
+        # tier='fast'：FAST 解析失败 → 升 MID 成功，不再 raise
+        report = settle_foreshadow(gw, "fast", conn, 5, "正文。")
+        assert report["mentions"] == 0   # 空 settlements，但没崩
+        conn.close()
