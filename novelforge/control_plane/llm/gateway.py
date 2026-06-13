@@ -5,11 +5,24 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from .tiers import ModelTier
 from .provider import CacheHint, LLMProvider, Message, Response, Tool
 from ..budget import BudgetLedger, CircuitBreaker, CircuitTripped
+
+
+_TIER_ORDER = (ModelTier.FAST, ModelTier.MID, ModelTier.STRONG)
+
+
+@dataclass
+class ValidatedResult:
+    """generate_validated 产物：parse 成功值 + 实际档位 + 是否升级过。"""
+    value: object | None      # parse 成功的产物；全档失败为 None
+    response: Response        # 最后一次调用的原始响应（成本已计入 ledger）
+    tier_used: str            # 实际产出档位
+    escalated: bool           # 是否发生过升级
 
 
 _DEFAULT_MODEL_MAP: dict[str, str] = {
@@ -80,6 +93,49 @@ class LLMGateway:
                     continue
                 raise
         raise last_err
+
+    def generate_validated(
+        self,
+        tier: ModelTier,
+        messages: list[Message],
+        *,
+        parse: Callable[[str], object],
+        system: Optional[str] = None,
+        tools: Optional[list[Tool]] = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        cache_hint: Optional[CacheHint] = None,
+        max_tier: ModelTier = ModelTier.STRONG,
+    ) -> ValidatedResult:
+        """P2#14：弱模型分层 + 失败升级。
+
+        从 tier 起逐档调用，每档跑 parse(text)；返回非 None 即成功，
+        否则升一档（fast→mid→strong）重试，封顶 max_tier。parse 抛异常视同 None。
+        全档失败返回 value=None。每次调用都计入 ledger（升级即多花，成本看板可见）。
+        max_tier=tier 时退化为单档（等价旧行为，关闭升级）。
+        """
+        start = _TIER_ORDER.index(tier)
+        end = _TIER_ORDER.index(max_tier)
+        last_resp: Optional[Response] = None
+        used = tier
+        for t in _TIER_ORDER[start:end + 1]:
+            used = t
+            resp = self.generate(
+                t, messages, system=system, tools=tools,
+                max_tokens=max_tokens, temperature=temperature, cache_hint=cache_hint,
+            )
+            last_resp = resp
+            try:
+                value = parse(resp.text)
+            except Exception:
+                value = None
+            if value is not None:
+                return ValidatedResult(
+                    value=value, response=resp, tier_used=t.value,
+                    escalated=(t != tier))
+        return ValidatedResult(
+            value=None, response=last_resp, tier_used=used.value,
+            escalated=(used != tier))
 
     @property
     def ledger(self) -> BudgetLedger:
