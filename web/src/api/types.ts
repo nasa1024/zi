@@ -6,10 +6,43 @@ export interface HealthResponse {
   version: string;
 }
 
+// 情节设定（手填或生成的候选）；与后端 PlotSetting 逐字段镜像。
+export interface PlotSetting {
+  genre: string;
+  premise?: string | null;
+  world_setting?: string | null;
+  power_system?: string | null;
+  power_ranks: string[];
+  protagonist?: string | null;
+  main_conflict?: string | null;
+  opening_hook?: string | null;
+  target_audience?: string | null;
+  tone?: string | null;
+}
+
+export interface SettingSuggestRequest {
+  name?: string | null;
+  genre?: string | null;
+  hints?: string | null;
+  n?: number;
+  locked?: PlotSetting | null;
+  locked_fields?: string[];
+  field?: string | null;
+  avoid?: string[];
+}
+
+export interface SettingSuggestResponse {
+  candidates: PlotSetting[];
+  degraded: boolean;
+  tier_used?: string | null;
+}
+
 export interface ProjectCreateRequest {
   name: string;
   genre?: string;
   power_system?: string | null;
+  config_overrides?: Record<string, unknown> | null;
+  setting?: PlotSetting | null;
 }
 
 export interface ProjectResponse {
@@ -21,6 +54,8 @@ export interface ProjectResponse {
   chapter_count: number;
   canon_fact_count: number;
   archived: boolean;
+  power_system?: string | null;
+  premise?: string | null;
 }
 
 export interface SeedProposal {

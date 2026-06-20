@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..contracts import FactCandidate
+from ..contracts import FactCandidate, canonical_fact_type
 
 
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ _LOW_TYPES  = frozenset({"style", "misc", "appearance"})
 
 def classify_risk(cand: FactCandidate, config=None) -> str:
     """§11.3 风险分级规则表（自上而下首个命中）。"""
-    ft = cand.fact_type or ""
+    ft = canonical_fact_type(cand.fact_type)
 
     # Rule 1: 高风险 fact_type
     if ft in _HIGH_TYPES:

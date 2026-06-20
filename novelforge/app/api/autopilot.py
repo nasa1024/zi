@@ -370,6 +370,7 @@ def seed_bible(
         candidate_ids: list[str] = []
         for p in req.proposals:
             cid = new_id("cand")
+            from ...contracts import normalize_proposal_fact_type
             prop_dict = {
                 "op": p.op,
                 "fact_type": p.fact_type,
@@ -378,11 +379,12 @@ def seed_bible(
             }
             if p.entity:
                 prop_dict["entity"] = p.entity
+            prop_dict = normalize_proposal_fact_type(prop_dict)
             conn.execute(
                 "INSERT INTO fact_candidates"
                 "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
                 " VALUES(?,?,?,?,?,?,?,?)",
-                (cid, p.op, None, p.fact_type, json.dumps(prop_dict, ensure_ascii=False),
+                (cid, p.op, None, prop_dict["fact_type"], json.dumps(prop_dict, ensure_ascii=False),
                  "proposed", p.risk_tier, p.valid_from_chapter),
             )
             candidate_ids.append(cid)

@@ -404,6 +404,8 @@ class AutopilotManager:
                 if api_key:
                     cfg.provider.api_key = api_key
                     cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+                from ..config import apply_runtime_env
+                apply_runtime_env(cfg)   # L2/L3/向量 + 第三方 embedding（env 驱动，默认全关）
 
                 gw = build_gateway(cfg)
                 reg = SkillRegistry()

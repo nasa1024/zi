@@ -320,6 +320,26 @@ class TestMigrations:
         assert column_exists(conn, "volumes", "objective")
         conn.close()
 
+    def test_v15_fresh_db_has_scene_vec(self, tmp_path):
+        """新库基线（schema.sql）直接含 v15 scene_vec 表（向量召回回退存储）。"""
+        from novelforge.db.connection import init_db
+        from novelforge.db.migrations import table_exists
+
+        conn = init_db(tmp_path / "fresh15.db")
+        assert table_exists(conn, "scene_vec")
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(scene_vec)")}
+        assert {"scene_id", "chapter", "dim", "vec_json", "model", "version"} <= cols
+        conn.close()
+
+    def test_v15_migrate_creates_scene_vec(self, tmp_path):
+        """从 v4 迁移到最新版应创建 scene_vec 表。"""
+        from novelforge.db.migrations import migrate, table_exists
+
+        conn = _make_v4_db(tmp_path / "v4vec.db")
+        migrate(conn)
+        assert table_exists(conn, "scene_vec")
+        conn.close()
+
     def test_get_db_version(self, tmp_path):
         """get_db_version 读取当前版本。"""
         from novelforge.db.migrations import get_db_version

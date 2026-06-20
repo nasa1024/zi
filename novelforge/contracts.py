@@ -31,6 +31,50 @@ HARD_FACET: dict[str, str] = {
 }
 
 
+FACT_TYPE_ALIASES: dict[str, str] = {
+    # Older prompts/tests used these names, but facts.fact_type has a strict
+    # CHECK whitelist. Normalize at the boundary and preserve the original
+    # semantic class in new.canon_kind.
+    "power_rank": "power_system",
+    "timeline": "event",
+    "appearance": "misc",
+    "entity": "misc",
+    "foreshadow": "misc",
+    "foreshadowing": "misc",
+}
+
+
+def canonical_fact_type(fact_type: str | None) -> str:
+    ft = (fact_type or "misc").strip() or "misc"
+    return FACT_TYPE_ALIASES.get(ft, ft)
+
+
+def normalize_proposal_fact_type(proposal: dict) -> dict:
+    """Return a copy with proposal['fact_type'] normalized to schema-legal names.
+
+    This is deliberately tiny and deterministic: it does not validate the
+    proposal, it only maps historical/LLM-facing aliases onto the §10/DDL
+    vocabulary so staging rows cannot later fail only at commit time.
+    """
+    p = dict(proposal or {})
+    original = (p.get("fact_type") or "misc").strip() or "misc"
+    canonical = canonical_fact_type(original)
+    p["fact_type"] = canonical
+    if canonical != original:
+        new = dict(p.get("new") or {})
+        new.setdefault("canon_kind", original)
+        if original == "power_rank":
+            new.setdefault("facet", "power")
+        elif original == "timeline":
+            new.setdefault("facet", "timeline")
+        p["new"] = new
+    return p
+
+
+def normalize_bible_change_proposal(prop: "BibleChangeProposal") -> "BibleChangeProposal":
+    return BibleChangeProposal.model_validate(normalize_proposal_fact_type(prop.model_dump()))
+
+
 class StateTransition(BaseModel):
     """Deterministic state change emitted by Draft/Skill layers."""
 

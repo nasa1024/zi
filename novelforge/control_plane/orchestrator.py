@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..config import NovelForgeConfig
-from ..contracts import FactCandidate, RunContext
+from ..contracts import FactCandidate, RunContext, normalize_proposal_fact_type
 from ..craft.pacing import PacingController
 from ..dedup.dedup_engine import DeduplicationEngine
 from ..governance.conflict import ConflictSet, classify_risk, detect_conflict
@@ -103,6 +103,12 @@ class Orchestrator:
         try:
             # ── 1. RECALL + PACING ────────────────────────────────────────────
             entity_ids = entity_ids or _infer_entity_ids(conn, chapter)
+            mcfg = getattr(cfg, "memory", None)
+            _vec_on = getattr(cfg.recall, "enable_vector", False) and mcfg is not None
+            _embedder = None
+            if _vec_on:
+                from ..memory.embedding import build_embedder
+                _embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
             recall_pack = gather_hard_context(
                 entity_ids,
                 chapter - 1,
@@ -112,6 +118,11 @@ class Orchestrator:
                 context_window=cfg.recall.context_window_chapters,
                 summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
                 enable_summaries=getattr(cfg.recall, "enable_summaries", True),
+                embedder=_embedder,
+                enable_vector=_vec_on,
+                scene_query=keyword_query,
+                vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
+                rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
             )
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
@@ -443,6 +454,13 @@ class Orchestrator:
                 conn, self._gw, chapter, draft_text))
         _step("foreshadow_flip", lambda: _flip_overdue_foreshadow(conn, chapter))
 
+        # §06 L2/L3 异步记忆管线（默认关；各自降级互不阻塞）。
+        mcfg = getattr(cfg, "memory", None)
+        if mcfg is not None and mcfg.enable_l2 and draft_text:
+            _step("l2_aggregate", lambda: _run_l2(conn, self._gw, cfg, chapter, draft_text))
+        if mcfg is not None and mcfg.enable_l3 and draft_text:
+            _step("l3_events", lambda: _run_l3(conn, self._gw, cfg, chapter, draft_text))
+
         scfg = getattr(cfg, "settle", None)
         if scfg is not None and scfg.enabled and draft_text:
             def _do_settle() -> None:
@@ -630,23 +648,21 @@ def _proposals_to_candidates(
 ) -> list[FactCandidate]:
     candidates = []
     for p in proposals:
+        p = normalize_proposal_fact_type(p)
         cid = new_id("cand")
         fact_type = p.get("fact_type", "unknown")
         entity = p.get("entity")
         entity_id = _resolve_entity(entity, conn) if entity else None
         risk_tier = p.get("risk_tier", "low")
         proposal_json = json.dumps(p, ensure_ascii=False)
-        try:
-            op = p.get("op", "add")
-            conn.execute(
-                "INSERT OR IGNORE INTO fact_candidates"
-                "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (cid, op, entity_id, fact_type, proposal_json, "proposed", risk_tier, chapter),
-            )
-            conn.commit()
-        except Exception:
-            pass
+        op = p.get("op", "add")
+        conn.execute(
+            "INSERT INTO fact_candidates"
+            "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (cid, op, entity_id, fact_type, proposal_json, "proposed", risk_tier, chapter),
+        )
+        conn.commit()
         candidates.append(FactCandidate(
             candidate_id=cid,
             entity_id=entity_id,
@@ -775,6 +791,71 @@ _SUMMARY_SYSTEM = """\
 你是 NovelForge 的前情摘要助手。用不超过 250 字概括本章，必须覆盖三点：
 ① 发生了什么（关键事件）；② 谁的状态/关系变了；③ 章末悬念或情绪落点。
 只输出摘要正文，不要标题、不要解释。"""
+
+
+def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: str) -> None:
+    """§06.2.2 L2 场景聚合。触发=每 N 章 或 卷末；聚合当前章 + 回填本窗口缺 L2 的章。
+
+    窗口上界为本章、下界为 chapter-N+1，每次触发处理量有界（≤N 章）。
+    enable_vector 时同步建场景向量（scene_vec）。失败由调用方 _step 降级。
+    """
+    from ..memory.l2_aggregate import aggregate_chapter_scenes, should_run_l2
+
+    mcfg = cfg.memory
+    n = max(1, mcfg.l2_every_n_chapters)
+    if not (should_run_l2(chapter, every_n=n) or _is_volume_end(conn, chapter)):
+        return
+    embedder = None
+    if getattr(cfg.recall, "enable_vector", False):
+        from ..memory.embedding import build_embedder
+        embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
+
+    kw = dict(max_scenes=mcfg.l2_max_scenes_per_chapter, tier=mcfg.l2_tier, embedder=embedder)
+    # 当前章用手头正文（可能尚未 flush 到 L0）
+    aggregate_chapter_scenes(conn, gateway, chapter, draft_text, **kw)
+    # 回填窗口内更早、尚无 L2 的章（从 L0 读回）
+    for ch in range(max(1, chapter - n + 1), chapter):
+        if conn.execute("SELECT 1 FROM l2_scenes WHERE chapter=? LIMIT 1", (ch,)).fetchone():
+            continue
+        text = _load_chapter_text(conn, ch)
+        if text:
+            aggregate_chapter_scenes(conn, gateway, ch, text, **kw)
+
+
+def _run_l3(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: str) -> None:
+    """§06.2.3 L3 事件驱动 canon 提案。产出的提案进 staging（proposed，人审兜底）。"""
+    from ..memory.l3_events import extract_canon_events
+
+    proposals = extract_canon_events(conn, gateway, chapter, draft_text, tier=cfg.memory.l3_tier)
+    if proposals:
+        _proposals_to_candidates(proposals, chapter, conn)
+
+
+def _is_volume_end(conn: sqlite3.Connection, chapter: int) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM volumes WHERE end_chapter=? LIMIT 1", (chapter,)
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _load_chapter_text(conn: sqlite3.Connection, chapter: int) -> Optional[str]:
+    """从 draft_index 最新修订的 L0 文件读回该章正文（读不到返回 None）。"""
+    from pathlib import Path
+
+    try:
+        row = conn.execute(
+            "SELECT file_path FROM draft_index WHERE chapter=?"
+            " ORDER BY revision_round DESC LIMIT 1",
+            (chapter,),
+        ).fetchone()
+        if not row or not row["file_path"]:
+            return None
+        return Path(row["file_path"]).read_text(encoding="utf-8")
+    except Exception:
+        return None
 
 
 def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, draft_text: str) -> None:

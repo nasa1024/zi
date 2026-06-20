@@ -14,6 +14,7 @@ from ..contracts import (
     BibleChangeProposal,
     OptimisticLockError,
     StateTransition,
+    normalize_bible_change_proposal,
 )
 from ..ids import new_id
 from ..world.projection import ProjectionError, apply_state_transition, resolve_entity_id
@@ -194,7 +195,9 @@ def commit_canon(cand, conn: sqlite3.Connection, *, policy_mode: str, actor: str
     from ..world.projection import reproject_affected  # avoid circular at module level
 
     with conn:
-        prop = BibleChangeProposal.model_validate_json(cand.proposal_json)
+        prop = normalize_bible_change_proposal(
+            BibleChangeProposal.model_validate_json(cand.proposal_json)
+        )
         reason = f"{prop.op}:{prop.fact_type}"
         entity_for_reproject = None
         fact_id: str = ""

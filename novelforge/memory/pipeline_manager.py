@@ -1,9 +1,13 @@
-"""PipelineManager：L1/L2/L3 记忆管线触发器（§06.2）。
+"""PipelineManager：L1/L2/L3 记忆管线触发器（§06.2，历史最小实现）。
 
-MVP1 同步实现，L2/L3 为存根（预留接口）。
+⚠️ 现状：本模块的 L2/L3 为早期存根，且未被 orchestrator 使用。真实的
+L2 场景聚合 / L3 事件驱动 canon 提案 / 向量召回已在 memory/l2_aggregate.py、
+memory/l3_events.py、memory/recall.py 实现并接入 orchestrator settle 阶段
+（见《docs/NovelForge/20-记忆管线L2L3与向量召回-实现说明》）。本文件保留以兼容历史引用。
+
 L1：每章提取实体+关键词，写 fact_candidates。
-L2：卷边界或每 3-5 章摘要（存根）。
-L3：事件驱动（world_rule/new_entity/foreshadowing）（存根）。
+L2：卷边界或每 3-5 章摘要（存根 → 见 l2_aggregate.aggregate_chapter_scenes）。
+L3：事件驱动（存根 → 见 l3_events.extract_canon_events）。
 """
 from __future__ import annotations
 
@@ -103,19 +107,25 @@ class PipelineManager:
             ).fetchone()
             if exists:
                 continue
-            proposal = json.dumps({
+            proposal_obj = {
                 "op": "add",
-                "fact_type": "appearance",
+                "fact_type": "misc",
                 "entity": eid,
-                "new": {"subject": eid, "predicate": "appears_in", "object": f"chapter_{chapter}"},
+                "new": {
+                    "subject": eid,
+                    "predicate": "appears_in",
+                    "object": f"chapter_{chapter}",
+                    "canon_kind": "appearance",
+                },
                 "valid_from_chapter": chapter,
-            }, ensure_ascii=False)
+            }
+            proposal = json.dumps(proposal_obj, ensure_ascii=False)
             try:
                 self._conn.execute(
                     "INSERT INTO fact_candidates"
                     "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
                     " VALUES(?,?,?,?,?,?,?,?)",
-                    (new_id("cand"), "add", eid, "appearance", proposal, "proposed", "low", chapter),
+                    (new_id("cand"), "add", eid, "misc", proposal, "proposed", "low", chapter),
                 )
                 added += 1
             except Exception:

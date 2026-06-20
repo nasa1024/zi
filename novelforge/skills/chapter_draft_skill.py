@@ -50,7 +50,7 @@ _SYSTEM = """\
 [
   {
     "op": "add",
-    "fact_type": "power_rank|knowledge|item|numeric|timeline|appearance|world_rule",
+    "fact_type": "power_system|knowledge|item|numeric|event|character_trait|world_rule|misc",
     "entity": "实体名或ID",
     "new": {
       "subject": "...", "predicate": "...", "object": "...",
@@ -210,6 +210,9 @@ def _try_parse_proposals(raw: str, chapter: int) -> list[dict]:
 
 
 def _normalize_proposal(p: dict, chapter: int) -> dict:
+    from ..contracts import normalize_proposal_fact_type
+
+    p = normalize_proposal_fact_type(p)
     p.setdefault("valid_from_chapter", chapter)
     p.setdefault("op", "add")
     p.setdefault("new", {})

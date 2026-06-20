@@ -21,11 +21,35 @@ class ErrorResponse(BaseModel):
 
 # ── Projects ──────────────────────────────────────────────────────────────────
 
+# genre 单一事实源：前端 GENRE_OPTIONS（CreateProjectModal.tsx）的 value 集合必须与此一致。
+# default 是通用兜底项：手填路径允许，但不作为「生成」候选的题材枚举。
+GENRE_VALUES: tuple[str, ...] = (
+    "xuanhuan", "xianxia", "dushi", "kehuan", "lishi",
+    "wuxia", "yanqing", "xuanyi", "default",
+)
+GENRE_GENERATABLE: tuple[str, ...] = tuple(g for g in GENRE_VALUES if g != "default")
+
+
+class PlotSetting(BaseModel):
+    """单份情节设定（手填或生成的候选；字段均可空便于局部填充）。"""
+    genre: str = "xuanhuan"
+    premise: Optional[str] = None              # 一句话设定
+    world_setting: Optional[str] = None        # 世界观
+    power_system: Optional[str] = None         # 力量体系名
+    power_ranks: list[str] = Field(default_factory=list)   # 有序阶梯（弱→强）
+    protagonist: Optional[str] = None
+    main_conflict: Optional[str] = None
+    opening_hook: Optional[str] = None
+    target_audience: Optional[str] = None
+    tone: Optional[str] = None
+
+
 class ProjectCreateRequest(BaseModel):
     name: str
     genre: str = "xuanhuan"
     power_system: Optional[str] = None
     config_overrides: Optional[dict] = None
+    setting: Optional[PlotSetting] = None      # 新增：最终确认的整套情节设定
 
 
 class ProjectResponse(BaseModel):
@@ -37,6 +61,31 @@ class ProjectResponse(BaseModel):
     chapter_count: int = 0
     canon_fact_count: int = 0
     archived: bool = False
+    power_system: Optional[str] = None         # 回显
+    premise: Optional[str] = None              # 回显
+
+
+class SettingSuggestRequest(BaseModel):
+    """生成 N 个情节设定候选（建项目前，无 project DB）。
+
+    - locked + locked_fields：锁定字段作为条件生成前提。
+    - field 非空 = 只对单字段 reroll（服务端强制 n=1）。
+    - avoid = 针对当前生成目标的历史值列表（去重）。
+    """
+    name: Optional[str] = None
+    genre: Optional[str] = None
+    hints: Optional[str] = None                # 用户脑洞 / Braindump
+    n: int = Field(default=3, ge=1, le=5)      # 越界由 Pydantic 拒绝（422）
+    locked: Optional[PlotSetting] = None       # 已锁定字段值
+    locked_fields: list[str] = Field(default_factory=list)  # 显式锁定的 key 集合
+    field: Optional[str] = None                # 单字段 reroll 目标（如 'power_system'）
+    avoid: list[str] = Field(default_factory=list)  # 该生成目标的历史值，避免重复
+
+
+class SettingSuggestResponse(BaseModel):
+    candidates: list[PlotSetting]
+    degraded: bool = False                     # 无 key / 解析失败 → 兜底示例，前端明示
+    tier_used: Optional[str] = None            # generate_validated 实际档位
 
 
 # ── Capture ───────────────────────────────────────────────────────────────────

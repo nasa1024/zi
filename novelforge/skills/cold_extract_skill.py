@@ -43,7 +43,7 @@ _SYSTEM = """\
 
 ## 任务
 阅读给定的章节正文，提取出其中涉及的以下类型的事实变化：
-- 人物境界突破、能力获得（fact_type: power_system / power_rank）
+- 人物境界突破、能力获得（fact_type: power_system）
 - 人物性格/外貌/身份变化（fact_type: character_trait）
 - 人物关系建立/破裂（fact_type: relationship）
 - 道具获得/失去（fact_type: item）
@@ -61,7 +61,7 @@ _SYSTEM = """\
 [
   {
     "op": "add",
-    "fact_type": "power_rank",
+    "fact_type": "power_system",
     "entity": "人物名",
     "new": {
       "subject": "人物名",
@@ -138,10 +138,12 @@ def _parse_proposals(text: str, chapter_no: int) -> list[dict]:
     try:
         data = json.loads(raw)
         if isinstance(data, list):
+            from ..contracts import normalize_proposal_fact_type
             for p in data:
                 p.setdefault("op", "add")
                 p.setdefault("valid_from_chapter", chapter_no)
                 p.setdefault("risk_tier", "low")
+                p.update(normalize_proposal_fact_type(p))
             return data
     except (json.JSONDecodeError, TypeError):
         pass
