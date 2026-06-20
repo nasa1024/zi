@@ -1,6 +1,7 @@
 """NovelForge 运行时配置（全量可序列化 dataclass，无 ORM 依赖）。"""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -45,6 +46,32 @@ class RecallConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """§06 异步记忆管线 L2/L3 + 向量召回。默认全关 → 零额外 LLM/计算，旧行为不变。
+
+    - L2 场景聚合：把每章正文切成场景块、各生成短摘要写 l2_scenes（向量召回的语料）。
+    - L3 事件驱动：确定性扫 canon 级信号（世界规则/新实体/伏笔/约束）→ LLM 归一化
+      为 BibleChangeProposal 进 staging（proposed，走人审兜底，绝不直接 commit）。
+    - 向量召回：embed l2_scenes 场景摘要，召回时与 BM25 做 RRF 融合（§06.4.3）。
+      实际开关复用 RecallConfig.enable_vector；本类只放调参。
+    """
+    enable_l2: bool = False              # L2 场景聚合（写 l2_scenes）
+    l2_every_n_chapters: int = 4         # L2 触发间隔（§06.2.2 每 3-5 章；卷边界也触发）
+    l2_max_scenes_per_chapter: int = 6   # 单章最多切几个场景块
+    l2_tier: str = "fast"                # 场景摘要 LLM 档位
+    enable_l3: bool = False              # L3 事件驱动 canon 提案
+    l3_tier: str = "mid"                 # canon 归一化 LLM 档位
+    vector_top_k: int = 8                # 向量召回返回的相似场景数
+    rrf_k: int = 60                      # §06.4.3 RRF 融合常数 k=60
+    embedding_dim: int = 256             # HashEmbedder 向量维度（hash provider 专用）
+    # embedding 后端可插拔：默认离线 hash；可切第三方 /v1/embeddings（OpenAI/DeepSeek/vLLM…）
+    embedding_provider: str = "hash"     # "hash" | "openai"
+    embedding_model: str = "text-embedding-3-small"   # openai provider 的模型 id（维度由模型决定）
+    embedding_base_url: Optional[str] = None          # openai 兼容端点（None=官方）
+    embedding_api_key: Optional[str] = None           # 不填则回退环境变量
+
+
+@dataclass
 class DeduplicationConfig:
     bm25_gap_min: float = 2.0            # FTS BM25 分数差最小值（越大越宽松）
     enable_llm_arbiter: bool = True      # 是否启用 LLM 仲裁模糊 case
@@ -82,6 +109,7 @@ class NovelForgeConfig:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     recall: RecallConfig = field(default_factory=RecallConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     dedup: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
@@ -90,3 +118,79 @@ class NovelForgeConfig:
     patch_revise: bool = True            # M7: revise/润色先尝试锚点补丁（局部修改），失败回退全文重写
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）
     draft_target_chars: int = 3000       # 目标字数（约 3000 汉字/章）
+
+
+# ── 运行期环境变量覆盖（集中入口；pipeline / autopilot 共用）──────────────────
+#
+# 系统无配置文件加载器，运行期配置 = dataclass 默认 + 环境变量 + 每请求 API 字段。
+# 下列 helper 把"记忆管线 / 向量召回 / 第三方 embedding"相关 env 注入 cfg，
+# 默认全部不设 → 行为不变。LLM provider/key 的 env 仍在各 API 站点单独处理。
+
+def _env_bool(name: str) -> Optional[bool]:
+    v = os.environ.get(name)
+    if v is None:
+        return None
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str) -> Optional[int]:
+    v = os.environ.get(name)
+    if v is None:
+        return None
+    try:
+        return int(v.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def apply_embedding_env(cfg: "NovelForgeConfig") -> None:
+    """第三方 embedding 后端 env → cfg.memory（不设 PROVIDER 则保持默认离线 hash）。"""
+    provider = os.environ.get("NOVELFORGE_EMBEDDING_PROVIDER")
+    if not provider:
+        return
+    cfg.memory.embedding_provider = provider
+    model = os.environ.get("NOVELFORGE_EMBEDDING_MODEL")
+    if model:
+        cfg.memory.embedding_model = model
+    cfg.memory.embedding_base_url = (
+        os.environ.get("NOVELFORGE_EMBEDDING_BASE_URL") or cfg.provider.base_url
+    )
+    cfg.memory.embedding_api_key = (
+        os.environ.get("NOVELFORGE_EMBEDDING_API_KEY")
+        or os.environ.get("NOVELFORGE_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+    )
+
+
+def apply_memory_env(cfg: "NovelForgeConfig") -> None:
+    """L2/L3/向量召回开关 + 调参 env → cfg（不设则保持默认全关）。"""
+    b = _env_bool("NOVELFORGE_ENABLE_L2")
+    if b is not None:
+        cfg.memory.enable_l2 = b
+    b = _env_bool("NOVELFORGE_ENABLE_L3")
+    if b is not None:
+        cfg.memory.enable_l3 = b
+    b = _env_bool("NOVELFORGE_ENABLE_VECTOR")
+    if b is not None:
+        cfg.recall.enable_vector = b
+    i = _env_int("NOVELFORGE_L2_EVERY_N")
+    if i:
+        cfg.memory.l2_every_n_chapters = i
+    i = _env_int("NOVELFORGE_L2_MAX_SCENES")
+    if i:
+        cfg.memory.l2_max_scenes_per_chapter = i
+    i = _env_int("NOVELFORGE_VECTOR_TOP_K")
+    if i:
+        cfg.memory.vector_top_k = i
+    i = _env_int("NOVELFORGE_RRF_K")
+    if i:
+        cfg.memory.rrf_k = i
+    i = _env_int("NOVELFORGE_EMBEDDING_DIM")
+    if i:
+        cfg.memory.embedding_dim = i
+
+
+def apply_runtime_env(cfg: "NovelForgeConfig") -> None:
+    """集中应用记忆/向量/embedding 的 env 覆盖。pipeline 与 autopilot 路径共用。"""
+    apply_embedding_env(cfg)
+    apply_memory_env(cfg)

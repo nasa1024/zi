@@ -141,6 +141,8 @@
 
 **目标**：在治理闭环稳定后，才引入**最不稳定**的概率性能力（去重、冲突检测、embedding 相似桥段），并把"追更力"从经验判断升级为可量化的**网文工艺层**（一致性与工艺并行，硬原则 6）。
 
+> **实现状态（2026-06）**：近邻去重、冲突检测、PacingController/craft_check/voice_profile 均已落地（见各对应实现）。**记忆管线 L2 场景聚合、L3 事件驱动 canon 提案、embedding/RRF 向量召回（`scene_vec`）现已实现并接入 orchestrator settle 阶段，默认关闭（`MemoryConfig.enable_l2/enable_l3` + `RecallConfig.enable_vector`）**——详见《20-记忆管线L2L3与向量召回-实现说明》。embedding 用离线确定性 HashEmbedder（无新依赖、可换本地模型 bge-m3），向量存储用 v15 的 `scene_vec` 表 + 暴力余弦（sqlite-vec 作未来快路替换）。
+
 #### 9.3.1 范围（IN）
 
 1. **近邻去重（候选入 staging 前的合并）**

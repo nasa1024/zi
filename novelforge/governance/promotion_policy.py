@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .gate import Route
-from ..contracts import FactCandidate
+from ..contracts import FactCandidate, canonical_fact_type
 
 
 @dataclass
@@ -40,19 +40,20 @@ def _requires_human(prop: dict, cand: FactCandidate, config) -> bool:
     rh: list[str] = getattr(config.governance, "require_human_for", [])
     if not rh:
         return False
+    fact_type = canonical_fact_type(prop.get("fact_type") or cand.fact_type)
     for rule in rh:
         if rule == "retcon" and prop.get("op") == "retcon":
             return True
-        if rule == "power_system" and prop.get("fact_type") in ("power_system", "power_rank"):
+        if rule == "power_system" and fact_type == "power_system":
             return True
         if rule == "knowledge_edge_change":
             facet = (prop.get("new") or {}).get("facet") or ""
-            if prop.get("fact_type") == "knowledge" or facet == "knowledge":
+            if fact_type == "knowledge" or facet == "knowledge":
                 return True
         if rule == "high" and cand.risk_tier == "high":
             return True
         # 允许直接用 fact_type 名
-        if rule == prop.get("fact_type"):
+        if rule == fact_type:
             return True
     return False
 
@@ -97,8 +98,8 @@ def _is_low_risk_soft(cand: FactCandidate, prop: dict, config) -> bool:
     tier_order = {"low": 0, "medium": 1, "high": 2}
     if tier_order.get(cand.risk_tier, 99) > tier_order.get(max_risk, 0):
         return False
-    sensitive = {"knowledge", "power_system", "power_rank"}
-    if prop.get("fact_type") in sensitive:
+    sensitive = {"knowledge", "power_system"}
+    if canonical_fact_type(prop.get("fact_type") or cand.fact_type) in sensitive:
         return False
     return True
 

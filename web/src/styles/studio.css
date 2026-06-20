@@ -927,6 +927,112 @@
   box-shadow: 4px 4px 0 var(--ink);
 }
 .nf-btn-sm:disabled { opacity: 0.5; cursor: default; }
+.nf-btn-sm.on { background: var(--pink); }
+
+/* ── 情节设定：模式切换 + 候选卡片 ───────────────────────────────────────── */
+.setup-mode-seg {
+  display: flex;
+  gap: 0;
+  border: var(--bd);
+  border-radius: 999px;
+  overflow: hidden;
+  width: fit-content;
+}
+.setup-mode-seg button {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  padding: 0.5em 1.1em;
+  background: var(--cream);
+  border: none;
+  cursor: pointer;
+  color: var(--ink);
+}
+.setup-mode-seg button + button { border-left: 2px solid var(--ink); }
+.setup-mode-seg button.active { background: var(--lime); font-weight: 700; }
+.setup-mode-seg button:disabled { opacity: 0.5; cursor: default; }
+
+.setting-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.setting-card {
+  text-align: left;
+  background: var(--cream-2);
+  border: 2px solid var(--ink);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.setting-card:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow); }
+.setting-card.selected { background: var(--lime); box-shadow: var(--shadow); }
+.sc-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.sc-row { display: flex; gap: 8px; font-size: 0.82rem; line-height: 1.45; }
+.sc-k {
+  flex: 0 0 5.5em;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  padding-top: 1px;
+}
+.sc-v { flex: 1 1 auto; color: var(--ink); min-width: 0; }
+
+.setting-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.setting-field-tools { display: inline-flex; gap: 6px; }
+
+.setting-optional {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--ink-soft);
+  margin-left: 6px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* 选中候选后的折叠条（替代重复的候选卡片） */
+.setting-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--lime);
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+/* 创建按钮区：主按钮 + 禁用原因提示 */
+.nf-actions-main { display: flex; gap: 12px; flex-wrap: wrap; }
+.nf-actions-hint {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
 
 .nf-empty {
   font-family: var(--font-mono);

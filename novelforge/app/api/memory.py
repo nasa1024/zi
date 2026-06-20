@@ -16,6 +16,7 @@ from ...ids import new_id
 from ...memory.recall import gather_hard_context
 from ...memory.bible_render import render_bible
 from ...world.replay import get_world_state
+from ...contracts import normalize_proposal_fact_type
 
 router = APIRouter(tags=["memory"])
 
@@ -34,14 +35,15 @@ def capture(
         candidate_ids: list[str] = []
         for p in req.proposals:
             cid = new_id("cand")
-            prop_json = json.dumps(p.model_dump(), ensure_ascii=False)
+            prop = normalize_proposal_fact_type(p.model_dump())
+            prop_json = json.dumps(prop, ensure_ascii=False)
             eid = _resolve_entity(p.entity, conn) if p.entity else None
             conn.execute(
                 "INSERT OR IGNORE INTO fact_candidates"
                 "(candidate_id, op, entity_id, fact_type, proposal_json,"
                 " status, risk_tier, source_chapter)"
                 " VALUES(?,?,?,?,?,?,?,?)",
-                (cid, p.op, eid, p.fact_type, prop_json,
+                (cid, p.op, eid, prop["fact_type"], prop_json,
                  "proposed", p.risk_tier or "low", req.source_chapter),
             )
             candidate_ids.append(cid)

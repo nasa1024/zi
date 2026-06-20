@@ -28,6 +28,8 @@ import type {
   SearchFactsResponse,
   SeedRequest,
   SeedResponse,
+  SettingSuggestRequest,
+  SettingSuggestResponse,
   SSEPipelineEvent,
   StateQueryRequest,
   VolumeInfo,
@@ -139,6 +141,11 @@ export const api = {
 
   createProject(req: ProjectCreateRequest): Promise<ProjectResponse> {
     return request<ProjectResponse>('POST', '/v1/projects', req);
+  },
+
+  // 生成情节设定候选（建项目前；无 key 或解析失败时返回示例数据 degraded=true）。
+  suggestSetting(req: SettingSuggestRequest): Promise<SettingSuggestResponse> {
+    return request<SettingSuggestResponse>('POST', '/v1/projects/setup/suggest', req);
   },
 
   getProject(id: string): Promise<ProjectResponse> {

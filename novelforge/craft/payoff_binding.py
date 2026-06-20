@@ -60,7 +60,7 @@ _PAYOFF_KEYWORDS: dict[str, list[str]] = {
 }
 
 _PROPOSAL_FACETS: dict[str, list[str]] = {
-    "power_up":  ["power", "power_rank"],
+    "power_up":  ["power", "power_system", "power_rank"],
     "item_gain": ["item"],
     "reveal":    ["knowledge"],
     "face_slap": [],   # 靠伏笔消费，暂不做程序检查

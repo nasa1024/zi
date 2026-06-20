@@ -52,7 +52,10 @@ class ProjectRegistry:
             encoding="utf-8",
         )
 
-    def create(self, name: str, genre: str = "xuanhuan") -> ProjectMeta:
+    def create(
+        self, name: str, genre: str = "xuanhuan",
+        setting: Optional[dict] = None,
+    ) -> ProjectMeta:
         pid = new_id("prj")
         db_dir = _DATA_ROOT / pid
         db_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +67,8 @@ class ProjectRegistry:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         init_db_from_conn(conn)
+        if setting:
+            self._write_setting(conn, setting)   # 必须在 close 之前
         conn.close()
 
         pm = ProjectMeta(
@@ -73,6 +78,42 @@ class ProjectRegistry:
         self._projects[pid] = pm
         self._save()
         return pm
+
+    # 散件设定字段 → meta_kv（genre 单一真相源在 ProjectMeta，不在此双写）
+    _SETTING_META_KEYS = (
+        "premise", "world_setting", "power_system", "protagonist",
+        "main_conflict", "opening_hook", "target_audience", "tone",
+    )
+
+    @staticmethod
+    def _write_setting(conn: sqlite3.Connection, setting: dict) -> None:
+        """整套情节设定落库：文本散件 → meta_kv；有序力量阶梯 → power_ranks 表。"""
+        from ..db.connection import set_meta
+
+        for k in ProjectRegistry._SETTING_META_KEYS:
+            v = setting.get(k)
+            if v:
+                set_meta(conn, k, str(v))
+
+        # 力量阶梯：弱→强写入 power_ranks 表（项目创建期的阶梯注册，非 canon 治理）。
+        # rank_order 从 1 起按列表顺序递增；越大越强（与 validators/power.py 约定一致）。
+        ranks = setting.get("power_ranks") or []
+        system_name = (setting.get("power_system") or "").strip()
+        if ranks and system_name:
+            seen: set[str] = set()
+            order = 0
+            for rank_name in ranks:
+                rn = str(rank_name).strip()
+                if not rn or rn in seen:   # 跳过空 / 重复，满足 UNIQUE(system_name,rank_name)
+                    continue
+                seen.add(rn)
+                order += 1
+                conn.execute(
+                    "INSERT INTO power_ranks(id, system_name, rank_name, rank_order)"
+                    " VALUES(?,?,?,?)",
+                    (new_id("prk"), system_name, rn, order),
+                )
+        conn.commit()
 
     def get(self, project_id: str) -> Optional[ProjectMeta]:
         return self._projects.get(project_id)

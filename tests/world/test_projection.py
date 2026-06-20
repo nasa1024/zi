@@ -112,6 +112,38 @@ class TestCommitPowerLandsInLog:
         ws4 = get_world_state(4, conn)
         assert ws4.power_history(eid) == []
 
+    def test_commit_legacy_power_rank_alias_is_schema_legal(self, conn):
+        """旧候选 fact_type=power_rank 也应在 commit 前规范化为 power_system。"""
+        eid = _seed_entity(conn)
+        _seed_rank(conn, order=30)
+        prop = BibleChangeProposal(
+            op="add", fact_type="power_rank", entity=eid,
+            new={"object": "金丹·初期", "system_name": "练气体系",
+                 "rank_name": "金丹·初期", "change_type": "breakthrough"},
+            valid_from_chapter=5,
+        )
+        cid = new_id("cand")
+        conn.execute(
+            "INSERT INTO fact_candidates(candidate_id,entity_id,fact_type,proposal_json,op,status,risk_tier,source_chapter)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (cid, eid, "power_rank", prop.model_dump_json(), "add", "proposed", "low", 5),
+        )
+        conn.commit()
+        cand = FactCandidate(
+            candidate_id=cid, entity_id=eid, fact_type="power_rank",
+            proposal_json=prop.model_dump_json(), status="proposed", risk_tier="low",
+            source_chapter=5,
+        )
+
+        fact_id = commit_canon(cand, conn, policy_mode="human_gate", actor="human:test")
+
+        fact = conn.execute("SELECT fact_type, detail_json FROM facts WHERE id=?", (fact_id,)).fetchone()
+        assert fact["fact_type"] == "power_system"
+        assert json.loads(fact["detail_json"])["canon_kind"] == "power_rank"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM character_power_log WHERE source_fact_id=?", (fact_id,)
+        ).fetchone()[0] == 1
+
     def test_replay_power_filters_retconned_without_reproject(self, conn):
         """手工把 fact 置 retconned 但不跑级联 → replay 仍不读入（lazy 兜底）。"""
         eid = _seed_entity(conn)
@@ -258,6 +290,32 @@ class TestPureLoreFact:
 
         # no *_log rows written (world_rule is narrative, not projected)
         assert conn.execute("SELECT COUNT(*) FROM character_power_log").fetchone()[0] == 0
+
+    def test_commit_legacy_appearance_alias_becomes_misc(self, conn):
+        """appearance 不在 facts.fact_type 白名单内，应落为 misc 叙事 fact。"""
+        prop = BibleChangeProposal(
+            op="add", fact_type="appearance", entity=None,
+            new={"subject": "主角", "predicate": "appears_in", "object": "chapter_1"},
+            valid_from_chapter=1,
+        )
+        cid = new_id("cand")
+        conn.execute(
+            "INSERT INTO fact_candidates(candidate_id,fact_type,proposal_json,op,status,risk_tier,source_chapter)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (cid, "appearance", prop.model_dump_json(), "add", "proposed", "low", 1),
+        )
+        conn.commit()
+        cand = FactCandidate(
+            candidate_id=cid, entity_id=None, fact_type="appearance",
+            proposal_json=prop.model_dump_json(), status="proposed", risk_tier="low",
+            source_chapter=1,
+        )
+
+        fact_id = commit_canon(cand, conn, policy_mode="human_gate", actor="human:test")
+
+        fact = conn.execute("SELECT fact_type, detail_json FROM facts WHERE id=?", (fact_id,)).fetchone()
+        assert fact["fact_type"] == "misc"
+        assert json.loads(fact["detail_json"])["canon_kind"] == "appearance"
         assert conn.execute("SELECT COUNT(*) FROM knowledge_edges").fetchone()[0] == 0
 
 

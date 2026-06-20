@@ -1,6 +1,7 @@
 -- NovelForge novel.db schema (MVP0 subset of design §02).
 -- Single source of truth = SQLite. markdown is read-only render output.
--- scene_vec (sqlite-vec / vec0) is intentionally NOT created here (MVP2; needs extension).
+-- scene_vec uses a pure-SQLite fallback table in this baseline; sqlite-vec/vec0 can
+-- replace its internals later without changing the caller contract.
 -- Build order follows §2.10 (referenced tables first). FK enforcement is per-row at DML time,
 -- so forward references in CREATE are fine; PRAGMAs are set by connection.py (not here).
 
@@ -480,6 +481,19 @@ CREATE TABLE IF NOT EXISTS l2_scenes (
     UNIQUE(chapter, scene_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_l2_chapter ON l2_scenes(chapter, scene_seq);
+
+-- scene_vec：L2 场景摘要的向量召回回退存储（v15，§06.4.3）。
+-- sqlite-vec(vec0) 为可选快路；未装时用本表 + 暴力余弦。embedding 以 JSON 数组存。
+CREATE TABLE IF NOT EXISTS scene_vec (
+    scene_id    TEXT PRIMARY KEY,           -- = l2_scenes.id
+    chapter     INTEGER NOT NULL,
+    dim         INTEGER NOT NULL,
+    vec_json    TEXT NOT NULL,
+    model       TEXT,
+    version     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scene_vec_chapter ON scene_vec(chapter);
 
 -- 9) governance: staging + audit + review queue (tables created now; flow=MVP1)
 CREATE TABLE IF NOT EXISTS fact_candidates (

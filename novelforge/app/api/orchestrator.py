@@ -54,7 +54,15 @@ def _make_cfg(project_id: str, req: PipelineRunRequest, registry: ProjectRegistr
     if api_key:
         cfg.provider.api_key = api_key
         cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+    from ...config import apply_runtime_env
+    apply_runtime_env(cfg)   # 第三方 embedding + L2/L3/向量开关（env 驱动，默认全关）
     return cfg
+
+
+def _apply_embedding_env(cfg: NovelForgeConfig) -> None:
+    """兼容入口：委托集中式 config.apply_embedding_env。"""
+    from ...config import apply_embedding_env
+    apply_embedding_env(cfg)
 
 
 @router.post("/{project_id}/pipeline/run", response_model=PipelineRunResponse)

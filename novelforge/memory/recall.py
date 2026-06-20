@@ -26,6 +26,7 @@ class RecallPack:
     chapter_summaries: list[dict] = field(default_factory=list)  # M2-②: 最近 N 章前情摘要（时间正序）
     volume_summary: str = ""                                     # M2-②: 本卷至今滚动摘要
     global_synopsis: str = ""                                    # M2-②: 全书至此梗概（meta_kv）
+    similar_scenes: list[dict] = field(default_factory=list)     # §06.4.5 相似桥段（向量+词法 RRF，可选）
 
     def to_stable_context_str(self) -> str:
         """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
@@ -74,6 +75,9 @@ class RecallPack:
             parts.append("## 关键词召回段落\n" + _fmt_rows(self.keyword_hits, ["chapter", "snippet"]))
         if self.recent_beats:
             parts.append("## 近期 beats\n" + _fmt_rows(self.recent_beats, ["chapter", "beat_type", "summary"]))
+        if self.similar_scenes:
+            parts.append("## 相似历史桥段（参照 / 避免自我重复）\n"
+                         + _fmt_rows(self.similar_scenes, ["chapter", "summary"]))
         return "\n\n".join(parts)
 
     def to_context_str(self) -> str:
@@ -106,8 +110,17 @@ def gather_hard_context(
     context_window: int = 5,
     summary_window: int = 5,
     enable_summaries: bool = True,
+    embedder=None,
+    enable_vector: bool = False,
+    scene_query: Optional[str] = None,
+    vector_top_k: int = 8,
+    rrf_k: int = 60,
 ) -> RecallPack:
-    """结构化 SQL 召回（§06.3 硬上下文）。"""
+    """结构化 SQL 召回（§06.3 硬上下文）。
+
+    向量召回（§06.4.3）默认关：仅当 enable_vector 且传入 embedder 且 scene_query
+    非空时，才检索相似 L2 场景（向量 + 词法 RRF 融合），写入 pack.similar_scenes。
+    """
     pack = RecallPack()
 
     if entity_ids:
@@ -131,7 +144,80 @@ def gather_hard_context(
     if keyword_query:
         pack.keyword_hits = _fts_search(keyword_query, max_keywords, conn)
 
+    if enable_vector and embedder is not None and scene_query:
+        try:
+            pack.similar_scenes = search_similar_scenes(
+                conn, embedder, scene_query, as_of,
+                top_k=vector_top_k, rrf_k=rrf_k)
+        except Exception:
+            pack.similar_scenes = []   # 向量为增强、非主路：失败不影响硬召回
+
     return pack
+
+
+# ── 向量召回：相似场景（§06.4.3）──────────────────────────────────────────────
+
+def rrf_fuse(rank_lists: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
+    """客户端 Reciprocal Rank Fusion：只用排名（1-based），不归一化原始分（§06.4.3）。"""
+    scores: dict[str, float] = {}
+    for ranked in rank_lists:
+        for rank, doc_id in enumerate(ranked, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+def _lexical_rank_scenes(conn, query: str, as_of: int, limit: int) -> list[str]:
+    """词法排名：按 query 分词在场景 summary+原文中的命中数排序（BM25 的轻量替身）。"""
+    from .embedding import _tokens
+
+    q_tokens = set(_tokens(query))
+    if not q_tokens:
+        return []
+    rows = conn.execute(
+        "SELECT id, summary, scene_text FROM l2_scenes WHERE chapter<=?",
+        (as_of,),
+    ).fetchall()
+    scored: list[tuple[str, int]] = []
+    for r in rows:
+        hay = (r["summary"] or "") + " " + (r["scene_text"] or "")
+        hits = sum(1 for t in q_tokens if t in hay)
+        if hits:
+            scored.append((r["id"], hits))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [sid for sid, _ in scored[:limit]]
+
+
+def search_similar_scenes(
+    conn, embedder, query: str, as_of: int, *, top_k: int = 8, rrf_k: int = 60,
+) -> list[dict]:
+    """相似 L2 场景召回：向量路 + 词法路 RRF 融合（§06.4.3）。
+
+    Returns [{scene_id, chapter, summary, score}]，按融合分降序，最多 top_k。
+    """
+    from .vector_store import SceneVectorStore
+
+    pool = max(top_k * 2, top_k)
+    vec_ranked = [sid for sid, _ in SceneVectorStore(conn, embedder).search(query, as_of, pool)]
+    lex_ranked = _lexical_rank_scenes(conn, query, as_of, pool)
+    fused = rrf_fuse([vec_ranked, lex_ranked], k=rrf_k)[:top_k]
+    if not fused:
+        return []
+
+    ids = [sid for sid, _ in fused]
+    ph = ",".join("?" * len(ids))
+    meta = {
+        r["id"]: r for r in conn.execute(
+            f"SELECT id, chapter, summary FROM l2_scenes WHERE id IN ({ph})", tuple(ids)
+        ).fetchall()
+    }
+    out: list[dict] = []
+    for sid, score in fused:
+        m = meta.get(sid)
+        if m is None:
+            continue
+        out.append({"scene_id": sid, "chapter": m["chapter"],
+                    "summary": m["summary"] or "", "score": round(score, 6)})
+    return out
 
 
 # ── 私有查询 ──────────────────────────────────────────────────────────────────
