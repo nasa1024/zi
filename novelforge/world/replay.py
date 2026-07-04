@@ -159,6 +159,55 @@ def replay_gimmick(
     return out
 
 
+def branch_world_snapshot(
+    conn: sqlite3.Connection, as_of_chapter: int, branch_id: Optional[str],
+) -> dict:
+    """POST-v15 P1#3：分支沙盒投影的 JSON 可序列化快照。
+
+    branch_id=None 时即主线快照（与分支视图同构，便于前端 diff）。
+    entity id 归一为 canonical_name；power 的 rank_order 归一为 rank_name。
+    """
+    def _name(eid) -> str:
+        if not eid:
+            return ""
+        row = conn.execute(
+            "SELECT canonical_name FROM entities WHERE id=?", (eid,)).fetchone()
+        return row["canonical_name"] if row else str(eid)
+
+    rank_names = {
+        r["rank_order"]: r["rank_name"]
+        for r in conn.execute(
+            "SELECT rank_order, rank_name FROM power_ranks ORDER BY rank_order")
+    }
+
+    power = {
+        _name(eid): rank_names.get(order, str(order))
+        for eid, order in replay_power(conn, as_of_chapter, branch_id).items()
+    }
+    knowledge = [
+        {"knower": _name(k), "secret_key": sk, "state": st}
+        for k, secrets in replay_knowledge(conn, as_of_chapter, branch_id).items()
+        for sk, st in secrets.items()
+    ]
+    items = [
+        {"owner": _name(owner), "item": _name(item), "quantity": qty}
+        for (owner, item), qty in replay_items(conn, as_of_chapter, branch_id).items()
+        if qty > 0
+    ]
+    numeric = {
+        f"{_name(eid)}/{key}": val
+        for (eid, key), val in replay_numeric(conn, as_of_chapter, branch_id).items()
+    }
+    return {
+        "as_of_chapter": as_of_chapter,
+        "branch_id": branch_id,
+        "power_ranks": power,
+        "knowledge_edges": knowledge,
+        "item_ownership": items,
+        "numeric_facts": numeric,
+    }
+
+
 def load_timeline(
     conn: sqlite3.Connection,
     N: int | None = None,

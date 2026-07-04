@@ -66,6 +66,7 @@ class _StartReq:
     auto_degrade_after_consecutive_issues: int
     budget_session_max_tokens: Optional[int] = None
     budget_session_max_usd: Optional[float] = None
+    pause_on_degrade: bool = True
     quality_check: bool = False
     n_candidates: int = 1
 
@@ -95,6 +96,7 @@ def autopilot_start(
         auto_degrade_after_consecutive_issues=req.auto_degrade_after_consecutive_issues,
         budget_session_max_tokens=req.budget_session_max_tokens,
         budget_session_max_usd=req.budget_session_max_usd,
+        pause_on_degrade=req.pause_on_degrade,
         quality_check=req.quality_check,
         n_candidates=req.n_candidates,
     )
@@ -262,8 +264,10 @@ def autopilot_resume(
         info = mgr.get_db_session_req(session_id, conn)
         if info is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
-        if info["status"] not in ("interrupted", "error", "circuit_broken"):
-            raise HTTPException(409, f"会话状态 {info['status']} 不可恢复")
+        # 内存中仍活着的会话以内存状态为准（DB 写穿与内存翻转之间存在窗口）
+        status_now = live.status if live is not None else info["status"]
+        if status_now not in ("interrupted", "error", "circuit_broken", "paused"):
+            raise HTTPException(409, f"会话状态 {status_now} 不可恢复")
 
         from ...app.chapter_suggest import next_chapter_no
         next_ch, _ = next_chapter_no(conn, project_id)
@@ -285,6 +289,7 @@ def autopilot_resume(
         auto_degrade_after_consecutive_issues=req.get("auto_degrade_after_consecutive_issues", 2),
         budget_session_max_tokens=req.get("budget_session_max_tokens"),
         budget_session_max_usd=req.get("budget_session_max_usd"),
+        pause_on_degrade=req.get("pause_on_degrade", True),
         quality_check=req.get("quality_check", False),
         n_candidates=req.get("n_candidates", 1),
     )
