@@ -26,6 +26,7 @@ from ..models import (
     ChapterCardModel, ChapterCardUpdateRequest, PlannedBeat,
     VolumeCreateRequest, VolumePlanRequest, VolumePlanResponse,
     VolumeResponse, VolumeUpdateRequest,
+    VolumeWizardRequest, VolumeWizardResponse,
 )
 
 router = APIRouter(tags=["volumes"])
@@ -134,6 +135,174 @@ def list_volumes(
         return [_volume_row_to_resp(r) for r in rows]
     finally:
         conn.close()
+
+
+# ── Setting → Volume 向导（POST-v15 P2#6）────────────────────────────────────
+# 注意：必须注册在 /volumes/{volume_no} 之前（wizard 不是 int，避免 422）。
+
+_WIZARD_SYSTEM = """\
+你是 NovelForge 的卷大纲策划。根据给定的整套情节设定（世界观/力量体系/主角/
+主线冲突/开篇钩子），为下一卷生成卷级大纲。只输出一个 JSON 对象：
+
+{
+  "title": "卷名（不含『第N卷』前缀）",
+  "synopsis": "本卷剧情概要，150-300字：起点局势、核心冲突推进、卷末落点与钩子",
+  "objective": "本卷可验证目标（一句话，如『李云探索秘境并立足外门』）",
+  "key_results": ["可判定的关键结果1（如『获得天道之眼』）", "关键结果2", "关键结果3"]
+}
+
+要求：synopsis 与设定的主线冲突、力量阶梯一致；objective/KR 必须可从剧情
+判定兑现与否。只输出 JSON，不要其他说明。"""
+
+
+def _load_plot_setting(conn) -> dict:
+    """读取建项目时写入 meta_kv 的整套情节设定散件。"""
+    from ...db.connection import get_meta
+    keys = ("premise", "world_setting", "power_system", "protagonist",
+            "main_conflict", "opening_hook", "target_audience", "tone")
+    setting = {k: get_meta(conn, k) for k in keys}
+    ranks = conn.execute(
+        "SELECT rank_name FROM power_ranks ORDER BY rank_order").fetchall()
+    setting["power_ranks"] = [r["rank_name"] for r in ranks]
+    return setting
+
+
+def _parse_wizard_json(text: str):
+    import json as _json
+    import re as _re
+    m = _re.search(r"\{.*\}", text, _re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = _json.loads(m.group(0))
+    except _json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not (data.get("title") and data.get("synopsis")):
+        return None
+    return data
+
+
+@router.post("/{project_id}/volumes/wizard")
+def volume_wizard(
+    project_id: str,
+    req: VolumeWizardRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+) -> VolumeWizardResponse:
+    """设定→卷大纲端到端向导：锁定的情节设定 → 建卷（大纲+OKR）→ 预填前几章细纲。"""
+    import json as _json
+    import os
+
+    from ...config import NovelForgeConfig
+    from ...control_plane.llm import factory as llm_factory
+    from ...control_plane.llm.provider import Message
+    from ...control_plane.llm.tiers import ModelTier
+    from ...craft.volume_kr import normalize_key_results
+    from ..chapter_suggest import next_chapter_no
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        setting = _load_plot_setting(conn)
+        if not any(setting.get(k) for k in
+                   ("premise", "main_conflict", "world_setting", "protagonist")):
+            raise HTTPException(
+                422, "项目无情节设定（meta_kv 空）——先在建项目时锁定设定，或手动建卷")
+
+        # 卷号与章区间：接在已有卷之后
+        row = conn.execute(
+            "SELECT MAX(volume_no) AS mv, MAX(end_chapter) AS me FROM volumes"
+        ).fetchone()
+        volume_no = (row["mv"] or 0) + 1
+        next_ch, _ = next_chapter_no(conn, project_id)
+        start_chapter = max(next_ch, (row["me"] or 0) + 1)
+        end_chapter = start_chapter + req.volume_span - 1
+
+        # ── LLM 生成卷大纲（MID 起跑、失败升 STRONG；无 key → 确定性兜底）──
+        cfg = NovelForgeConfig(project_id=project_id,
+                               db_path=registry.get(project_id).db_path)
+        api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+        if api_key:
+            cfg.provider.api_key = api_key
+            cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
+        degraded = False
+        tier_used = None
+        data = None
+        try:
+            gw = llm_factory.build_gateway(cfg)
+            lines = [f"- {k}: {v}" for k, v in setting.items()
+                     if v and k != "power_ranks"]
+            if setting.get("power_ranks"):
+                lines.append(f"- 力量阶梯(弱→强): {'→'.join(setting['power_ranks'])}")
+            prev = conn.execute(
+                "SELECT volume_no, title, rolling_summary FROM volumes"
+                " WHERE rolling_summary IS NOT NULL ORDER BY volume_no DESC LIMIT 1"
+            ).fetchone()
+            user = (
+                "## 情节设定\n" + "\n".join(lines)
+                + (f"\n\n## 上一卷概要\n第{prev['volume_no']}卷《{prev['title']}》："
+                   f"{prev['rolling_summary']}" if prev else "")
+                + f"\n\n## 任务\n为第 {volume_no} 卷"
+                  f"（第 {start_chapter}-{end_chapter} 章）生成卷大纲。"
+                + (f"\n方向提示：{req.hints}" if req.hints else "")
+            )
+            result = gw.generate_validated(
+                ModelTier.MID, [Message(role="user", content=user)],
+                parse=_parse_wizard_json, system=_WIZARD_SYSTEM,
+                max_tokens=1500, max_tier=ModelTier.STRONG)
+            data = result.value
+            tier_used = result.tier_used
+        except Exception:
+            data = None
+        if data is None:
+            degraded = True
+            data = {
+                "title": (setting.get("premise") or "启程")[:20],
+                "synopsis": "；".join(
+                    v for v in (setting.get("premise"),
+                                setting.get("main_conflict"),
+                                setting.get("opening_hook")) if v) or "（待补充）",
+                "objective": setting.get("main_conflict"),
+                "key_results": [],
+            }
+
+        vol_id = str(uuid.uuid4())
+        kr_json = _json.dumps(
+            normalize_key_results(data.get("key_results") or []), ensure_ascii=False)
+        try:
+            conn.execute(
+                """INSERT INTO volumes(id, volume_no, title, synopsis,
+                                       start_chapter, end_chapter,
+                                       objective, key_results)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (vol_id, volume_no, str(data["title"])[:100], data["synopsis"],
+                 start_chapter, end_chapter, data.get("objective"), kr_json),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise HTTPException(409, f"volume_no={volume_no} 冲突: {e}")
+        vol_row = conn.execute("SELECT * FROM volumes WHERE id=?", (vol_id,)).fetchone()
+        volume = _volume_row_to_resp(vol_row)
+    finally:
+        conn.close()
+
+    # ── 复用卷规划管线预填前几章细纲（独立 conn；失败不阻断建卷结果）──────
+    plan = None
+    if not degraded:
+        try:
+            plan = plan_volume(
+                project_id, volume_no,
+                VolumePlanRequest(
+                    from_chapter=start_chapter,
+                    to_chapter=start_chapter + req.plan_chapters - 1),
+                registry)
+        except Exception:
+            plan = None
+
+    return VolumeWizardResponse(volume=volume, plan=plan,
+                                tier_used=tier_used, degraded=degraded)
 
 
 @router.get("/{project_id}/volumes/{volume_no}")
@@ -568,6 +737,76 @@ def update_branch(
             "SELECT * FROM branches WHERE id=?", (branch_id,)
         ).fetchone()
         return _branch_row_to_resp(row)
+    finally:
+        conn.close()
+
+
+# ── Branch world state / merge（POST-v15 P1#3）────────────────────────────────
+
+@router.get("/{project_id}/branches/{branch_id}/world-state")
+def branch_world_state(
+    project_id: str,
+    branch_id: str,
+    as_of_chapter: int = 99999,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """分支沙盒投影：沿分支祖先链过滤的 world state 快照。
+
+    分支 A 的情节改动（如某人未死）只在 A 的视图里可见，不污染主线或分支 B。
+    """
+    from ...world.replay import branch_world_snapshot
+
+    conn = registry.open_conn(project_id)
+    try:
+        if conn.execute("SELECT 1 FROM branches WHERE id=?",
+                        (branch_id,)).fetchone() is None:
+            raise HTTPException(404, f"branch_id={branch_id} 不存在")
+        return branch_world_snapshot(conn, as_of_chapter, branch_id)
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/branches/{branch_id}/merge-preview")
+def branch_merge_preview(
+    project_id: str,
+    branch_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """并线预览：列出分支待并入 facts 与主线的确定性冲突，不写任何数据。"""
+    from ...world.branch_merge import preview_branch_merge
+
+    conn = registry.open_conn(project_id)
+    try:
+        result = preview_branch_merge(conn, branch_id)
+        if not result.get("found"):
+            raise HTTPException(404, f"branch_id={branch_id} 不存在")
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/{project_id}/branches/{branch_id}/merge", status_code=202)
+def branch_merge(
+    project_id: str,
+    branch_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """把分支 canon facts 降级为主线 staging 提案 + 入审队列（不直接落 canon）。
+
+    冲突条目 op='retcon'、risk 升 high；审批走 /reviews 或 batch_approve。
+    分支状态置 'merged'。
+    """
+    from ...world.branch_merge import merge_branch_to_mainline
+
+    conn = registry.open_conn(project_id)
+    try:
+        result = merge_branch_to_mainline(conn, branch_id)
+        if not result.get("merged"):
+            reason = result.get("reason")
+            if reason == "branch_not_found":
+                raise HTTPException(404, f"branch_id={branch_id} 不存在")
+            raise HTTPException(409, f"分支不可并线: {reason}")
+        return result
     finally:
         conn.close()
 

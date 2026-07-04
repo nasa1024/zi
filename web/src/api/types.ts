@@ -198,6 +198,14 @@ export interface NextChapterSuggestion {
   sources: string[];
 }
 
+// P2#13 卷级 Objective/KR
+export interface KeyResult {
+  id: string;
+  text: string;
+  status: 'pending' | 'met' | 'partial' | 'missed' | string;
+  evidence: string;
+}
+
 export interface VolumeInfo {
   id: string;
   volume_no: number;
@@ -207,6 +215,77 @@ export interface VolumeInfo {
   end_chapter?: number | null;
   status: string;
   created_at: string;
+  objective?: string | null;
+  key_results: KeyResult[];
+}
+
+export interface VolumeCreateRequest {
+  volume_no: number;
+  title: string;
+  synopsis?: string | null;
+  start_chapter?: number | null;
+  end_chapter?: number | null;
+  objective?: string | null;
+  key_results?: (string | Partial<KeyResult>)[] | null;
+}
+
+export interface VolumeUpdateRequest {
+  title?: string | null;
+  synopsis?: string | null;
+  start_chapter?: number | null;
+  end_chapter?: number | null;
+  status?: 'writing' | 'completed' | 'archived' | null;
+  objective?: string | null;
+  key_results?: (string | Partial<KeyResult>)[] | null;
+}
+
+export interface SettleKrResponse {
+  settled: boolean;
+  reason?: string;
+  objective?: string;
+  met?: number;
+  partial?: number;
+  missed?: number;
+  results?: KeyResult[];
+}
+
+// POST-v15 P2#6 设定→卷向导
+export interface VolumeWizardRequest {
+  volume_span?: number;
+  plan_chapters?: number;
+  hints?: string | null;
+}
+
+export interface VolumeWizardResponse {
+  volume: VolumeInfo;
+  plan?: VolumePlanResponse | null;
+  tier_used?: string | null;
+  degraded: boolean;
+}
+
+// POST-v15 P2#7 三层摘要看板
+export interface SummaryChapterItem {
+  chapter: number;
+  summary: string;
+  volume_no?: number | null;
+  title?: string | null;
+  word_count?: number | null;
+  created_at?: string | null;
+}
+
+export interface SummaryVolumeItem {
+  volume_no: number;
+  title: string;
+  rolling_summary?: string | null;
+  start_chapter?: number | null;
+  end_chapter?: number | null;
+  status: string;
+}
+
+export interface SummaryBoardResponse {
+  global_synopsis?: string | null;
+  volumes: SummaryVolumeItem[];
+  chapters: SummaryChapterItem[];
 }
 
 export interface PlannedBeat {
@@ -299,10 +378,14 @@ export interface ForeshadowHealth {
 }
 
 // M8: Autopilot 进度 SSE 事件
+// POST-v15 P0#1：reason='degrade_alert' 为降级预警（连续失败自动转人审并暂停）
 export interface AutopilotSessionEvent {
   event: 'session';
-  reason: 'snapshot' | 'chapter_done' | 'finished' | 'canceled' | 'circuit_broken' | string;
+  reason: 'snapshot' | 'chapter_done' | 'finished' | 'canceled' | 'circuit_broken'
+    | 'degrade_alert' | string;
   session: AutopilotSessionInfo;
+  chapter?: number;
+  consecutive_hard_issues?: number;
 }
 
 export interface AutopilotStageEvent {
@@ -326,7 +409,7 @@ export interface AutopilotSessionInfo {
   from_chapter: number;
   to_chapter: number;
   current_chapter: number;
-  status: 'running' | 'degraded' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | 'interrupted' | string;
+  status: 'running' | 'degraded' | 'paused' | 'circuit_broken' | 'completed' | 'error' | 'canceled' | 'interrupted' | string;
   policy_mode: string;
   chapters_done: number;
   chapters_total: number;

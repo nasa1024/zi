@@ -30,11 +30,18 @@ import type {
   SeedResponse,
   SettingSuggestRequest,
   SettingSuggestResponse,
+  SettleKrResponse,
   SSEPipelineEvent,
   StateQueryRequest,
+  SummaryBoardResponse,
+  SummaryChapterItem,
+  VolumeCreateRequest,
   VolumeInfo,
   VolumePlanRequest,
   VolumePlanResponse,
+  VolumeUpdateRequest,
+  VolumeWizardRequest,
+  VolumeWizardResponse,
   WorldStateSnapshot,
 } from './types';
 
@@ -244,6 +251,64 @@ export const api = {
 
   listVolumes(id: string): Promise<VolumeInfo[]> {
     return request<VolumeInfo[]>('GET', `/v1/${encodeURIComponent(id)}/volumes`);
+  },
+
+  createVolume(id: string, req: VolumeCreateRequest): Promise<VolumeInfo> {
+    return request<VolumeInfo>('POST', `/v1/${encodeURIComponent(id)}/volumes`, req);
+  },
+
+  updateVolume(id: string, volumeNo: number, req: VolumeUpdateRequest): Promise<VolumeInfo> {
+    return request<VolumeInfo>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/volumes/${volumeNo}`,
+      req,
+    );
+  },
+
+  // P2#13: 手动触发本卷 KR 结算（对照卷情节判每条 KR 兑现度并写回）
+  settleVolumeKr(id: string, volumeNo: number): Promise<SettleKrResponse> {
+    return request<SettleKrResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/volumes/${volumeNo}/settle-kr`,
+    );
+  },
+
+  // POST-v15 P2#6: 设定→卷大纲端到端向导
+  volumeWizard(id: string, req: VolumeWizardRequest): Promise<VolumeWizardResponse> {
+    return request<VolumeWizardResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/volumes/wizard`,
+      req,
+    );
+  },
+
+  // POST-v15 P2#7: 三层摘要看板
+  summaryBoard(id: string): Promise<SummaryBoardResponse> {
+    return request<SummaryBoardResponse>('GET', `/v1/${encodeURIComponent(id)}/summaries`);
+  },
+
+  updateChapterSummary(id: string, chapter: number, summary: string): Promise<SummaryChapterItem> {
+    return request<SummaryChapterItem>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/summaries/chapters/${chapter}`,
+      { summary },
+    );
+  },
+
+  updateVolumeSummary(id: string, volumeNo: number, rollingSummary: string): Promise<void> {
+    return request<void>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/summaries/volumes/${volumeNo}`,
+      { rolling_summary: rollingSummary },
+    );
+  },
+
+  updateGlobalSynopsis(id: string, synopsis: string): Promise<void> {
+    return request<void>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/summaries/global`,
+      { synopsis },
+    );
   },
 
   planVolume(id: string, volumeNo: number, req: VolumePlanRequest): Promise<VolumePlanResponse> {

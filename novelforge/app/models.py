@@ -415,6 +415,9 @@ class AutopilotStartRequest(BaseModel):
     budget_session_max_tokens: Optional[int] = None   # E4: 会话级跨章 token 封顶
     budget_session_max_usd: Optional[float] = None    # E4: 会话级跨章 USD 封顶
     auto_degrade_after_consecutive_issues: int = 2  # 连续 N 章有 hard issue → 降级
+    # P0#1: auto_promote 连续失败自动降级为 human_gate 时暂停挂机（status='paused'，
+    # 可 resume）；False = 旧行为（转 human_gate 后继续连写）
+    pause_on_degrade: bool = True
     quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
     n_candidates: int = Field(default=1, ge=1, le=3)  # M3-①: 每章候选稿数（择优）
 
@@ -503,6 +506,27 @@ class VolumeResponse(BaseModel):
     key_results: list[dict] = Field(default_factory=list)
 
 
+# ── Setting → Volume 向导（POST-v15 P2#6）────────────────────────────────────
+
+class VolumeWizardRequest(BaseModel):
+    """从项目锁定的情节设定一键生成首卷大纲 + 前几章细纲。
+
+    读取建项目时落库的 meta_kv 设定（premise/main_conflict/power_system/...），
+    生成卷 title/synopsis/objective/KRs 并建卷，随后复用卷规划管线预填
+    chapter_cards + beats——「设定即细纲」。
+    """
+    volume_span: int = Field(default=20, ge=5, le=200)   # 本卷章数
+    plan_chapters: int = Field(default=5, ge=1, le=10)   # 预填细纲的章数
+    hints: Optional[str] = None                          # 额外方向提示
+
+
+class VolumeWizardResponse(BaseModel):
+    volume: VolumeResponse
+    plan: Optional[VolumePlanResponse] = None
+    tier_used: Optional[str] = None
+    degraded: bool = False          # 无 key / 解析失败 → 确定性兜底大纲
+
+
 # ── Branches ──────────────────────────────────────────────────────────────────
 
 class BranchCreateRequest(BaseModel):
@@ -544,6 +568,81 @@ class ColdStartResponse(BaseModel):
     candidate_ids: list[str]
     atom_ids: list[str]
     chapters_processed: int
+
+
+class ColdStartImportRequest(BaseModel):
+    """POST-v15 P1#4：整本存量正文批量导入（后台 job，并发抽取 + 去噪 + 分层晋升）。
+
+    full_text 与 chapters 二选一：full_text 自动按「第N章」切章；
+    dry_run=True 只返回切章预览，不启动抽取。
+    """
+    full_text: Optional[str] = None
+    chapters: Optional[list[ColdStartChapter]] = None
+    auto_promote_low_risk: bool = False        # 低风险条目由程序直接晋升 canon
+    max_concurrency: int = Field(default=4, ge=1, le=8)
+    dry_run: bool = False
+    actor: str = "cold_start"
+
+
+class ColdStartSplitPreview(BaseModel):
+    chapters_total: int
+    chapters: list[dict]                       # [{chapter_no, title, chars}]
+
+
+class ColdStartJobInfo(BaseModel):
+    job_id: str
+    project_id: str
+    status: str                                # running / completed / error
+    chapters_total: int
+    chapters_done: int
+    proposals_extracted: int = 0
+    dedup_dropped: int = 0
+    candidates_created: int = 0
+    auto_promoted: int = 0
+    staged_low: int = 0
+    queued_review: int = 0
+    error: Optional[str] = None
+    started_at: str
+    finished_at: Optional[str] = None
+
+
+# ── 三层摘要看板（POST-v15 P2#7）──────────────────────────────────────────────
+
+class SummaryChapterItem(BaseModel):
+    chapter: int
+    summary: str
+    volume_no: Optional[int] = None
+    title: Optional[str] = None           # chapter_cards.title（有细纲时）
+    word_count: Optional[int] = None      # draft_index 最新修订字数
+    created_at: Optional[str] = None
+
+
+class SummaryVolumeItem(BaseModel):
+    volume_no: int
+    title: str
+    rolling_summary: Optional[str] = None
+    start_chapter: Optional[int] = None
+    end_chapter: Optional[int] = None
+    status: str = "writing"
+
+
+class SummaryBoardResponse(BaseModel):
+    """全书至此的三层摘要：章摘要 → 卷滚动摘要 → 全局梗概（meta_kv）。"""
+    global_synopsis: Optional[str] = None
+    volumes: list[SummaryVolumeItem] = Field(default_factory=list)
+    chapters: list[SummaryChapterItem] = Field(default_factory=list)
+
+
+class ChapterSummaryUpdateRequest(BaseModel):
+    summary: str = Field(..., min_length=1, max_length=2000)
+
+
+class VolumeSummaryUpdateRequest(BaseModel):
+    rolling_summary: str = Field(..., min_length=1, max_length=4000)
+
+
+class GlobalSynopsisUpdateRequest(BaseModel):
+    synopsis: str = Field(..., min_length=1, max_length=4000)
 
 
 # ── Consistency Exemptions ────────────────────────────────────────────────────
