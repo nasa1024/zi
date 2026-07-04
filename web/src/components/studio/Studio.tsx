@@ -25,6 +25,8 @@ import type {
   VolumeInfo,
   WorldStateSnapshot,
 } from '../../api/types';
+import VolumesPanel from './VolumesPanel';
+import SummariesPanel from './SummariesPanel';
 import '../../styles/studio.css';
 
 export interface StudioProps {
@@ -38,7 +40,8 @@ export interface StudioProps {
   onRefetchProjects: () => void;
 }
 
-type TabKey = 'seed' | 'bible' | 'state' | 'search' | 'reviews' | 'pipeline';
+type TabKey = 'seed' | 'bible' | 'state' | 'search' | 'reviews' | 'pipeline'
+  | 'volumes' | 'summaries';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'seed', label: '📝 录入设定' },
@@ -46,6 +49,8 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'state', label: '🌍 世界状态' },
   { key: 'search', label: '🔍 设定检索' },
   { key: 'reviews', label: '🧑‍⚖️ 审核队列' },
+  { key: 'volumes', label: '📚 卷 · OKR' },
+  { key: 'summaries', label: '🗺 故事脉络' },
   { key: 'pipeline', label: '⚙️ 生成章节' },
 ];
 
@@ -187,6 +192,10 @@ export default function Studio({
             {tab === 'reviews' && (
               <ReviewsPanel projectId={active.project_id} onChanged={refetch} />
             )}
+            {tab === 'volumes' && (
+              <VolumesPanel projectId={active.project_id} onChanged={refetch} />
+            )}
+            {tab === 'summaries' && <SummariesPanel projectId={active.project_id} />}
             {tab === 'pipeline' && (
               <PipelinePanel projectId={active.project_id} onChanged={refetch} />
             )}
@@ -1010,6 +1019,8 @@ function PipelinePanel({
   const [apBusy, setApBusy] = useState<boolean>(false);
   const [apError, setApError] = useState<string | null>(null);
   const [apStage, setApStage] = useState<AutopilotStageEvent | null>(null);  // M8: 章内实时进度
+  // P0#1: 降级预警（auto_promote 连续失败自动转人审并暂停挂机）
+  const [apDegradeAlert, setApDegradeAlert] = useState<string | null>(null);
   // E4: 会话级预算封顶（空 = 不限）；逐章目标每行「章号：目标」
   const [apMaxTokens, setApMaxTokens] = useState<string>('');
   const [apMaxUsd, setApMaxUsd] = useState<string>('');
@@ -1228,6 +1239,15 @@ function PipelinePanel({
         if (e.reason === 'chapter_done') {
           setApStage(null);
           void loadHistory();
+        }
+        // P0#1: 降级预警——连续失败自动转人审并暂停，弹出横幅引导处理审核队列
+        if (e.reason === 'degrade_alert') {
+          setApDegradeAlert(
+            `第 ${e.chapter ?? e.session.current_chapter} 章后触发降级熔断：`
+            + `连续 ${e.consecutive_hard_issues ?? e.session.consecutive_hard_issues} 章`
+            + '存在硬一致性问题/低分且修订上限内无法自愈。'
+            + '策略已退化为 human_gate 并暂停挂机——请先处理「🧑‍⚖️ 审核队列」，再点「恢复会话」续写。',
+          );
         }
         if (e.session.status !== 'running' && e.session.status !== 'degraded') onTerminal();
       },
@@ -1660,18 +1680,32 @@ function PipelinePanel({
             ⏹ 取消会话
           </button>
         )}
-        {apSession?.status === 'interrupted' && (
+        {(apSession?.status === 'interrupted' || apSession?.status === 'paused') && (
           <button
             type="button"
             className="nf-btn-sm"
-            onClick={() => void resumeAutopilot()}
+            onClick={() => { setApDegradeAlert(null); void resumeAutopilot(); }}
             disabled={apBusy}
-            title="会话曾被进程重启中断，从断点章继续（已完成的章不会重写）"
+            title={apSession.status === 'paused'
+              ? '降级熔断暂停的会话：处理完审核队列后从断点续写（human_gate 人审模式）'
+              : '会话曾被进程重启中断，从断点章继续（已完成的章不会重写）'}
           >
             ▶ 恢复会话
           </button>
         )}
       </div>
+
+      {/* P0#1: 降级熔断预警横幅 */}
+      {(apDegradeAlert || apSession?.status === 'paused') && (
+        <div className="nf-msg err" style={{ marginTop: '0.5rem' }}>
+          <span>🛑</span>
+          <span>
+            {apDegradeAlert
+              ?? '挂机会话已因连续失败降级熔断（paused）：策略退化为 human_gate。'
+                + '请先处理「🧑‍⚖️ 审核队列」，再点「恢复会话」续写。'}
+          </span>
+        </div>
+      )}
 
       <div className="nf-field full" style={{ marginTop: '0.5rem' }}>
         <label htmlFor="ap-goals">
