@@ -116,20 +116,36 @@ class ChapterDraftSkill:
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out // 2, 32_000)   # 草稿阶段不需要超长输出
         max_out = max(max_out, 8192)
-        resp = ctx.llm.generate(
+
+        # P0#2（generate_validated 全场景覆盖）：草稿完全无产出（接口畸形/截断成
+        # 空文）是当前唯一会中断整章的机械失败——已在最高档 STRONG 无档可升，
+        # 用 attempts_per_tier=2 做一次同档重采样抢救；正常产出仍然单次调用。
+        def _parse_draft(text: str):
+            d, p = _parse_output(text, ctx.target_chapter)
+            return (d, p, text) if d.strip() else None
+
+        result = ctx.llm.generate_validated(
             ModelTier.STRONG,
             [Message(role="user", content=user_msg)],
+            parse=_parse_draft,
             system=_SYSTEM,
             max_tokens=max_out,
             # M3-①: 多候选时由 orchestrator 注入不同温度制造多样性
             temperature=ctx.extra.get("temperature", 1.0),
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
+            max_tier=ModelTier.STRONG,
+            attempts_per_tier=2,
         )
-
-        draft_text, proposals = _parse_output(resp.text, ctx.target_chapter)
+        resp = result.response
+        if result.value is not None:
+            draft_text, proposals, raw_text = result.value
+        else:
+            draft_text, proposals = _parse_output(resp.text, ctx.target_chapter)
+            raw_text = resp.text
         ctx.workspace["draft_text"] = draft_text
         ctx.workspace["proposals"] = proposals
-        ctx.workspace["draft_raw"] = resp.text
+        ctx.workspace["draft_raw"] = raw_text
+        ctx.workspace["draft_tier_used"] = result.tier_used
 
         char_count = len(draft_text)
         dod = [

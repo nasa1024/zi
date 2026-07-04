@@ -106,6 +106,7 @@ class LLMGateway:
         temperature: float = 1.0,
         cache_hint: Optional[CacheHint] = None,
         max_tier: ModelTier = ModelTier.STRONG,
+        attempts_per_tier: int = 1,
     ) -> ValidatedResult:
         """P2#14：弱模型分层 + 失败升级。
 
@@ -113,26 +114,31 @@ class LLMGateway:
         否则升一档（fast→mid→strong）重试，封顶 max_tier。parse 抛异常视同 None。
         全档失败返回 value=None。每次调用都计入 ledger（升级即多花，成本看板可见）。
         max_tier=tier 时退化为单档（等价旧行为，关闭升级）。
+
+        attempts_per_tier（POST-v15 P0#2）：同档重采样次数——已在最高档（如
+        chapter_draft 的 STRONG）无档可升时，畸形输出用一次新采样抢救而非直接失败。
         """
         start = _TIER_ORDER.index(tier)
         end = _TIER_ORDER.index(max_tier)
         last_resp: Optional[Response] = None
         used = tier
+        attempts = max(1, attempts_per_tier)
         for t in _TIER_ORDER[start:end + 1]:
             used = t
-            resp = self.generate(
-                t, messages, system=system, tools=tools,
-                max_tokens=max_tokens, temperature=temperature, cache_hint=cache_hint,
-            )
-            last_resp = resp
-            try:
-                value = parse(resp.text)
-            except Exception:
-                value = None
-            if value is not None:
-                return ValidatedResult(
-                    value=value, response=resp, tier_used=t.value,
-                    escalated=(t != tier))
+            for _ in range(attempts):
+                resp = self.generate(
+                    t, messages, system=system, tools=tools,
+                    max_tokens=max_tokens, temperature=temperature, cache_hint=cache_hint,
+                )
+                last_resp = resp
+                try:
+                    value = parse(resp.text)
+                except Exception:
+                    value = None
+                if value is not None:
+                    return ValidatedResult(
+                        value=value, response=resp, tier_used=t.value,
+                        escalated=(t != tier))
         return ValidatedResult(
             value=None, response=last_resp, tier_used=used.value,
             escalated=(used != tier))

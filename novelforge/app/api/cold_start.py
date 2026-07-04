@@ -13,9 +13,86 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import ProjectRegistry, get_registry
-from ..models import ColdStartRequest, ColdStartResponse
+from ..models import (
+    ColdStartImportRequest, ColdStartJobInfo, ColdStartRequest,
+    ColdStartResponse, ColdStartSplitPreview,
+)
 
 router = APIRouter(tags=["cold_start"])
+
+
+# ── 批量导入（POST-v15 P1#4）──────────────────────────────────────────────────
+
+@router.post("/{project_id}/cold_start/import", status_code=202)
+def cold_start_import(
+    project_id: str,
+    req: ColdStartImportRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """整本存量正文导入：自动切章 → 并发反向抽取 → 去噪聚类 → 分层晋升。
+
+    dry_run=True 返回切章预览（不启动抽取）；否则启动后台 job，
+    经 GET /cold_start/jobs/{job_id} 轮询进度。
+    """
+    from ...coldstart import get_cold_start_manager, split_manuscript
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+
+    if req.full_text:
+        chapters = split_manuscript(req.full_text)
+    elif req.chapters:
+        chapters = [{"chapter_no": c.chapter_no, "title": f"第 {c.chapter_no} 章",
+                     "text": c.text} for c in req.chapters]
+    else:
+        raise HTTPException(422, "full_text 与 chapters 必须提供其一")
+    if not chapters:
+        raise HTTPException(422, "切章结果为空——检查正文内容")
+
+    if req.dry_run:
+        return ColdStartSplitPreview(
+            chapters_total=len(chapters),
+            chapters=[{"chapter_no": c["chapter_no"], "title": c["title"],
+                       "chars": len(c["text"])} for c in chapters],
+        )
+
+    mgr = get_cold_start_manager()
+    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    job = mgr.start(
+        project_id, chapters, registry,
+        auto_promote_low_risk=req.auto_promote_low_risk,
+        max_concurrency=req.max_concurrency,
+        api_key=api_key,
+    )
+    return ColdStartJobInfo(**job.snapshot())
+
+
+@router.get("/{project_id}/cold_start/jobs", response_model=list[ColdStartJobInfo])
+def cold_start_jobs(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    from ...coldstart import get_cold_start_manager
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    mgr = get_cold_start_manager()
+    return [ColdStartJobInfo(**j.snapshot()) for j in mgr.list_for_project(project_id)]
+
+
+@router.get("/{project_id}/cold_start/jobs/{job_id}", response_model=ColdStartJobInfo)
+def cold_start_job_status(
+    project_id: str,
+    job_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    from ...coldstart import get_cold_start_manager
+
+    mgr = get_cold_start_manager()
+    job = mgr.get(job_id)
+    if job is None or job.project_id != project_id:
+        raise HTTPException(404, f"job 不存在: {job_id}")
+    return ColdStartJobInfo(**job.snapshot())
 
 
 @router.post("/{project_id}/cold_start", response_model=ColdStartResponse, status_code=202)

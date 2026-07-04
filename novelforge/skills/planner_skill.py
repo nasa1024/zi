@@ -77,17 +77,24 @@ class PlannerSkill:
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 4096)   # Planner 输出短，4096 够用
-        resp = ctx.llm.generate(
+
+        # P0#2（generate_validated 全场景覆盖）：MID 起跑，JSON 畸形/无 hook 等
+        # 结构性失败自动升 STRONG 抢救，而非静默落进单条 setup 兜底。
+        result = ctx.llm.generate_validated(
             ModelTier.MID,
             [Message(role="user", content=user_msg)],
+            parse=_parse_beats_strict,
             system=_SYSTEM,
             max_tokens=max_out,
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
+            max_tier=ModelTier.STRONG,
         )
-
-        beats = _parse_beats(resp.text)
+        resp = result.response
+        beats = result.value if result.value is not None else _parse_beats(resp.text)
         ctx.workspace["beats"] = beats
         ctx.workspace["planner_raw"] = resp.text
+        ctx.workspace["planner_tier_used"] = result.tier_used
+        ctx.workspace["planner_escalated"] = result.escalated
 
         dod = [
             DoDOutcome("has_beats", passed=bool(beats)),
@@ -101,6 +108,37 @@ class PlannerSkill:
             dod_outcomes=dod,
             usage_summary=f"in={resp.usage.input} out={resp.usage.output}",
         )
+
+
+def _parse_beats_strict(text: str) -> list[dict] | None:
+    """generate_validated 的 parse：结构合格返回 beats，否则 None 触发升档。
+
+    合格 = 解析出非空 JSON 数组、每条含 beat_type/summary、末尾有 hook beat
+    （与 DoD has_beats/has_hook 对齐——校验器拦截即视为该档失败）。
+    """
+    text_s = text.strip()
+    data = None
+    if text_s.startswith("["):
+        try:
+            data = json.loads(text_s)
+        except json.JSONDecodeError:
+            data = None
+    if data is None:
+        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text_s, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+            except json.JSONDecodeError:
+                data = None
+    if not isinstance(data, list) or not data:
+        return None
+    beats = [b for b in data if isinstance(b, dict)
+             and b.get("beat_type") and b.get("summary")]
+    if not beats:
+        return None
+    if not any(b.get("beat_type") == "hook" for b in beats):
+        return None
+    return beats
 
 
 def _parse_beats(text: str) -> list[dict]:

@@ -14,6 +14,13 @@
 - subscribe()/unsubscribe()：每会话事件队列广播（线程安全 stdlib queue，独立 _sub_lock
   防止与 _lock 嵌套死锁）
 - _run_loop 在每章 stage、每章完成、降级、终态处 _emit；终态后发 None 哨兵关流
+
+新增（POST-v15 P0#1 降级熔断闭环）：
+- auto_promote 模式下连续 N 批次 hard block / 低分 / 结算降级 →
+  策略自动退化为 human_gate 并**暂停挂机**（status='paused'，终态），
+  同时向 SSE 客户端广播 reason='degrade_alert' 的降级预警事件。
+  hybrid 模式保持旧行为：转 human_gate 后继续连写（status='degraded'）。
+- paused 会话可经 /resume 从断点恢复（恢复后以 human_gate 续写）。
 """
 from __future__ import annotations
 
@@ -39,7 +46,7 @@ class AutopilotSession:
     from_chapter: int
     to_chapter: int
     current_chapter: int
-    status: str          # running / degraded / circuit_broken / completed / error / canceled
+    status: str          # running / degraded / paused / circuit_broken / completed / error / canceled
     policy_mode: str     # auto_promote / hybrid / human_gate
     chapters_done: int = 0
     budget_tokens_total: int = 0
@@ -294,6 +301,7 @@ class AutopilotManager:
                 "budget_session_max_tokens": session.budget_session_max_tokens,
                 "budget_session_max_usd": session.budget_session_max_usd,
                 "auto_degrade_after_consecutive_issues": getattr(req, "auto_degrade_after_consecutive_issues", 2),
+                "pause_on_degrade": getattr(req, "pause_on_degrade", True),
                 "quality_check": getattr(req, "quality_check", False),
                 "n_candidates": getattr(req, "n_candidates", 1),
             }, ensure_ascii=False)
@@ -445,14 +453,39 @@ class AutopilotManager:
                                    and q_score < cfg.quality.min_score)
                     # P1#11：结算降级计入连续问题——连续失败自然转人审
                     degraded = getattr(outcome, "state_degraded", False)
+                    auto_degraded_now = False
                     if hard_issues or low_quality or degraded:
                         session.consecutive_hard_issues += 1
                         if session.consecutive_hard_issues >= req.auto_degrade_after_consecutive_issues:
+                            prev_mode = session.policy_mode
                             session.policy_mode = "human_gate"
                             if session.status == "running":
                                 session.status = "degraded"
+                            # P0#1：auto_promote（无干预连写）连续失败 → 暂停挂机，
+                            # 抛降级预警交回作者；hybrid 保持旧行为（human_gate 续写）
+                            auto_degraded_now = (
+                                prev_mode == "auto_promote"
+                                and getattr(req, "pause_on_degrade", True)
+                            )
                     else:
                         session.consecutive_hard_issues = 0
+                    if auto_degraded_now:
+                        session.status = "paused"
+                        session.last_error = (
+                            f"auto-degraded: 连续 {session.consecutive_hard_issues} 章"
+                            " hard block/低分/结算降级未消除（修订上限内无法自愈），"
+                            "策略已退化为 human_gate 并暂停挂机；处理审核队列后可 resume 续写"
+                        )
+                        session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+                        self._db_update(session, registry)
+                        self._emit(session, {
+                            "event": "session", "reason": "degrade_alert",
+                            "chapter": chapter,
+                            "consecutive_hard_issues": session.consecutive_hard_issues,
+                            "session": _session_snapshot(session),
+                        })
+                        self._emit(session, None)
+                        return
                     self._db_update(session, registry)  # 每章一次写穿（天然 checkpoint）
                     self._emit_session(session, "chapter_done")
 
