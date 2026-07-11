@@ -32,18 +32,19 @@ def test_env_switches_to_openai(monkeypatch):
     assert cfg.memory.embedding_api_key == "sk-test"
 
 
-def test_env_falls_back_to_llm_creds(monkeypatch):
-    """未单独给 embedding base_url/key 时回退到 LLM 的凭据（同端点常可复用）。"""
+def test_env_falls_back_only_to_explicit_provider_creds(monkeypatch):
+    """REST 鉴权 key 不得外发；只复用明确的 provider 凭据。"""
     for k in ("NOVELFORGE_EMBEDDING_MODEL", "NOVELFORGE_EMBEDDING_BASE_URL",
-              "NOVELFORGE_EMBEDDING_API_KEY", "DEEPSEEK_API_KEY"):
+              "NOVELFORGE_EMBEDDING_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("NOVELFORGE_EMBEDDING_PROVIDER", "openai")
-    monkeypatch.setenv("NOVELFORGE_API_KEY", "sk-llm")
+    monkeypatch.setenv("NOVELFORGE_API_KEY", "rest-auth-only")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-provider")
     cfg = NovelForgeConfig()
     cfg.provider.base_url = "https://llm.example.com/v1"
     _apply_embedding_env(cfg)
     assert cfg.memory.embedding_base_url == "https://llm.example.com/v1"
-    assert cfg.memory.embedding_api_key == "sk-llm"
+    assert cfg.memory.embedding_api_key == "sk-provider"
 
 
 def test_build_embedder_from_env_cfg(monkeypatch):

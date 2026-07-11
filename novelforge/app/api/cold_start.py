@@ -7,8 +7,8 @@ POST /{project_id}/cold_start
 from __future__ import annotations
 
 import json
+import hashlib
 import os
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -57,7 +57,7 @@ def cold_start_import(
         )
 
     mgr = get_cold_start_manager()
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     job = mgr.start(
         project_id, chapters, registry,
         auto_promote_low_risk=req.auto_promote_low_risk,
@@ -113,7 +113,7 @@ def cold_start(
         from ...control_plane.llm.factory import build_gateway
         from ...skills.cold_extract_skill import ColdExtractSkill
 
-        api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
         cfg = NovelForgeConfig(project_id=project_id, db_path="")
         if api_key:
@@ -146,20 +146,56 @@ def cold_start(
             result = skill.run(ctx)
             proposals: list[dict] = ws.get("proposals", [])
 
-            # 写入 l1_atoms（冷启动原子，cold_start=1）
-            atom_id = str(uuid.uuid4())
+            source_hash = hashlib.sha256(
+                chapter_item.text.encode("utf-8")
+            ).hexdigest()
+            latest = conn.execute(
+                "SELECT id, sha256 FROM draft_index WHERE chapter=?"
+                " ORDER BY revision_round DESC LIMIT 1",
+                (chapter_item.chapter_no,),
+            ).fetchone()
+            if latest is not None and latest["sha256"] == source_hash:
+                draft_id = latest["id"]
+            else:
+                from ...control_plane.orchestrator import _persist_draft
+
+                meta = registry.get(project_id)
+                draft_id = _persist_draft(
+                    conn,
+                    chapter_item.text,
+                    chapter_item.chapter_no,
+                    project_id,
+                    meta.db_path if meta else "novel.db",
+                )
+            if draft_id is None:
+                raise HTTPException(500, f"第 {chapter_item.chapter_no} 章 L0 落盘失败")
+
+            # 每章保留一条可回读的冷启动来源原子；ID 对同一 draft 稳定，重复请求幂等。
+            atom_id = "atom_" + hashlib.sha256(
+                f"{draft_id}:cold_start_source".encode("utf-8")
+            ).hexdigest()[:26]
             conn.execute(
-                "INSERT INTO l1_atoms(id, chapter, atom_text, extracted_by, cold_start)"
-                " VALUES(?,?,?,?,1)",
-                (atom_id, chapter_item.chapter_no,
-                 chapter_item.text[:500],
-                 "cold_extract"),
+                "INSERT INTO l1_atoms("
+                " id, chapter, draft_id, atom_text, anchor, extracted_by, atom_type, payload_json,"
+                " source_line_start, source_line_end, content_hash, status, cold_start)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',1)"
+                " ON CONFLICT(id) DO UPDATE SET status='active', anchor=excluded.anchor,"
+                " source_line_start=excluded.source_line_start,"
+                " source_line_end=excluded.source_line_end",
+                (atom_id, chapter_item.chapter_no, draft_id,
+                 chapter_item.text[:500], chapter_item.text[:500],
+                 "cold_extract", "cold_start_source",
+                 json.dumps({"source": "cold_start", "draft_id": draft_id}, ensure_ascii=False),
+                 1, max(1, len(chapter_item.text.splitlines())), source_hash),
             )
             all_atom_ids.append(atom_id)
 
             # 写入 fact_candidates（全部 proposed，不自动 canon）
+            chapter_candidate_ids: list[str] = []
+            normalized_proposals: list[dict] = []
             for prop in proposals:
-                cid = str(uuid.uuid4())
+                from ...contracts import normalize_proposal_fact_type
+
                 fact_type = prop.get("fact_type", "misc")
                 op = prop.get("op", "add")
                 risk_tier = prop.get("risk_tier", "low")
@@ -174,17 +210,39 @@ def cold_start(
                 }
                 if prop.get("entity"):
                     prop_dict["entity"] = prop["entity"]
+                prop_dict = normalize_proposal_fact_type(prop_dict)
+                prop_json = json.dumps(
+                    prop_dict, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                cid = "cand_" + hashlib.sha256(
+                    f"{draft_id}:{prop_json}".encode("utf-8")
+                ).hexdigest()[:26]
                 conn.execute(
-                    "INSERT INTO fact_candidates"
+                    "INSERT OR IGNORE INTO fact_candidates"
                     "(candidate_id, op, entity_id, fact_type, proposal_json,"
-                    " status, risk_tier, source_chapter, source_skill)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
-                    (cid, op, None, fact_type,
-                     json.dumps(prop_dict, ensure_ascii=False),
+                    " status, risk_tier, source_chapter, source_skill, source_draft_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (cid, op, None, prop_dict.get("fact_type", fact_type), prop_json,
                      "proposed", risk_tier, chapter_item.chapter_no,
-                     "cold_extract"),
+                     "cold_extract", draft_id),
                 )
                 all_candidate_ids.append(cid)
+                chapter_candidate_ids.append(cid)
+                normalized_proposals.append(prop_dict)
+
+            from ...memory.l1_atoms import persist_proposal_atoms
+
+            persist_proposal_atoms(
+                conn,
+                chapter=chapter_item.chapter_no,
+                draft_id=draft_id,
+                draft_text=chapter_item.text,
+                proposals=normalized_proposals,
+                candidate_ids=chapter_candidate_ids,
+                extracted_by="cold_extract_proposal_v2",
+                cold_start=True,
+                commit=False,
+            )
 
         conn.commit()
         return ColdStartResponse(

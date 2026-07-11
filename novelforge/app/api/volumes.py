@@ -69,7 +69,7 @@ def _build_kr_gateway(project_id: str, registry):
 
     cfg = NovelForgeConfig(project_id=project_id,
                            db_path=registry.get(project_id).db_path)
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
         cfg.provider.api_key = api_key
         cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
@@ -223,7 +223,7 @@ def volume_wizard(
         # ── LLM 生成卷大纲（MID 起跑、失败升 STRONG；无 key → 确定性兜底）──
         cfg = NovelForgeConfig(project_id=project_id,
                                db_path=registry.get(project_id).db_path)
-        api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         if api_key:
             cfg.provider.api_key = api_key
             cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
@@ -458,7 +458,11 @@ def plan_volume(
     保护既成事实。生成结果是 /pipeline/next「最优建议」的直接数据源。
     """
     import os
-    from ...config import NovelForgeConfig
+    from ...config import (
+        NovelForgeConfig,
+        apply_project_memory_settings,
+        apply_runtime_env,
+    )
     from ...control_plane.skill_base import SkillContext
     from ...control_plane.skill_registry import SkillRegistry
     from ...ids import new_id
@@ -469,6 +473,14 @@ def plan_volume(
         raise HTTPException(404, f"项目不存在: {project_id}")
     conn = registry.open_conn(project_id)
     try:
+        project = registry.get(project_id)
+        cfg = NovelForgeConfig(
+            project_id=project_id,
+            db_path=project.db_path if project else "novel.db",
+        )
+        apply_project_memory_settings(cfg, conn)
+        apply_runtime_env(cfg)
+
         vol = conn.execute(
             "SELECT volume_no, title, synopsis, start_chapter, end_chapter, rolling_summary"
             " FROM volumes WHERE volume_no=?", (volume_no,),
@@ -491,7 +503,11 @@ def plan_volume(
         from ...memory.recall import gather_hard_context
         ent_rows = conn.execute("SELECT id FROM entities LIMIT 10").fetchall()
         pack = gather_hard_context(
-            [r["id"] for r in ent_rows], plan_from - 1, conn, enable_summaries=True,
+            [r["id"] for r in ent_rows],
+            plan_from - 1,
+            conn,
+            summary_window=cfg.recall.summary_window_chapters,
+            enable_summaries=cfg.recall.enable_summaries,
         )
         _stable = pack.to_stable_context_str()
         fs_rows = conn.execute(
@@ -504,11 +520,7 @@ def plan_volume(
 
         # ── 构建 LLM 网关并调用 skill ─────────────────────────────────────────
         from ...control_plane.llm import factory as llm_factory
-        cfg = NovelForgeConfig(
-            project_id=project_id,
-            db_path=registry.get(project_id).db_path,
-        )
-        api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         if api_key:
             cfg.provider.api_key = api_key
             cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")

@@ -22,9 +22,12 @@ class SceneVectorStore:
         self._conn = conn
         self._emb = embedder
 
-    def upsert(self, scene_id: str, chapter: int, text: str) -> None:
-        """为某场景写入/更新 embedding（PK=scene_id，重复即覆盖）。"""
+    def upsert(self, scene_id: str, chapter: int, text: str) -> dict[str, object]:
+        """为某场景写入/更新 embedding，并返回实际落库的模型元数据。"""
         vec = self._emb.embed([text])[0]
+        dim = len(vec)
+        if dim <= 0:
+            raise ValueError("embedding 返回空向量")
         self._conn.execute(
             "INSERT INTO scene_vec(scene_id, chapter, dim, vec_json, model, version)"
             " VALUES(?,?,?,?,?,?)"
@@ -32,10 +35,15 @@ class SceneVectorStore:
             "   chapter=excluded.chapter, dim=excluded.dim, vec_json=excluded.vec_json,"
             "   model=excluded.model, version=excluded.version,"
             "   created_at=datetime('now')",
-            (scene_id, chapter, self._emb.dim, json.dumps(vec),
+            (scene_id, chapter, dim, json.dumps(vec),
              self._emb.name, self._emb.version),
         )
-        self._conn.commit()
+        self._conn.execute(
+            "UPDATE l2_scenes SET embedding_model=?, embedding_dim=?,"
+            " embedding_version=?, indexed_at=datetime('now') WHERE id=?",
+            (self._emb.name, dim, self._emb.version, scene_id),
+        )
+        return {"dim": dim, "model": self._emb.name, "version": self._emb.version}
 
     def search(self, query: str, as_of: int, limit: int = 8) -> list[tuple[str, float]]:
         """返回 [(scene_id, cosine_score), ...]，按分数降序，最多 limit 条。
@@ -45,12 +53,23 @@ class SceneVectorStore:
         """
         qvec = self._emb.embed([query])[0]
         rows = self._conn.execute(
-            "SELECT scene_id, dim, vec_json FROM scene_vec WHERE chapter<=?",
+            "SELECT v.scene_id, v.dim, v.vec_json, v.model, v.version,"
+            " s.embedding_model, s.embedding_dim, s.embedding_version, s.indexed_at"
+            " FROM scene_vec v JOIN l2_scenes s ON s.id=v.scene_id"
+            " WHERE v.chapter<=?",
             (as_of,),
         ).fetchall()
         scored: list[tuple[str, float]] = []
         for r in rows:
-            if r["dim"] != self._emb.dim:
+            if (
+                r["dim"] != self._emb.dim
+                or (r["model"] or "") != self._emb.name
+                or (r["version"] or "") != self._emb.version
+                or r["embedding_dim"] != r["dim"]
+                or (r["embedding_model"] or "") != (r["model"] or "")
+                or (r["embedding_version"] or "") != (r["version"] or "")
+                or not r["indexed_at"]
+            ):
                 continue
             try:
                 vec = json.loads(r["vec_json"])

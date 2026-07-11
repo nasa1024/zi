@@ -32,6 +32,9 @@ class BackupResponse(BaseModel):
 
 class RebuildFtsResponse(BaseModel):
     indexed_facts: int
+    indexed_drafts: int = 0
+    indexed_draft_chunks: int = 0
+    missing_draft_files: int = 0
     tokenizer_version: str
 
 
@@ -104,15 +107,22 @@ def rebuild_fts(
 
     conn = registry.open_conn(project_id)
     try:
-        from ...db.connection import rebuild_facts_fts
+        from ...db.connection import rebuild_drafts_fts, rebuild_facts_fts
         from ...tokenizer import tokenizer_version
         from ...db.connection import set_meta
 
         n = rebuild_facts_fts(conn)
+        draft_stats = rebuild_drafts_fts(conn)
         tv = tokenizer_version()
         set_meta(conn, "tokenizer_version", tv)
         conn.commit()
-        return RebuildFtsResponse(indexed_facts=n, tokenizer_version=tv)
+        return RebuildFtsResponse(
+            indexed_facts=n,
+            indexed_drafts=draft_stats["drafts"],
+            indexed_draft_chunks=draft_stats["chunks"],
+            missing_draft_files=draft_stats["missing_files"],
+            tokenizer_version=tv,
+        )
     finally:
         conn.close()
 

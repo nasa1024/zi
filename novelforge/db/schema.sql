@@ -348,6 +348,9 @@ CREATE TABLE IF NOT EXISTS beats (
     value_end       TEXT,
     value_axis      TEXT,                          -- §10 R12/B6: 价值轴标签(如"认可 vs 轻视")
     arc_id          TEXT,                          -- §10 R12/B2: 所属情节弧线 ID
+    source_decision_id TEXT,                       -- v16: 产出本 beat 的选择节点
+    constraint_level TEXT NOT NULL DEFAULT 'soft'  -- v16: future plan 约束强度
+                        CHECK(constraint_level IN ('soft','hard')),
     tension_level   INTEGER,
     related_foreshadow_id TEXT,
     status          TEXT NOT NULL DEFAULT 'planned'
@@ -375,6 +378,9 @@ CREATE TABLE IF NOT EXISTS chapter_cards (
     opening_hook_type TEXT,                        -- v13: 章首钩子（7 式或 other）
     hook_type         TEXT,                        -- v13: 章尾钩子（13 式或 other）
     expectation_score INTEGER,                     -- v13: 期待度 1-5
+    plan_version    INTEGER NOT NULL DEFAULT 1,     -- v16: 滚动规划版本
+    locked          INTEGER NOT NULL DEFAULT 0,     -- v16: 1=用户/Agent 已确认，不得静默重写
+    source_decision_id TEXT,                        -- v16: 对应 decision_sets.id
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(pov_entity_id) REFERENCES entities(id)
 );
@@ -448,6 +454,13 @@ CREATE TABLE IF NOT EXISTS draft_index (
     status          TEXT NOT NULL DEFAULT 'draft'
                         CHECK(status IN ('draft','checked','revised','committed','archived')),
     volume_no       INTEGER,                        -- §9.4 归属卷号
+    fts_indexed_at  TEXT,                           -- L0 派生 FTS 最近成功时间
+    l1_status       TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(l1_status IN ('pending','completed','failed')),
+    l1_extracted_at TEXT,
+    l2_status       TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(l2_status IN ('pending','completed','failed')),
+    l2_aggregated_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(chapter, revision_round)
 );
@@ -461,11 +474,22 @@ CREATE TABLE IF NOT EXISTS l1_atoms (
     anchor          TEXT,
     extracted_by    TEXT,
     candidate_id    TEXT,
+    atom_type       TEXT,
+    payload_json    TEXT,
+    source_line_start INTEGER,
+    source_line_end   INTEGER,
+    content_hash    TEXT,
+    status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','unanchored','superseded')),
     cold_start      INTEGER NOT NULL DEFAULT 0,     -- §9.4 1=由冷启动反向抽取生成
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(draft_id) REFERENCES draft_index(id)
 );
 CREATE INDEX IF NOT EXISTS idx_l1_chapter ON l1_atoms(chapter);
+CREATE INDEX IF NOT EXISTS idx_l1_candidate ON l1_atoms(candidate_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_l1_draft_hash
+    ON l1_atoms(draft_id, content_hash)
+    WHERE draft_id IS NOT NULL AND content_hash IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS l2_scenes (
     id              TEXT PRIMARY KEY,
@@ -514,6 +538,7 @@ CREATE TABLE IF NOT EXISTS fact_candidates (
     status          TEXT NOT NULL DEFAULT 'proposed'
                         CHECK(status IN ('proposed','pending_review','promoted','rejected','superseded')),
     source_chapter  INTEGER,
+    source_draft_id TEXT,
     source_skill    TEXT,
     decided_by      TEXT,
     decided_at      TEXT,
@@ -521,6 +546,7 @@ CREATE TABLE IF NOT EXISTS fact_candidates (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(target_fact_id) REFERENCES facts(id),
     FOREIGN KEY(entity_id) REFERENCES entities(id),
+    FOREIGN KEY(source_draft_id) REFERENCES draft_index(id),
     CHECK(proposal_json IS NULL OR json_valid(proposal_json)),
     CHECK(evidence_refs IS NULL OR json_valid(evidence_refs)),
     CHECK(conflict_flags IS NULL OR json_valid(conflict_flags))
@@ -528,6 +554,7 @@ CREATE TABLE IF NOT EXISTS fact_candidates (
 CREATE INDEX IF NOT EXISTS idx_cand_status  ON fact_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_cand_risk    ON fact_candidates(risk_tier);
 CREATE INDEX IF NOT EXISTS idx_cand_chapter ON fact_candidates(source_chapter);
+CREATE INDEX IF NOT EXISTS idx_cand_source_draft ON fact_candidates(source_draft_id);
 CREATE INDEX IF NOT EXISTS idx_cand_rank    ON fact_candidates(status, evidence_strength DESC);
 
 CREATE TABLE IF NOT EXISTS promotion_log (
@@ -648,10 +675,13 @@ CREATE TABLE IF NOT EXISTS volumes (
     rolling_summary TEXT,                       -- M2-②: 本卷至今滚动摘要（FAST tier 每5章更新）
     objective       TEXT,                        -- v14: 本卷可验证目标（P2#13）
     key_results     TEXT,                        -- v14: JSON [{id,text,status,evidence}]
+    source_decision_id TEXT,                     -- v17: Agent durable replay 幂等键
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_no)
 );
 CREATE INDEX IF NOT EXISTS idx_volumes_no ON volumes(volume_no);
+CREATE INDEX IF NOT EXISTS idx_volumes_source_decision
+    ON volumes(source_decision_id);
 
 -- 分支：从某章分叉的平行线（支线/IF 结局）
 CREATE TABLE IF NOT EXISTS branches (
@@ -720,6 +750,8 @@ CREATE TABLE IF NOT EXISTS sessions (
                      CHECK(client IN ('cli','web','chat','api')),
     mode          TEXT
                      CHECK(mode IN ('human_gate','auto_promote','hybrid')),
+    interaction_mode TEXT NOT NULL DEFAULT 'guided'
+                     CHECK(interaction_mode IN ('guided','copilot','autonomous')),
     actor         TEXT NOT NULL,
     started_at    TEXT NOT NULL DEFAULT (datetime('now')),
     ended_at      TEXT,
@@ -755,6 +787,127 @@ CREATE TABLE IF NOT EXISTS turn_events (
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_turn_events_turn ON turn_events(turn_id, id);
+
+-- 15) 选择驱动 Agent + 分层剧情计划（v16）--------------------------------------
+-- 剧情计划是“作者意图”，不是 canon；未来内容只能经 PlanContext 作为创作护栏读取。
+CREATE TABLE IF NOT EXISTS story_plans (
+    id              TEXT PRIMARY KEY,
+    version         INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    premise         TEXT,
+    ending_direction TEXT,
+    phase_summary   TEXT,
+    constraints_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','superseded','archived')),
+    source_decision_id TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(version),
+    CHECK(json_valid(constraints_json))
+);
+CREATE INDEX IF NOT EXISTS idx_story_plans_status ON story_plans(status, version);
+CREATE INDEX IF NOT EXISTS idx_story_plans_source_decision
+    ON story_plans(source_decision_id);
+
+CREATE TABLE IF NOT EXISTS story_arcs (
+    id              TEXT PRIMARY KEY,
+    plan_id         TEXT NOT NULL REFERENCES story_plans(id),
+    arc_type        TEXT NOT NULL DEFAULT 'main'
+                        CHECK(arc_type IN ('main','character','mystery','romance','foreshadow','world','other')),
+    title           TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    objective       TEXT,
+    start_chapter   INTEGER NOT NULL,
+    end_chapter     INTEGER,
+    priority        INTEGER NOT NULL DEFAULT 3,
+    status          TEXT NOT NULL DEFAULT 'planned'
+                        CHECK(status IN ('planned','active','completed','deferred','abandoned')),
+    constraints_json TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK(end_chapter IS NULL OR end_chapter >= start_chapter),
+    CHECK(json_valid(constraints_json))
+);
+CREATE INDEX IF NOT EXISTS idx_story_arcs_window ON story_arcs(start_chapter, end_chapter, status);
+CREATE INDEX IF NOT EXISTS idx_story_arcs_plan ON story_arcs(plan_id, priority);
+
+CREATE TABLE IF NOT EXISTS arc_milestones (
+    id              TEXT PRIMARY KEY,
+    arc_id          TEXT NOT NULL REFERENCES story_arcs(id),
+    title           TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    due_start_chapter INTEGER,
+    due_end_chapter INTEGER,
+    not_before_chapter INTEGER,
+    target_state_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'planned'
+                        CHECK(status IN ('planned','active','completed','deferred','invalidated')),
+    completed_chapter INTEGER,
+    source_decision_id TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK(due_end_chapter IS NULL OR due_start_chapter IS NULL OR due_end_chapter >= due_start_chapter),
+    CHECK(json_valid(target_state_json))
+);
+CREATE INDEX IF NOT EXISTS idx_arc_milestones_due
+    ON arc_milestones(status, due_start_chapter, due_end_chapter, not_before_chapter);
+CREATE INDEX IF NOT EXISTS idx_arc_milestones_arc ON arc_milestones(arc_id, status);
+
+CREATE TABLE IF NOT EXISTS decision_sets (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES sessions(id),
+    stage           TEXT NOT NULL,
+    scope_type      TEXT NOT NULL DEFAULT 'project'
+                        CHECK(scope_type IN ('project','story','volume','chapter','draft','replan')),
+    scope_id        TEXT,
+    question        TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'awaiting_choice'
+                        CHECK(status IN ('awaiting_choice','selected','auto_selected','superseded','canceled')),
+    recommended_option_id TEXT,
+    selected_option_id TEXT,
+    context_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at     TEXT,
+    CHECK(json_valid(context_json))
+);
+CREATE INDEX IF NOT EXISTS idx_decision_sets_session ON decision_sets(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_decision_sets_status ON decision_sets(status, stage);
+CREATE INDEX IF NOT EXISTS idx_decision_sets_pending_scope
+    ON decision_sets(session_id, stage, scope_type, scope_id, status);
+
+CREATE TABLE IF NOT EXISTS decision_options (
+    id              TEXT PRIMARY KEY,
+    decision_id     TEXT NOT NULL REFERENCES decision_sets(id),
+    option_index    INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    payload_json    TEXT NOT NULL,
+    rationale       TEXT,
+    impact_json     TEXT NOT NULL DEFAULT '{}',
+    score           REAL,
+    selected        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(decision_id, option_index),
+    CHECK(json_valid(payload_json)),
+    CHECK(json_valid(impact_json))
+);
+CREATE INDEX IF NOT EXISTS idx_decision_options_decision ON decision_options(decision_id, option_index);
+
+CREATE TABLE IF NOT EXISTS plan_revisions (
+    id              TEXT PRIMARY KEY,
+    plan_id         TEXT REFERENCES story_plans(id),
+    source_chapter  INTEGER,
+    reason          TEXT NOT NULL,
+    divergence_score REAL NOT NULL DEFAULT 0.0,
+    before_json     TEXT NOT NULL DEFAULT '{}',
+    after_json      TEXT NOT NULL DEFAULT '{}',
+    source_decision_id TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK(json_valid(before_json)),
+    CHECK(json_valid(after_json))
+);
+CREATE INDEX IF NOT EXISTS idx_plan_revisions_plan ON plan_revisions(plan_id, created_at);
 
 -- 新增列由迁移器在已有库上追加（见 db/migrations.py）；
 -- 新建库通过 CREATE TABLE 定义直接包含（见 facts/draft_index/l1_atoms 表定义）。

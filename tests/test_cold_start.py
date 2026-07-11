@@ -102,11 +102,39 @@ class TestColdStart:
         conn = get_registry().open_conn(project)
         for aid in atom_ids:
             row = conn.execute(
-                "SELECT cold_start FROM l1_atoms WHERE id=?", (aid,)
+                "SELECT cold_start, draft_id, source_line_start, source_line_end, status"
+                " FROM l1_atoms WHERE id=?", (aid,)
             ).fetchone()
             assert row is not None
             assert row["cold_start"] == 1
+            assert row["draft_id"] is not None
+            assert row["source_line_start"] == 1
+            assert row["source_line_end"] >= 1
+            assert row["status"] == "active"
         conn.close()
+
+    def test_repeating_same_cold_start_is_idempotent_for_current_source(self, client, project):
+        payload = {
+            "chapters": [{"chapter_no": 2, "text": "同一份存量正文重复导入。"}],
+            "actor": "test",
+        }
+        first = client.post(f"/v1/{project}/cold_start", json=payload)
+        second = client.post(f"/v1/{project}/cold_start", json=payload)
+        assert first.status_code == second.status_code == 202
+        assert first.json()["atom_ids"] == second.json()["atom_ids"]
+
+        from novelforge.app.deps import get_registry
+        conn = get_registry().open_conn(project)
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM draft_index WHERE chapter=2"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM l1_atoms WHERE chapter=2"
+                " AND atom_type='cold_start_source' AND status='active'"
+            ).fetchone()[0] == 1
+        finally:
+            conn.close()
 
     def test_cold_start_project_not_found(self, client, tmp_data):
         r = client.post("/v1/nonexistent/cold_start", json={

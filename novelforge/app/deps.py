@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ class ProjectMeta:
 class ProjectRegistry:
     def __init__(self) -> None:
         self._projects: dict[str, ProjectMeta] = {}
+        self._migrated_projects: set[str] = set()
+        self._migration_lock = threading.Lock()
         self._load()
 
     def _load(self) -> None:
@@ -76,6 +79,7 @@ class ProjectRegistry:
             db_path=db_path, created_at=datetime.utcnow().isoformat(),
         )
         self._projects[pid] = pm
+        self._migrated_projects.add(pid)
         self._save()
         return pm
 
@@ -137,6 +141,27 @@ class ProjectRegistry:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        # Projects created by an earlier app version must migrate on first
+        # access. Registry connections previously bypassed db.init_db(); cache
+        # only after the connection proves it reached the current schema.
+        if project_id not in self._migrated_projects:
+            with self._migration_lock:
+                if project_id not in self._migrated_projects:
+                    from .. import SCHEMA_VERSION
+                    from ..db.migrations import check_and_migrate, get_db_version
+                    try:
+                        check_and_migrate(conn)
+                        actual = get_db_version(conn)
+                        if actual != SCHEMA_VERSION:
+                            raise RuntimeError(
+                                f"项目 {project_id} schema 版本未就绪："
+                                f"当前 {actual}，期望 {SCHEMA_VERSION}"
+                            )
+                    except Exception:
+                        conn.close()
+                        raise
+                    self._migrated_projects.add(project_id)
         return conn
 
 

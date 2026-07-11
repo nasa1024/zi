@@ -24,6 +24,7 @@ from .api.craft import router as craft_router
 from .api.sessions import router as sessions_router
 from .api.admin import router as admin_router
 from .api.summaries import router as summaries_router
+from .api.agent import router as agent_router
 
 
 @asynccontextmanager
@@ -104,6 +105,7 @@ app.include_router(craft_router, prefix=PREFIX)
 app.include_router(sessions_router, prefix=PREFIX)
 app.include_router(admin_router, prefix=PREFIX)
 app.include_router(summaries_router, prefix=PREFIX)
+app.include_router(agent_router, prefix=PREFIX)
 
 
 @app.get("/health")

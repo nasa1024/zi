@@ -73,6 +73,64 @@ def _make_v4_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _make_partial_v18_db(path: Path) -> sqlite3.Connection:
+    """创建一个已被旧代码标成 v18、但缺 L2/FTS 且尚无
+    fact_candidates.source_draft_id 的局部数据库。"""
+    from novelforge.db.connection import connect, set_meta
+
+    conn = connect(path)
+    conn.executescript("""
+        CREATE TABLE meta_kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE draft_index (
+            id TEXT PRIMARY KEY,
+            chapter INTEGER NOT NULL,
+            revision_round INTEGER NOT NULL DEFAULT 0,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            word_count INTEGER,
+            status TEXT NOT NULL DEFAULT 'draft',
+            volume_no INTEGER,
+            fts_indexed_at TEXT,
+            l1_status TEXT NOT NULL DEFAULT 'pending',
+            l1_extracted_at TEXT,
+            l2_status TEXT NOT NULL DEFAULT 'pending',
+            l2_aggregated_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(chapter, revision_round)
+        );
+        CREATE TABLE l1_atoms (
+            id TEXT PRIMARY KEY,
+            chapter INTEGER NOT NULL,
+            draft_id TEXT,
+            atom_text TEXT NOT NULL,
+            anchor TEXT,
+            extracted_by TEXT,
+            candidate_id TEXT,
+            atom_type TEXT,
+            payload_json TEXT,
+            source_line_start INTEGER,
+            source_line_end INTEGER,
+            content_hash TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            cold_start INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(draft_id) REFERENCES draft_index(id)
+        );
+        CREATE TABLE fact_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            proposal_json TEXT NOT NULL,
+            source_chapter INTEGER
+        );
+    """)
+    set_meta(conn, "schema_version", "18")
+    conn.commit()
+    return conn
+
+
 class TestMigrations:
     def test_no_migration_needed_for_current_version(self, tmp_path):
         """已是最新版本时，migrate() 直接返回相同版本。"""
@@ -106,6 +164,20 @@ class TestMigrations:
         assert column_exists(conn, "facts", "branch_id")
         assert column_exists(conn, "draft_index", "volume_no")
         assert column_exists(conn, "l1_atoms", "cold_start")
+        for col in ("fts_indexed_at", "l1_status", "l1_extracted_at",
+                    "l2_status", "l2_aggregated_at"):
+            assert column_exists(conn, "draft_index", col), f"v18 缺列 {col}"
+        for col in ("atom_type", "payload_json", "source_line_start",
+                    "source_line_end", "content_hash", "status"):
+            assert column_exists(conn, "l1_atoms", col), f"v18 缺列 {col}"
+        # v18 baseline 必须无条件补齐：该 v4 fixture 原本没有 L2/FTS。
+        for table in ("l2_scenes", "scene_vec", "drafts_fts", "fact_candidates"):
+            assert table_exists(conn, table), f"迁移后缺表 {table}"
+        assert column_exists(conn, "fact_candidates", "source_draft_id")
+        indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(fact_candidates)")
+        }
+        assert "idx_cand_source_draft" in indexes
 
         # v6 新表
         assert table_exists(conn, "pipeline_run")
@@ -177,6 +249,153 @@ class TestMigrations:
         assert row["volume_no"] is None
         assert row["branch_id"] is None
         conn.close()
+
+    def test_v18_to_v19_repairs_memory_and_candidate_provenance(self, tmp_path):
+        """v19 修复旧 v18 baseline，补来源草稿并收紧 L1 历史状态。"""
+        from novelforge import SCHEMA_VERSION
+        from novelforge.db.migrations import column_exists, migrate, table_exists
+
+        conn = _make_partial_v18_db(tmp_path / "partial_v18.db")
+        conn.executemany(
+            "INSERT INTO draft_index(id,chapter,revision_round,file_path,sha256)"
+            " VALUES(?,?,?,?,?)",
+            (
+                ("draft_old", 1, 0, "l0/ch0001_r00.txt", "old"),
+                ("draft_new", 1, 1, "l0/ch0001_r01.txt", "new"),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO l1_atoms("
+            " id,chapter,draft_id,atom_text,source_line_start,source_line_end,"
+            " content_hash,status) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                # 属于旧修订且证据不全：superseded 仍优先于 unanchored。
+                ("atom_old", 1, "draft_old", "旧修订", None, None, None, "active"),
+                # 最新修订但缺行号/hash：不可核验。
+                ("atom_unanchored", 1, "draft_new", "无证据", None, None, None, "active"),
+                # 最新修订且证据完整：保持 active。
+                ("atom_active", 1, "draft_new", "可核验", 2, 2, "hash-new", "active"),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO fact_candidates(candidate_id,proposal_json,source_chapter)"
+            " VALUES('cand_old','{}',1)"
+        )
+        conn.commit()
+
+        old, new = migrate(conn)
+
+        assert (old, new) == ("18", SCHEMA_VERSION)
+        assert SCHEMA_VERSION == "19"
+        for table in ("l2_scenes", "scene_vec", "drafts_fts"):
+            assert table_exists(conn, table), f"v19 未修复 v18 缺表 {table}"
+        assert column_exists(conn, "fact_candidates", "source_draft_id")
+        candidate = conn.execute(
+            "SELECT candidate_id, source_draft_id FROM fact_candidates"
+            " WHERE candidate_id='cand_old'"
+        ).fetchone()
+        assert candidate["candidate_id"] == "cand_old"
+        assert candidate["source_draft_id"] is None
+        indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(fact_candidates)")
+        }
+        assert "idx_cand_source_draft" in indexes
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute("SELECT id,status FROM l1_atoms")
+        }
+        assert statuses == {
+            "atom_old": "superseded",
+            "atom_unanchored": "unanchored",
+            "atom_active": "active",
+        }
+        conn.close()
+
+    def test_check_and_migrate_is_fail_closed(self, tmp_path, monkeypatch):
+        """启动迁移异常必须上抛，不得只打印警告后继续运行。"""
+        import novelforge.db.migrations as migrations
+        from novelforge.db.connection import init_db, set_meta
+
+        conn = init_db(tmp_path / "fail_closed.db")
+        set_meta(conn, "schema_version", "18")
+        conn.commit()
+
+        def fail_migration(_conn):
+            raise RuntimeError("synthetic migration failure")
+
+        monkeypatch.setattr(migrations, "migrate", fail_migration)
+        with pytest.raises(RuntimeError, match="synthetic migration failure"):
+            migrations.check_and_migrate(conn)
+        conn.close()
+
+    def test_project_registry_does_not_cache_failed_migration(
+        self, tmp_path, monkeypatch,
+    ):
+        """迁移失败后同一项目下次连接仍必须再次尝试迁移。"""
+        import novelforge.app.deps as deps
+        import novelforge.db.migrations as migrations
+        from novelforge.app.deps import ProjectMeta, ProjectRegistry
+        from novelforge.db.connection import init_db, set_meta
+
+        db = tmp_path / "registry_fail.db"
+        conn = init_db(db)
+        set_meta(conn, "schema_version", "18")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(deps, "_REGISTRY_FILE", tmp_path / "missing-projects.json")
+        registry = ProjectRegistry()
+        registry._projects["p1"] = ProjectMeta(
+            project_id="p1",
+            name="migration failure",
+            genre="xuanhuan",
+            db_path=str(db),
+            created_at="2026-07-11T00:00:00",
+        )
+        calls = 0
+
+        def fail_migration(_conn):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("registry migration failure")
+
+        monkeypatch.setattr(migrations, "check_and_migrate", fail_migration)
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="registry migration failure"):
+                registry.open_conn("p1")
+
+        assert calls == 2
+        assert "p1" not in registry._migrated_projects
+
+    def test_project_registry_requires_confirmed_current_version(
+        self, tmp_path, monkeypatch,
+    ):
+        """check_and_migrate 即使返回，registry 也必须亲自确认版本。"""
+        import novelforge.app.deps as deps
+        import novelforge.db.migrations as migrations
+        from novelforge.app.deps import ProjectMeta, ProjectRegistry
+        from novelforge.db.connection import init_db, set_meta
+
+        db = tmp_path / "registry_stale.db"
+        conn = init_db(db)
+        set_meta(conn, "schema_version", "18")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(deps, "_REGISTRY_FILE", tmp_path / "missing-projects.json")
+        registry = ProjectRegistry()
+        registry._projects["p2"] = ProjectMeta(
+            project_id="p2",
+            name="stale migration",
+            genre="xuanhuan",
+            db_path=str(db),
+            created_at="2026-07-11T00:00:00",
+        )
+        monkeypatch.setattr(migrations, "check_and_migrate", lambda _conn: None)
+
+        with pytest.raises(RuntimeError, match="schema 版本未就绪"):
+            registry.open_conn("p2")
+        assert "p2" not in registry._migrated_projects
 
     def test_new_db_no_migration_runs(self, tmp_path):
         """新建库通过 schema.sql 直接创建，版本即为 SCHEMA_VERSION。"""

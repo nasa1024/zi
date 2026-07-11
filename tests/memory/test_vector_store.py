@@ -76,6 +76,31 @@ class TestSceneVectorStore:
         assert "l2_early" in ids
         assert "l2_late" not in ids
 
+    def test_search_skips_same_dimension_from_different_model(self, conn):
+        """同维度但不同模型/版本的向量不在同一空间，必须跳过。"""
+        emb = HashEmbedder(dim=64)
+        store = SceneVectorStore(conn, emb)
+        _seed_scene(conn, "l2_a", 1, 0, "青云山门")
+        store.upsert("l2_a", 1, "青云山门")
+        conn.execute(
+            "UPDATE scene_vec SET model='other-model', version='v9' WHERE scene_id='l2_a'"
+        )
+        conn.commit()
+        assert store.search("青云山门", as_of=1, limit=5) == []
+
+    def test_search_skips_vector_when_scene_metadata_is_stale(self, conn):
+        emb = HashEmbedder(dim=64)
+        store = SceneVectorStore(conn, emb)
+        _seed_scene(conn, "l2_stale", 1, 0, "旧场景")
+        store.upsert("l2_stale", 1, "旧场景")
+        conn.execute(
+            "UPDATE l2_scenes SET scene_text='新场景', summary='新场景',"
+            " embedding_model=NULL, embedding_dim=NULL, embedding_version=NULL, indexed_at=NULL"
+            " WHERE id='l2_stale'"
+        )
+        conn.commit()
+        assert store.search("旧场景", as_of=1, limit=5) == []
+
     def test_search_limit(self, conn):
         emb = HashEmbedder(dim=128)
         store = SceneVectorStore(conn, emb)

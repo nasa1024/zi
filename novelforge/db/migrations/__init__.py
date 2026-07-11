@@ -51,7 +51,7 @@ def migrate(conn: sqlite3.Connection) -> tuple[str, str]:
         (old_version, new_version) — same string means nothing was applied.
     """
     # 延迟导入，确保所有版本模块已注册
-    from . import v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15  # noqa: F401
+    from . import v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19  # noqa: F401
 
     current = get_meta(conn, "schema_version") or "1"
     applied = []
@@ -71,14 +71,16 @@ def migrate(conn: sqlite3.Connection) -> tuple[str, str]:
 
 
 def check_and_migrate(conn: sqlite3.Connection) -> None:
-    """启动期门控：如需迁移则迁移，打印日志，不中断启动。"""
+    """启动期门控：迁移失败或未到达当前版本时直接中断启动。"""
     import sys
     current = get_meta(conn, "schema_version") or "1"
     if current == SCHEMA_VERSION:
         return
-    try:
-        old, new = migrate(conn)
-        if old != new:
-            print(f"[NovelForge] DB 迁移 {old} → {new}", file=sys.stderr)
-    except Exception as exc:
-        print(f"[NovelForge] 警告：DB 迁移失败（{exc}）", file=sys.stderr)
+    old, new = migrate(conn)
+    if new != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"DB 迁移未到达当前 schema 版本："
+            f"{old} → {new}，期望 {SCHEMA_VERSION}"
+        )
+    if old != new:
+        print(f"[NovelForge] DB 迁移 {old} → {new}", file=sys.stderr)

@@ -56,7 +56,7 @@ def _plans_response(chapters: list[int]) -> str:
     return "```plans\n" + json.dumps(items, ensure_ascii=False) + "\n```"
 
 
-def _patch_gateway(monkeypatch, response_text: str):
+def _patch_gateway(monkeypatch, response_text: str, captured_cfg: dict | None = None):
     """让 volumes API 的 build_gateway 返回 FakeProvider 网关。"""
     import novelforge.control_plane.llm.factory as factory_mod
     from novelforge.control_plane.budget import BudgetLedger
@@ -64,6 +64,11 @@ def _patch_gateway(monkeypatch, response_text: str):
     from novelforge.control_plane.llm.gateway import LLMGateway
 
     def fake_build(cfg, ledger=None):
+        if captured_cfg is not None:
+            captured_cfg.update({
+                "enable_l2": cfg.memory.enable_l2,
+                "l2_every_n_chapters": cfg.memory.l2_every_n_chapters,
+            })
         return LLMGateway(
             FakeProvider(responses=[response_text]),
             BudgetLedger(max_tokens=1_000_000, max_usd=10.0),
@@ -116,6 +121,40 @@ class TestParsePlans:
 # ── API 集成测试 ──────────────────────────────────────────────────────────────
 
 class TestVolumePlanAPI:
+    def test_plan_honors_project_memory_settings_and_env(
+        self, client, project, monkeypatch,
+    ):
+        _create_volume(client, project)
+        patched = client.patch(
+            f"/v1/{project}/memory/settings",
+            json={"enable_l2": False, "enable_summaries": False,
+                  "summary_window_chapters": 9},
+        )
+        assert patched.status_code == 200
+        monkeypatch.setenv("NOVELFORGE_L2_EVERY_N", "7")
+
+        import novelforge.memory.recall as recall_mod
+        original_gather = recall_mod.gather_hard_context
+        recall_args: dict = {}
+
+        def gather_spy(*args, **kwargs):
+            recall_args.update(kwargs)
+            return original_gather(*args, **kwargs)
+
+        monkeypatch.setattr(recall_mod, "gather_hard_context", gather_spy)
+        captured_cfg: dict = {}
+        _patch_gateway(monkeypatch, _plans_response([1]), captured_cfg)
+
+        response = client.post(
+            f"/v1/{project}/volumes/1/plan",
+            json={"from_chapter": 1, "to_chapter": 1},
+        )
+        assert response.status_code == 200, response.text
+        assert recall_args["enable_summaries"] is False
+        assert recall_args["summary_window"] == 9
+        assert captured_cfg["enable_l2"] is False
+        assert captured_cfg["l2_every_n_chapters"] == 7
+
     def test_plan_persists_cards_and_feeds_next_suggestion(self, client, project, monkeypatch):
         _create_volume(client, project)
         _patch_gateway(monkeypatch, _plans_response([1, 2, 3]))

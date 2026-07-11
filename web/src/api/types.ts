@@ -38,7 +38,7 @@ export interface SettingSuggestResponse {
 }
 
 export interface ProjectCreateRequest {
-  name: string;
+  name?: string;
   genre?: string;
   power_system?: string | null;
   config_overrides?: Record<string, unknown> | null;
@@ -125,7 +125,7 @@ export interface PipelineRunRequest {
 
 export interface StageResult {
   stage: string;
-  status: 'ok' | 'blocked' | 'skipped' | 'circuit_broken';
+  status: 'ok' | 'blocked' | 'skipped' | 'circuit_broken' | 'degraded';
   detail: Record<string, unknown>;
 }
 
@@ -179,6 +179,136 @@ export interface PipelineRunDetail extends PipelineRunRecord {
     mentions?: number; advances?: number; payoffs?: number;
     new_created?: string[]; rejected?: string[];
   } | null;
+  plan_reconcile?: {                   // v16: 未来计划对账
+    completed: string[];
+    deferred: string[];
+    divergence_score: number;
+    needs_replan: boolean;
+  } | null;
+}
+
+// v16: Choice-driven Author Agent
+export type AgentInteractionMode = 'guided' | 'copilot' | 'autonomous';
+export type AgentStage =
+  | 'bootstrap'
+  | 'story_plan'
+  | 'volume_plan'
+  | 'chapter_route'
+  | 'chapter_action'
+  | 'draft_choice'
+  | 'post_chapter'
+  | 'finished'
+  | string;
+
+export interface AgentStartRequest {
+  interaction_mode?: AgentInteractionMode;
+  actor?: string;
+  governance_mode?: 'human_gate' | 'auto_promote' | 'hybrid';
+  hints?: string | null;
+  planning_horizon?: number;
+  auto_chapters?: number;
+}
+
+export interface AgentChoiceRequest {
+  action: 'select' | 'auto' | 'reroll';
+  option_id?: string | null;
+  hints?: string | null;
+}
+
+export interface AgentDecisionOption {
+  id: string;
+  decision_id: string;
+  option_index: number;
+  title: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  rationale?: string | null;
+  impact: Record<string, unknown>;
+  score?: number | null;
+  selected: boolean;
+  created_at?: string;
+}
+
+export interface AgentDecision {
+  decision_id: string;
+  stage: AgentStage;
+  scope_type: string;
+  scope_id?: string | null;
+  question: string;
+  status: string;
+  recommended_option_id?: string | null;
+  selected_option_id?: string | null;
+  context: Record<string, unknown>;
+  options: AgentDecisionOption[];
+}
+
+export interface StoryMilestone {
+  id: string;
+  arc_id: string;
+  title: string;
+  summary: string;
+  due_start_chapter?: number | null;
+  due_end_chapter?: number | null;
+  not_before_chapter?: number | null;
+  status: string;
+  completed_chapter?: number | null;
+  target_state?: Record<string, unknown>;
+}
+
+export interface StoryArc {
+  id: string;
+  arc_type: string;
+  title: string;
+  summary: string;
+  objective?: string | null;
+  start_chapter: number;
+  end_chapter?: number | null;
+  priority: number;
+  status: string;
+  milestones: StoryMilestone[];
+}
+
+export interface StoryMapChapter {
+  chapter: number;
+  title?: string | null;
+  goal?: string | null;
+  hook_text?: string | null;
+  status: string;
+  plan_version: number;
+  locked: number | boolean;
+  source_decision_id?: string | null;
+}
+
+export interface StoryMap {
+  plan?: {
+    id: string;
+    version: number;
+    title: string;
+    premise?: string | null;
+    ending_direction?: string | null;
+    phase_summary?: string | null;
+    status: string;
+  } | null;
+  arcs: StoryArc[];
+  volumes: VolumeInfo[];
+  chapters: StoryMapChapter[];
+}
+
+export interface AgentSessionResponse {
+  session_id: string;
+  project_id: string;
+  interaction_mode: AgentInteractionMode;
+  stage: AgentStage;
+  status: 'running' | 'awaiting_choice' | 'finished' | string;
+  decision?: AgentDecision | null;
+  last_decision?: AgentDecision | null;
+  state: Record<string, unknown> & {
+    current_chapter?: number | null;
+    chapters_generated?: number;
+    last_run_id?: string | null;
+  };
+  story_map: StoryMap;
+  error?: string | null;
 }
 
 export interface CandidateInfo {
@@ -286,6 +416,75 @@ export interface SummaryBoardResponse {
   global_synopsis?: string | null;
   volumes: SummaryVolumeItem[];
   chapters: SummaryChapterItem[];
+}
+
+// 项目级记忆管线设置。env_overrides 中的字段由服务端环境变量接管，
+// Studio 只展示其最终生效值，不允许误以为项目设置可以覆盖运维配置。
+export interface MemorySettings {
+  enable_l2: boolean;
+  enable_vector: boolean;
+  enable_l3: boolean;
+  enable_summaries: boolean;
+  l2_every_n_chapters: number;
+  l2_max_scenes_per_chapter: number;
+  vector_top_k: number;
+  summary_window_chapters: number;
+  embedding_provider: string;
+  embedding_model: string;
+  env_overrides: string[];
+}
+
+export interface MemorySettingsPatch {
+  enable_l2?: boolean;
+  enable_vector?: boolean;
+  enable_l3?: boolean;
+  enable_summaries?: boolean;
+  l2_every_n_chapters?: number;
+  l2_max_scenes_per_chapter?: number;
+  vector_top_k?: number;
+  summary_window_chapters?: number;
+}
+
+export interface MemoryLayerHealth {
+  rows: number;
+  chapters: number;
+  completed_chapters: number;
+  coverage_pct: number;
+  details: Record<string, number | string | boolean | null>;
+}
+
+export interface MemoryHealth {
+  latest_chapter: number;
+  settings: Record<string, unknown>;
+  layers: {
+    l0: MemoryLayerHealth;
+    l1: MemoryLayerHealth;
+    l2: MemoryLayerHealth;
+    summaries: MemoryLayerHealth;
+    [key: string]: MemoryLayerHealth;
+  };
+  warnings: string[];
+}
+
+export interface MemoryRebuildRequest {
+  rebuild_l0?: boolean;
+  rebuild_l1?: boolean;
+  rebuild_l2?: boolean;
+  rebuild_vectors?: boolean;
+  force?: boolean;
+}
+
+export interface MemoryRebuildResult {
+  l0?: Record<string, unknown>;
+  l1?: Record<string, unknown>;
+  l2?: Record<string, unknown>;
+  vectors?: Record<string, unknown>;
+  health?: MemoryHealth;
+  [key: string]: unknown;
+}
+
+export interface MemoryRebuildResponse {
+  result: MemoryRebuildResult;
 }
 
 export interface PlannedBeat {

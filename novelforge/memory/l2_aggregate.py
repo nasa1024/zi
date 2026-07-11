@@ -107,27 +107,106 @@ def aggregate_chapter_scenes(
     tier: str = "fast",
     embedder: Optional[Embedder] = None,
     summarize: bool = True,
+    preserve_existing_summaries: bool = False,
+    invalidate_vectors: bool = True,
 ) -> int:
     """把一章切场景、生成摘要写 l2_scenes（幂等）；embedder 给定则同步建向量。
 
     Returns 写入的场景数（空正文返回 0）。
     """
     scenes = split_scenes(draft_text, max_scenes=max_scenes)
-    if not scenes:
-        return 0
 
-    store = SceneVectorStore(conn, embedder) if embedder is not None else None
-    for seq, scene_text in enumerate(scenes):
-        if summarize and gateway is not None:
-            summary = _summarize(gateway, tier, scene_text) or _fallback_summary(scene_text)
-        else:
-            summary = _fallback_summary(scene_text)
-        scene_id = _upsert_scene(conn, chapter, seq, scene_text, summary,
-                                 indexed=store is not None, embedder=embedder)
-        if store is not None and scene_id:
-            store.upsert(scene_id, chapter, summary or scene_text)
-    conn.commit()
-    return len(scenes)
+    try:
+        conn.execute("SAVEPOINT l2_chapter")
+        store = SceneVectorStore(conn, embedder) if embedder is not None else None
+        for seq, scene_text in enumerate(scenes):
+            existing = conn.execute(
+                "SELECT id, scene_text, summary FROM l2_scenes"
+                " WHERE chapter=? AND scene_seq=?",
+                (chapter, seq),
+            ).fetchone()
+            if summarize and gateway is not None:
+                summary = _summarize(gateway, tier, scene_text) or _fallback_summary(scene_text)
+            elif (
+                preserve_existing_summaries
+                and existing is not None
+                and existing["scene_text"] == scene_text
+                and existing["summary"]
+            ):
+                # 无 gateway 的维护重建不应把已有高质量摘要静默降级为截断原文。
+                summary = existing["summary"]
+            else:
+                summary = _fallback_summary(scene_text)
+            content_changed = (
+                existing is None
+                or existing["scene_text"] != scene_text
+                or (existing["summary"] or "") != (summary or "")
+            )
+            scene_id = _upsert_scene(conn, chapter, seq, scene_text, summary)
+            if store is not None and scene_id:
+                metadata = store.upsert(scene_id, chapter, summary or scene_text)
+                conn.execute(
+                    "UPDATE l2_scenes SET embedding_model=?, embedding_dim=?,"
+                    " embedding_version=?, indexed_at=datetime('now') WHERE id=?",
+                    (metadata["model"], metadata["dim"], metadata["version"], scene_id),
+                )
+            elif scene_id and invalidate_vectors and content_changed:
+                # 正文/摘要已变化但本轮未建向量，旧向量必须失效。
+                conn.execute("DELETE FROM scene_vec WHERE scene_id=?", (scene_id,))
+                conn.execute(
+                    "UPDATE l2_scenes SET embedding_model=NULL, embedding_dim=NULL,"
+                    " embedding_version=NULL, indexed_at=NULL WHERE id=?",
+                    (scene_id,),
+                )
+            elif scene_id and content_changed:
+                # 后续会统一重建向量时先保留旧 vec 便于事务失败回滚，但清空场景侧
+                # 元数据，使检索/health 不会把与新正文不匹配的旧向量当成可用。
+                conn.execute(
+                    "UPDATE l2_scenes SET embedding_model=NULL, embedding_dim=NULL,"
+                    " embedding_version=NULL, indexed_at=NULL WHERE id=?",
+                    (scene_id,),
+                )
+
+        # 修订稿可能比旧稿场景更少；清掉尾部陈旧场景及其向量。
+        stale = conn.execute(
+            "SELECT id FROM l2_scenes WHERE chapter=? AND scene_seq>=?",
+            (chapter, len(scenes)),
+        ).fetchall()
+        if stale:
+            stale_ids = [row["id"] for row in stale]
+            ph = ",".join("?" * len(stale_ids))
+            conn.execute(f"DELETE FROM scene_vec WHERE scene_id IN ({ph})", stale_ids)
+            conn.execute(f"DELETE FROM l2_scenes WHERE id IN ({ph})", stale_ids)
+        try:
+            conn.execute(
+                "UPDATE draft_index SET l2_status='completed',"
+                " l2_aggregated_at=datetime('now')"
+                " WHERE id=(SELECT id FROM draft_index WHERE chapter=?"
+                "           ORDER BY revision_round DESC LIMIT 1)",
+                (chapter,),
+            )
+        except sqlite3.Error:
+            pass
+        conn.execute("RELEASE SAVEPOINT l2_chapter")
+        conn.commit()
+        return len(scenes)
+    except Exception:
+        try:
+            conn.execute("ROLLBACK TO SAVEPOINT l2_chapter")
+            conn.execute("RELEASE SAVEPOINT l2_chapter")
+        except sqlite3.Error:
+            conn.rollback()
+        try:
+            conn.execute(
+                "UPDATE draft_index SET l2_status='failed'"
+                " WHERE id=(SELECT id FROM draft_index WHERE chapter=?"
+                "           ORDER BY revision_round DESC LIMIT 1)",
+                (chapter,),
+            )
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+        raise
 
 
 def _summarize(gateway, tier: str, scene_text: str) -> str:
@@ -155,32 +234,23 @@ def _fallback_summary(scene_text: str, limit: int = 80) -> str:
 
 def _upsert_scene(
     conn: sqlite3.Connection, chapter: int, seq: int, scene_text: str, summary: str,
-    *, indexed: bool, embedder: Optional[Embedder],
 ) -> str:
     """按 (chapter, scene_seq) 幂等写入，返回场景 id（已存在则复用其 id）。"""
     row = conn.execute(
         "SELECT id FROM l2_scenes WHERE chapter=? AND scene_seq=?", (chapter, seq)
     ).fetchone()
-    emb_model = embedder.name if (indexed and embedder is not None) else None
-    emb_dim = embedder.dim if (indexed and embedder is not None) else None
-    emb_ver = embedder.version if (indexed and embedder is not None) else None
-    indexed_at = "datetime('now')"
     if row:
         sid = row["id"]
         conn.execute(
-            "UPDATE l2_scenes SET scene_text=?, summary=?,"
-            " embedding_model=?, embedding_dim=?, embedding_version=?,"
-            f" indexed_at=CASE WHEN ? IS NOT NULL THEN {indexed_at} ELSE indexed_at END"
-            " WHERE id=?",
-            (scene_text, summary, emb_model, emb_dim, emb_ver, emb_model, sid),
+            "UPDATE l2_scenes SET scene_text=?, summary=? WHERE id=?",
+            (scene_text, summary, sid),
         )
         return sid
     sid = new_id("l2")
     conn.execute(
-        "INSERT INTO l2_scenes(id, chapter, scene_seq, scene_text, summary,"
-        " embedding_model, embedding_dim, embedding_version, indexed_at)"
-        f" VALUES(?,?,?,?,?,?,?,?, CASE WHEN ? IS NOT NULL THEN {indexed_at} ELSE NULL END)",
-        (sid, chapter, seq, scene_text, summary, emb_model, emb_dim, emb_ver, emb_model),
+        "INSERT INTO l2_scenes(id, chapter, scene_seq, scene_text, summary)"
+        " VALUES(?,?,?,?,?)",
+        (sid, chapter, seq, scene_text, summary),
     )
     return sid
 
@@ -192,13 +262,20 @@ def should_run_l2(chapter: int, *, every_n: int = 4) -> bool:
     return chapter > 0 and every_n > 0 and chapter % every_n == 0
 
 
-def pending_l2_chapters(conn: sqlite3.Connection, up_to_chapter: int) -> list[int]:
-    """chapter<=up_to 且已落 draft_index 但尚无 l2_scenes 的章（升序）。"""
+def pending_l2_chapters(
+    conn: sqlite3.Connection, up_to_chapter: int, *, force: bool = False,
+) -> list[int]:
+    """返回最新 draft 尚未完整聚合的章节；force=True 时返回全部最新章节。"""
     rows = conn.execute(
-        "SELECT DISTINCT chapter FROM draft_index"
-        " WHERE chapter<=? AND chapter NOT IN (SELECT DISTINCT chapter FROM l2_scenes)"
-        " ORDER BY chapter",
-        (up_to_chapter,),
+        "SELECT di.chapter FROM draft_index di"
+        " JOIN (SELECT chapter, MAX(revision_round) AS revision_round"
+        "       FROM draft_index WHERE chapter<=? GROUP BY chapter) latest"
+        "   ON latest.chapter=di.chapter AND latest.revision_round=di.revision_round"
+        " WHERE ?=1 OR di.l2_status<>'completed'"
+        "    OR (COALESCE(di.word_count,1)>0 AND NOT EXISTS ("
+        "        SELECT 1 FROM l2_scenes s WHERE s.chapter=di.chapter))"
+        " ORDER BY di.chapter",
+        (up_to_chapter, 1 if force else 0),
     ).fetchall()
     return [r["chapter"] for r in rows]
 
@@ -212,16 +289,33 @@ def run_l2_window(
     max_scenes: int = 6,
     tier: str = "fast",
     embedder: Optional[Embedder] = None,
+    force: bool = False,
+    preserve_existing_summaries: bool = False,
+    invalidate_vectors: bool = True,
 ) -> dict:
     """回填窗口内所有缺 L2 的章。draft_loader(chapter)→正文（None 则跳过）。"""
-    processed = scenes = 0
-    for ch in pending_l2_chapters(conn, up_to_chapter):
+    processed = scenes = missing_files = 0
+    for ch in pending_l2_chapters(conn, up_to_chapter, force=force):
         text = draft_loader(ch)
-        if not text:
+        if text is None:
+            missing_files += 1
+            try:
+                conn.execute(
+                    "UPDATE draft_index SET l2_status='failed'"
+                    " WHERE id=(SELECT id FROM draft_index WHERE chapter=?"
+                    "           ORDER BY revision_round DESC LIMIT 1)",
+                    (ch,),
+                )
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
             continue
         n = aggregate_chapter_scenes(
-            conn, gateway, ch, text, max_scenes=max_scenes, tier=tier, embedder=embedder)
-        if n:
-            processed += 1
-            scenes += n
-    return {"processed": processed, "scenes": scenes}
+            conn, gateway, ch, text, max_scenes=max_scenes, tier=tier,
+            embedder=embedder,
+            preserve_existing_summaries=preserve_existing_summaries,
+            invalidate_vectors=invalidate_vectors,
+        )
+        processed += 1
+        scenes += n
+    return {"processed": processed, "scenes": scenes, "missing_files": missing_files}

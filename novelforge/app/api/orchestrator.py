@@ -50,12 +50,30 @@ def _make_cfg(project_id: str, req: PipelineRunRequest, registry: ProjectRegistr
         cfg.candidates.n_candidates = max(1, min(3, req.n_candidates))
     if req.quality_check is not None:
         cfg.quality.enabled = req.quality_check
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
-    if api_key:
+    provider = os.environ.get("NOVELFORGE_PROVIDER", "").strip().lower()
+    api_key = (
+        os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+    # The offline FakeProvider is an explicit runtime choice and needs no key.
+    # Previously provider selection was nested under `if api_key`, so
+    # NOVELFORGE_PROVIDER=fake still attempted to build AnthropicProvider.
+    if provider == "fake":
+        cfg.provider.provider = "fake"
+        cfg.provider.api_key = None
+    elif api_key:
         cfg.provider.api_key = api_key
-        cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-    from ...config import apply_runtime_env
-    apply_runtime_env(cfg)   # 第三方 embedding + L2/L3/向量开关（env 驱动，默认全关）
+        cfg.provider.provider = provider or "deepseek"
+    from ...config import apply_project_memory_settings, apply_runtime_env
+    project = registry.get(project_id)
+    if project is not None:
+        settings_conn = registry.open_conn(project_id)
+        try:
+            apply_project_memory_settings(cfg, settings_conn)
+        finally:
+            settings_conn.close()
+    apply_runtime_env(cfg)   # env 覆盖项目记忆设置（运维优先级最高）
     return cfg
 
 
@@ -63,6 +81,18 @@ def _apply_embedding_env(cfg: NovelForgeConfig) -> None:
     """兼容入口：委托集中式 config.apply_embedding_env。"""
     from ...config import apply_embedding_env
     apply_embedding_env(cfg)
+
+
+def _resolved_chapter_goal(conn, req: PipelineRunRequest) -> str:
+    """Manual API calls get the same plan-aware default as Autopilot/Agent."""
+    from ..chapter_suggest import assemble_chapter_goal
+    from ..security import sanitize_user_text
+
+    explicit = sanitize_user_text(req.chapter_goal or "")
+    if explicit:
+        return explicit
+    goal, _ = assemble_chapter_goal(conn, req.chapter_no)
+    return goal
 
 
 @router.post("/{project_id}/pipeline/run", response_model=PipelineRunResponse)
@@ -85,7 +115,7 @@ def pipeline_run(
         orch = _build_orch(cfg)
         outcome = orch.generate_chapter(
             req.chapter_no, conn,
-            chapter_goal=sanitize_user_text(req.chapter_goal or ""),
+            chapter_goal=_resolved_chapter_goal(conn, req),
             entity_ids=req.entity_ids,
             keyword_query=sanitize_user_text(req.keyword_query or "") if req.keyword_query else None,
             progress_cb=on_stage,
@@ -173,7 +203,7 @@ async def pipeline_run_stream(
             orch = _build_orch(cfg)
             outcome = orch.generate_chapter(
                 req.chapter_no, conn,
-                chapter_goal=sanitize_user_text(req.chapter_goal or ""),
+                chapter_goal=_resolved_chapter_goal(conn, req),
                 entity_ids=req.entity_ids,
                 keyword_query=sanitize_user_text(req.keyword_query or "") if req.keyword_query else None,
                 progress_cb=on_stage,
@@ -405,6 +435,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     quality_dimensions = None
     state_degraded = False
     foreshadow_settle = None
+    plan_reconcile = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
@@ -414,6 +445,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
             quality_dimensions = detail.get("quality_dimensions")
             state_degraded = bool(detail.get("state_degraded"))
             foreshadow_settle = detail.get("foreshadow_settle")
+            plan_reconcile = detail.get("plan_reconcile")
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             for i, c in enumerate(detail.get("candidates") or []):
@@ -448,6 +480,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         quality_dimensions=quality_dimensions,
         state_degraded=state_degraded,
         foreshadow_settle=foreshadow_settle,
+        plan_reconcile=plan_reconcile,
     )
 
 
@@ -472,6 +505,7 @@ def select_candidate(
     from ...control_plane.orchestrator import (
         _persist_chapter_summary, _persist_draft, _proposals_to_candidates,
     )
+    from ...memory.l1_atoms import persist_proposal_atoms
 
     conn = registry.open_conn(project_id)
     try:
@@ -502,17 +536,66 @@ def select_candidate(
         if not chosen_text:
             raise HTTPException(422, "选中候选正文为空")
 
-        if idx != detail.get("winner"):
+        did_replace = idx != detail.get("winner")
+        if did_replace:
+            # The pipeline reconciles the automatically selected winner during
+            # settlement.  When the author chooses another candidate, undo
+            # winner-specific milestone completions and validate/reconcile the
+            # actual final text before it becomes the chapter truth.
+            from ...planning.alignment import check_plan_alignment, reconcile_plan
+            from ...planning.context import gather_plan_context
+
+            previous_reconcile = detail.get("plan_reconcile") or {}
+            completed_ids = [
+                str(item) for item in previous_reconcile.get("completed") or [] if item
+            ]
+            for milestone_id in completed_ids:
+                conn.execute(
+                    "UPDATE arc_milestones SET status='planned', completed_chapter=NULL,"
+                    " updated_at=datetime('now') WHERE id=? AND status='completed'"
+                    " AND completed_chapter=?",
+                    (milestone_id, chapter),
+                )
+
+            plan_context = gather_plan_context(conn, chapter)
+            plan_issues = check_plan_alignment(plan_context, chosen_text, chapter)
+            blocking_plan_issues = [
+                issue for issue in plan_issues if issue.get("severity") == "block"
+            ]
+            if blocking_plan_issues:
+                conn.rollback()
+                messages = "；".join(
+                    str(issue.get("message") or issue.get("code"))
+                    for issue in blocking_plan_issues
+                )
+                raise HTTPException(422, f"候选稿违反未来计划硬约束: {messages}")
+
             db_entry = registry.get(project_id)
             draft_id = _persist_draft(conn, chosen_text, chapter, project_id,
                                       db_entry.db_path if db_entry else "novel.db")
             if draft_id is None:
                 raise HTTPException(500, "换稿落盘失败")
             # 选中稿的提案入 staging（人审兜底；原胜者提案仍在队列由审稿人裁决）
-            _proposals_to_candidates(chosen.get("proposals") or [], chapter, conn)
+            selected_proposals = chosen.get("proposals") or []
+            candidates = _proposals_to_candidates(
+                selected_proposals, chapter, conn, source_draft_id=draft_id
+            )
+            persist_proposal_atoms(
+                conn,
+                chapter=chapter,
+                draft_id=draft_id,
+                draft_text=chosen_text,
+                proposals=selected_proposals,
+                candidate_ids=[c.candidate_id for c in candidates],
+                extracted_by="human_selected_draft_v1",
+            )
             conn.execute(
                 "UPDATE pipeline_run SET draft_id=? WHERE run_id=?",
                 (draft_id, run_id),
+            )
+            detail["plan_issues"] = plan_issues
+            detail["plan_reconcile"] = reconcile_plan(
+                conn, plan_context, chosen_text, chapter
             )
 
         detail["winner"] = idx
@@ -523,18 +606,38 @@ def select_candidate(
         )
         conn.commit()
 
-        # 章摘要随稿更新（best-effort，需 LLM key；失败静默）
+        # 章摘要与 L2 随稿更新（best-effort）。_persist_draft 已使旧 L2 失效，
+        # 因此人工换稿必须立即重建本章，不能等到下一个 N 章触发点。
         try:
             db_entry = registry.get(project_id)
             cfg = NovelForgeConfig(project_id=project_id,
                                    db_path=db_entry.db_path if db_entry else "novel.db")
-            api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
-            if api_key:
-                cfg.provider.api_key = api_key
-                cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-            from ...control_plane.llm import factory as llm_factory
-            gw = llm_factory.build_gateway(cfg)
-            _persist_chapter_summary(conn, gw, chapter, chosen_text)
+            from ...config import apply_project_memory_settings, apply_runtime_env
+            from .memory import _optional_memory_gateway
+
+            apply_project_memory_settings(cfg, conn)
+            apply_runtime_env(cfg)
+            gw = _optional_memory_gateway(cfg)
+            if cfg.recall.enable_summaries and gw is not None:
+                _persist_chapter_summary(conn, gw, chapter, chosen_text)
+            if did_replace and cfg.memory.enable_l2:
+                from ...memory.embedding import build_embedder
+                from ...memory.l2_aggregate import aggregate_chapter_scenes
+
+                embedder = (
+                    build_embedder(cfg.memory, dim=cfg.memory.embedding_dim)
+                    if cfg.recall.enable_vector else None
+                )
+                aggregate_chapter_scenes(
+                    conn,
+                    gw,
+                    chapter,
+                    chosen_text,
+                    max_scenes=cfg.memory.l2_max_scenes_per_chapter,
+                    tier=cfg.memory.l2_tier,
+                    embedder=embedder,
+                    preserve_existing_summaries=False,
+                )
         except Exception:
             pass
 

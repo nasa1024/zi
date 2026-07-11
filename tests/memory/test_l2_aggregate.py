@@ -105,6 +105,28 @@ class TestAggregate:
         n = conn.execute("SELECT COUNT(*) AS c FROM l2_scenes WHERE chapter=3").fetchone()["c"]
         assert n == 2        # 不重复
 
+    def test_revision_removes_stale_tail_and_vectors(self, conn):
+        emb = HashEmbedder(dim=64)
+        aggregate_chapter_scenes(
+            conn, _gw(), 4,
+            "旧稿第一场足够长足够长。\n***\n旧稿第二场足够长足够长。",
+            embedder=emb,
+        )
+        aggregate_chapter_scenes(
+            conn, _gw(), 4, "新稿只剩一个场景但内容足够长足够长。",
+            embedder=None,
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM l2_scenes WHERE chapter=4"
+        ).fetchone()["c"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM scene_vec WHERE chapter=4"
+        ).fetchone()["c"] == 0
+        row = conn.execute(
+            "SELECT embedding_model, indexed_at FROM l2_scenes WHERE chapter=4"
+        ).fetchone()
+        assert row["embedding_model"] is None and row["indexed_at"] is None
+
     def test_degrade_without_gateway(self, conn):
         """无 gateway（LLM 不可用）也能写场景，摘要降级为截断原文。"""
         text = "一段没有 LLM 摘要时直接截断当摘要的正文，内容足够长足够长。"
@@ -113,12 +135,49 @@ class TestAggregate:
         row = conn.execute("SELECT summary FROM l2_scenes WHERE chapter=5").fetchone()
         assert row["summary"]      # 非空（截断原文）
 
+    def test_maintenance_without_gateway_preserves_existing_summary(self, conn):
+        text = "这一段正文保持不变，但已有摘要来自高质量模型。"
+        aggregate_chapter_scenes(conn, None, 6, text)
+        conn.execute(
+            "UPDATE l2_scenes SET summary='高质量场景摘要' WHERE chapter=6"
+        )
+        conn.commit()
+
+        aggregate_chapter_scenes(
+            conn, None, 6, text, preserve_existing_summaries=True
+        )
+        row = conn.execute(
+            "SELECT summary FROM l2_scenes WHERE chapter=6"
+        ).fetchone()
+        assert row["summary"] == "高质量场景摘要"
+
     def test_with_embedder_indexes_vectors(self, conn):
         text = "施法场景足够长足够长。\n***\n战斗场景足够长足够长。"
         emb = HashEmbedder(dim=128)
         aggregate_chapter_scenes(conn, _gw(), 2, text, max_scenes=6, embedder=emb)
         nvec = conn.execute("SELECT COUNT(*) AS c FROM scene_vec WHERE chapter=2").fetchone()["c"]
         assert nvec == 2
+
+    def test_embedding_failure_rolls_back_partial_scenes(self, conn):
+        class BrokenEmbedder:
+            name = "broken"
+            version = "v1"
+            dim = 8
+
+            def embed(self, texts):
+                raise RuntimeError("embedding unavailable")
+
+        with pytest.raises(RuntimeError, match="embedding unavailable"):
+            aggregate_chapter_scenes(
+                conn, _gw(), 7, "第一场足够长足够长。\n***\n第二场足够长足够长。",
+                max_scenes=6, embedder=BrokenEmbedder(),
+            )
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM l2_scenes WHERE chapter=7"
+        ).fetchone()["c"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM scene_vec WHERE chapter=7"
+        ).fetchone()["c"] == 0
 
     def test_empty_text_no_rows(self, conn):
         assert aggregate_chapter_scenes(conn, _gw(), 9, "", max_scenes=6) == 0
@@ -141,6 +200,48 @@ class TestWindow:
         aggregate_chapter_scenes(conn, _gw(), 2, "已聚合的一章正文足够长足够长。", max_scenes=6)
         pending = pending_l2_chapters(conn, up_to_chapter=3)
         assert pending == [1, 3]      # 2 已聚合被排除，顺序升序
+
+    def test_pending_status_replays_even_when_legacy_scene_exists(self, conn):
+        _seed_draft(conn, 4)
+        conn.execute(
+            "INSERT INTO l2_scenes(id,chapter,scene_seq,scene_text,summary)"
+            " VALUES('legacy',4,0,'旧场景','旧摘要')"
+        )
+        conn.commit()
+        assert pending_l2_chapters(conn, 4) == [4]
+
+        out = run_l2_window(
+            conn, None, 4, lambda _: "迁移后应从最新 L0 重放的新场景正文。"
+        )
+        assert out["processed"] == 1
+        row = conn.execute(
+            "SELECT l2_status FROM draft_index WHERE chapter=4"
+        ).fetchone()
+        assert row["l2_status"] == "completed"
+        assert "迁移后" in conn.execute(
+            "SELECT scene_text FROM l2_scenes WHERE chapter=4"
+        ).fetchone()["scene_text"]
+
+    def test_only_latest_revision_controls_pending_state(self, conn):
+        _seed_draft(conn, 5)
+        conn.execute(
+            "INSERT INTO draft_index(id,chapter,revision_round,file_path,sha256,status,l2_status)"
+            " VALUES('d5r1',5,1,'/tmp/ch5r1.md','x','committed','completed')"
+        )
+        conn.execute(
+            "INSERT INTO l2_scenes(id,chapter,scene_seq,scene_text,summary)"
+            " VALUES('current5',5,0,'当前场景','当前摘要')"
+        )
+        conn.commit()
+        assert pending_l2_chapters(conn, 5) == []
+
+    def test_completed_without_scene_is_repairable(self, conn):
+        _seed_draft(conn, 6)
+        conn.execute(
+            "UPDATE draft_index SET l2_status='completed' WHERE chapter=6"
+        )
+        conn.commit()
+        assert pending_l2_chapters(conn, 6) == [6]
 
     def test_run_window_processes_pending(self, conn):
         for ch in (1, 2):

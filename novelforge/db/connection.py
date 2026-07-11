@@ -105,3 +105,80 @@ def rebuild_facts_fts(conn: sqlite3.Connection) -> int:
         n += 1
     conn.commit()
     return n
+
+
+def _iter_draft_chunks(text: str):
+    """按空行切成带 1-based 行号的段落，供 L0 FTS 与 source_ref 共用。"""
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start: int | None = None
+    buf: list[str] = []
+    for idx, line in enumerate(lines, start=1):
+        if line.strip():
+            if start is None:
+                start = idx
+            buf.append(line)
+            continue
+        if start is not None and buf:
+            yield start, idx - 1, "\n".join(buf).strip()
+        start, buf = None, []
+    if start is not None and buf:
+        yield start, len(lines), "\n".join(buf).strip()
+
+
+def index_draft_fts(
+    conn: sqlite3.Connection,
+    draft_id: str,
+    chapter: int,
+    text: str,
+) -> int:
+    """把一章最新 L0 正文写入 drafts_fts；调用方控制事务。"""
+    # Recall 只应看到当前修订，换稿时移除同章旧版本索引，避免过期内容混入。
+    conn.execute("DELETE FROM drafts_fts WHERE chapter_no=?", (chapter,))
+    count = 0
+    for line_start, line_end, body in _iter_draft_chunks(text):
+        tokenized = tokenize(body)
+        if not tokenized:
+            continue
+        conn.execute(
+            "INSERT INTO drafts_fts(draft_id, chapter_no, line_start, line_end, body)"
+            " VALUES(?,?,?,?,?)",
+            (draft_id, chapter, line_start, line_end, tokenized),
+        )
+        count += 1
+    try:
+        conn.execute(
+            "UPDATE draft_index SET fts_indexed_at=datetime('now') WHERE id=?",
+            (draft_id,),
+        )
+    except sqlite3.Error:
+        # 兼容尚未执行 v18 的独立旧库连接。
+        pass
+    return count
+
+
+def rebuild_drafts_fts(conn: sqlite3.Connection) -> dict[str, int]:
+    """从每章最新 L0 文件全量重建 drafts_fts。"""
+    from .l0 import load_draft_text_by_id
+
+    conn.execute("DELETE FROM drafts_fts")
+    try:
+        conn.execute("UPDATE draft_index SET fts_indexed_at=NULL")
+    except sqlite3.Error:
+        pass
+    rows = conn.execute(
+        "SELECT di.id, di.chapter FROM draft_index di"
+        " JOIN (SELECT chapter, MAX(revision_round) AS revision_round"
+        "       FROM draft_index GROUP BY chapter) latest"
+        "   ON latest.chapter=di.chapter AND latest.revision_round=di.revision_round"
+        " ORDER BY di.chapter"
+    ).fetchall()
+    drafts = chunks = missing = 0
+    for row in rows:
+        text = load_draft_text_by_id(conn, row["id"])
+        if text is None:
+            missing += 1
+            continue
+        chunks += index_draft_fts(conn, row["id"], row["chapter"], text)
+        drafts += 1
+    conn.commit()
+    return {"drafts": drafts, "chunks": chunks, "missing_files": missing}

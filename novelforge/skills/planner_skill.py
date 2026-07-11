@@ -65,10 +65,12 @@ class PlannerSkill:
                 f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
             ) if p
         ) or "(无召回上下文)"
+        future_plan = ctx.workspace.get("future_plan_context", "")
 
         user_msg = (
             f"{context_block}\n\n"
-            f"## 规划任务\n"
+            + (f"{future_plan}\n\n" if future_plan else "")
+            + f"## 规划任务\n"
             f"当前章节：第 {ctx.target_chapter} 章\n"
             f"章节目标：{chapter_goal or '按情节自然发展'}"
         )

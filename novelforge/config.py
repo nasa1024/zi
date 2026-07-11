@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -122,7 +124,7 @@ class NovelForgeConfig:
 
 # ── 运行期环境变量覆盖（集中入口；pipeline / autopilot 共用）──────────────────
 #
-# 系统无配置文件加载器，运行期配置 = dataclass 默认 + 环境变量 + 每请求 API 字段。
+# 运行期配置 = dataclass 安全默认 + 项目 memory_settings + 环境变量 + 每请求 API 字段。
 # 下列 helper 把"记忆管线 / 向量召回 / 第三方 embedding"相关 env 注入 cfg，
 # 默认全部不设 → 行为不变。LLM provider/key 的 env 仍在各 API 站点单独处理。
 
@@ -130,7 +132,12 @@ def _env_bool(name: str) -> Optional[bool]:
     v = os.environ.get(name)
     if v is None:
         return None
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    normalized = v.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    return None
 
 
 def _env_int(name: str) -> Optional[int]:
@@ -143,10 +150,20 @@ def _env_int(name: str) -> Optional[int]:
         return None
 
 
+def _env_bounded_int(name: str, minimum: int, maximum: int) -> Optional[int]:
+    value = _env_int(name)
+    if value is None or not minimum <= value <= maximum:
+        return None
+    return value
+
+
 def apply_embedding_env(cfg: "NovelForgeConfig") -> None:
     """第三方 embedding 后端 env → cfg.memory（不设 PROVIDER 则保持默认离线 hash）。"""
     provider = os.environ.get("NOVELFORGE_EMBEDDING_PROVIDER")
     if not provider:
+        return
+    provider = provider.strip().lower()
+    if provider not in {"hash", "openai"}:
         return
     cfg.memory.embedding_provider = provider
     model = os.environ.get("NOVELFORGE_EMBEDDING_MODEL")
@@ -157,13 +174,13 @@ def apply_embedding_env(cfg: "NovelForgeConfig") -> None:
     )
     cfg.memory.embedding_api_key = (
         os.environ.get("NOVELFORGE_EMBEDDING_API_KEY")
-        or os.environ.get("NOVELFORGE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
         or os.environ.get("DEEPSEEK_API_KEY")
     )
 
 
 def apply_memory_env(cfg: "NovelForgeConfig") -> None:
-    """L2/L3/向量召回开关 + 调参 env → cfg（不设则保持默认全关）。"""
+    """L2/L3/向量召回开关 + 调参 env → cfg（不设则保持当前项目设置）。"""
     b = _env_bool("NOVELFORGE_ENABLE_L2")
     if b is not None:
         cfg.memory.enable_l2 = b
@@ -173,20 +190,20 @@ def apply_memory_env(cfg: "NovelForgeConfig") -> None:
     b = _env_bool("NOVELFORGE_ENABLE_VECTOR")
     if b is not None:
         cfg.recall.enable_vector = b
-    i = _env_int("NOVELFORGE_L2_EVERY_N")
-    if i:
+    i = _env_bounded_int("NOVELFORGE_L2_EVERY_N", 1, 50)
+    if i is not None:
         cfg.memory.l2_every_n_chapters = i
-    i = _env_int("NOVELFORGE_L2_MAX_SCENES")
-    if i:
+    i = _env_bounded_int("NOVELFORGE_L2_MAX_SCENES", 1, 20)
+    if i is not None:
         cfg.memory.l2_max_scenes_per_chapter = i
-    i = _env_int("NOVELFORGE_VECTOR_TOP_K")
-    if i:
+    i = _env_bounded_int("NOVELFORGE_VECTOR_TOP_K", 1, 50)
+    if i is not None:
         cfg.memory.vector_top_k = i
-    i = _env_int("NOVELFORGE_RRF_K")
-    if i:
+    i = _env_bounded_int("NOVELFORGE_RRF_K", 1, 1000)
+    if i is not None:
         cfg.memory.rrf_k = i
-    i = _env_int("NOVELFORGE_EMBEDDING_DIM")
-    if i:
+    i = _env_bounded_int("NOVELFORGE_EMBEDDING_DIM", 1, 8192)
+    if i is not None:
         cfg.memory.embedding_dim = i
 
 
@@ -194,3 +211,135 @@ def apply_runtime_env(cfg: "NovelForgeConfig") -> None:
     """集中应用记忆/向量/embedding 的 env 覆盖。pipeline 与 autopilot 路径共用。"""
     apply_embedding_env(cfg)
     apply_memory_env(cfg)
+
+
+# ── 项目级记忆设置 ────────────────────────────────────────────────────────────
+
+PROJECT_MEMORY_META_KEY = "memory_settings"
+DEFAULT_PROJECT_MEMORY_SETTINGS: dict[str, object] = {
+    # 产品默认开启 L2 + 离线 hash 向量；低层 dataclass 仍保持关闭，方便测试/脚本显式控制。
+    "enable_l2": True,
+    "enable_vector": True,
+    "enable_l3": False,
+    "enable_summaries": True,
+    "l2_every_n_chapters": 4,
+    "l2_max_scenes_per_chapter": 6,
+    "vector_top_k": 8,
+    "summary_window_chapters": 5,
+}
+
+_PROJECT_MEMORY_BOOL_FIELDS = {
+    "enable_l2", "enable_vector", "enable_l3", "enable_summaries",
+}
+_PROJECT_MEMORY_INT_RANGES: dict[str, tuple[int, int]] = {
+    "l2_every_n_chapters": (1, 50),
+    "l2_max_scenes_per_chapter": (1, 20),
+    "vector_top_k": (1, 50),
+    "summary_window_chapters": (1, 50),
+}
+
+
+def _validated_project_memory_updates(raw: object) -> dict[str, object]:
+    """只接受类型正确且位于产品范围内的项目设置。
+
+    meta_kv 可能来自旧版本或被手工编辑；这里不能用 ``bool('false')`` 或
+    ``int(...)`` 强转，否则损坏数据会静默改变运行时行为。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, object] = {}
+    for key in _PROJECT_MEMORY_BOOL_FIELDS:
+        value = raw.get(key)
+        if isinstance(value, bool):
+            out[key] = value
+    for key, (minimum, maximum) in _PROJECT_MEMORY_INT_RANGES.items():
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            if minimum <= value <= maximum:
+                out[key] = value
+    return out
+
+
+def load_project_memory_settings(conn: sqlite3.Connection) -> dict[str, object]:
+    """读取项目设置；未保存过时返回面向产品的默认值。"""
+    settings = dict(DEFAULT_PROJECT_MEMORY_SETTINGS)
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta_kv WHERE key=?", (PROJECT_MEMORY_META_KEY,)
+        ).fetchone()
+        if row and row["value"]:
+            raw = json.loads(row["value"])
+            settings.update(_validated_project_memory_updates(raw))
+    except (sqlite3.Error, TypeError, json.JSONDecodeError):
+        pass
+    return settings
+
+
+def save_project_memory_settings(
+    conn: sqlite3.Connection, updates: dict[str, object]
+) -> dict[str, object]:
+    """合并并保存项目记忆设置，返回完整设置。"""
+    settings = load_project_memory_settings(conn)
+    settings.update(_validated_project_memory_updates(updates))
+    conn.execute(
+        "INSERT INTO meta_kv(key,value) VALUES(?,?)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+        (PROJECT_MEMORY_META_KEY, json.dumps(settings, ensure_ascii=False, sort_keys=True)),
+    )
+    conn.commit()
+    return settings
+
+
+def apply_project_memory_settings(
+    cfg: "NovelForgeConfig", conn: sqlite3.Connection
+) -> dict[str, object]:
+    """把项目设置注入 cfg；调用后再 apply_runtime_env，使运维 env 拥有最高优先级。"""
+    settings = load_project_memory_settings(conn)
+    cfg.memory.enable_l2 = settings["enable_l2"]
+    cfg.memory.enable_l3 = settings["enable_l3"]
+    cfg.recall.enable_vector = settings["enable_vector"]
+    cfg.recall.enable_summaries = settings["enable_summaries"]
+    cfg.memory.l2_every_n_chapters = settings["l2_every_n_chapters"]
+    cfg.memory.l2_max_scenes_per_chapter = settings["l2_max_scenes_per_chapter"]
+    cfg.memory.vector_top_k = settings["vector_top_k"]
+    cfg.recall.summary_window_chapters = settings["summary_window_chapters"]
+    return settings
+
+
+def effective_memory_settings(cfg: "NovelForgeConfig") -> dict[str, object]:
+    return {
+        "enable_l2": cfg.memory.enable_l2,
+        "enable_vector": cfg.recall.enable_vector,
+        "enable_l3": cfg.memory.enable_l3,
+        "enable_summaries": cfg.recall.enable_summaries,
+        "l2_every_n_chapters": cfg.memory.l2_every_n_chapters,
+        "l2_max_scenes_per_chapter": cfg.memory.l2_max_scenes_per_chapter,
+        "vector_top_k": cfg.memory.vector_top_k,
+        "summary_window_chapters": cfg.recall.summary_window_chapters,
+        "embedding_provider": cfg.memory.embedding_provider,
+        "embedding_model": cfg.memory.embedding_model,
+    }
+
+
+def memory_env_overrides() -> list[str]:
+    overrides: list[str] = []
+    for env, field in (
+        ("NOVELFORGE_ENABLE_L2", "enable_l2"),
+        ("NOVELFORGE_ENABLE_L3", "enable_l3"),
+        ("NOVELFORGE_ENABLE_VECTOR", "enable_vector"),
+    ):
+        if _env_bool(env) is not None:
+            overrides.append(field)
+    for env, field, minimum, maximum in (
+        ("NOVELFORGE_L2_EVERY_N", "l2_every_n_chapters", 1, 50),
+        ("NOVELFORGE_L2_MAX_SCENES", "l2_max_scenes_per_chapter", 1, 20),
+        ("NOVELFORGE_VECTOR_TOP_K", "vector_top_k", 1, 50),
+    ):
+        if _env_bounded_int(env, minimum, maximum) is not None:
+            overrides.append(field)
+    provider = (os.environ.get("NOVELFORGE_EMBEDDING_PROVIDER") or "").strip().lower()
+    if provider in {"hash", "openai"}:
+        overrides.append("embedding_provider")
+        if os.environ.get("NOVELFORGE_EMBEDDING_MODEL"):
+            overrides.append("embedding_model")
+    return overrides

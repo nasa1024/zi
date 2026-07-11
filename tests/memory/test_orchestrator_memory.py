@@ -50,15 +50,21 @@ class TestHelpers:
         assert _is_volume_end(conn, 5) is True
         assert _is_volume_end(conn, 4) is False
 
-    def test_load_chapter_text(self, conn, tmp_path):
-        f = tmp_path / "ch1.md"
+    def test_load_chapter_text(self, tmp_path):
+        from novelforge.db.connection import init_db
+
+        conn = init_db(tmp_path / "novel.db")
+        l0 = tmp_path / "l0"
+        l0.mkdir()
+        f = l0 / "ch1.md"
         f.write_text("第一章的正文内容。", encoding="utf-8")
         conn.execute(
             "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, status)"
-            " VALUES('d1',1,0,?, 'x','committed')", (str(f),))
+            " VALUES('d1',1,0,'l0/ch1.md', 'x','committed')")
         conn.commit()
         assert _load_chapter_text(conn, 1) == "第一章的正文内容。"
         assert _load_chapter_text(conn, 99) is None
+        conn.close()
 
 
 # ── 单元：_run_l2 触发与写库 ─────────────────────────────────────────────────
@@ -249,5 +255,40 @@ class TestSettleGate:
             assert outcome.ok, outcome.error
             n = conn.execute("SELECT COUNT(*) AS c FROM l2_scenes WHERE chapter=1").fetchone()["c"]
             assert n >= 1          # 开启 → settle 跑出场景
+        finally:
+            conn.close()
+
+    def test_normal_generation_persists_l1_atoms(self, client, project, monkeypatch):
+        import tests.memory.test_orchestrator_memory as this_module
+
+        def response_with_proposal(body: str) -> str:
+            proposal = [{
+                "op": "add",
+                "fact_type": "event",
+                "new": {"subject": "主角", "predicate": "完成", "object": "单稿正文"},
+                "valid_from_chapter": 1,
+            }]
+            return (
+                f"```draft\n{body}\n```\n"
+                f"```proposals\n{json.dumps(proposal, ensure_ascii=False)}\n```"
+            )
+
+        monkeypatch.setattr(this_module, "_draft_response", response_with_proposal)
+        orch = _build_orch(project, enable_l2=False)
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="入门")
+            assert outcome.ok, outcome.error
+            row = conn.execute(
+                "SELECT draft_id, candidate_id, status FROM l1_atoms WHERE chapter=1"
+            ).fetchone()
+            assert row is not None
+            latest = conn.execute(
+                "SELECT id FROM draft_index WHERE chapter=1"
+                " ORDER BY revision_round DESC LIMIT 1"
+            ).fetchone()
+            assert row["draft_id"] == latest["id"]
+            assert row["candidate_id"] is not None
+            assert row["status"] == "active"
         finally:
             conn.close()

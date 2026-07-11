@@ -27,6 +27,8 @@ import type {
 } from '../../api/types';
 import VolumesPanel from './VolumesPanel';
 import SummariesPanel from './SummariesPanel';
+import AgentPanel from './AgentPanel';
+import MemoryPanel from './MemoryPanel';
 import '../../styles/studio.css';
 
 export interface StudioProps {
@@ -40,10 +42,11 @@ export interface StudioProps {
   onRefetchProjects: () => void;
 }
 
-type TabKey = 'seed' | 'bible' | 'state' | 'search' | 'reviews' | 'pipeline'
-  | 'volumes' | 'summaries';
+type TabKey = 'agent' | 'seed' | 'bible' | 'state' | 'search' | 'reviews' | 'pipeline'
+  | 'volumes' | 'summaries' | 'memory';
 
 const TABS: { key: TabKey; label: string }[] = [
+  { key: 'agent', label: '✨ 创作 Agent' },
   { key: 'seed', label: '📝 录入设定' },
   { key: 'bible', label: '📖 世界圣经' },
   { key: 'state', label: '🌍 世界状态' },
@@ -51,6 +54,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'reviews', label: '🧑‍⚖️ 审核队列' },
   { key: 'volumes', label: '📚 卷 · OKR' },
   { key: 'summaries', label: '🗺 故事脉络' },
+  { key: 'memory', label: '🧠 项目记忆' },
   { key: 'pipeline', label: '⚙️ 生成章节' },
 ];
 
@@ -73,7 +77,7 @@ export default function Studio({
   onRefetchProjects: refetch,
 }: StudioProps): JSX.Element {
   const { online, version, loading: healthLoading } = useHealth();
-  const [tab, setTab] = useState<TabKey>('seed');
+  const [tab, setTab] = useState<TabKey>('agent');
 
   const apiBase = import.meta.env.VITE_API_BASE || '(dev proxy → :8787)';
   const active = projects.find((p) => p.project_id === activeProjectId) ?? null;
@@ -98,7 +102,7 @@ export default function Studio({
             <h2 className="cn">
               ⚙️ 工作台<span className="en">STUDIO</span>
             </h2>
-            <p>真实调用后端确定性核心：录入设定、渲染世界圣经、投影世界状态、检索、审核与生成。</p>
+            <p>真实调用后端确定性核心：录入设定、渲染世界圣经、投影世界状态、检索、记忆、审核与生成。</p>
           </div>
           <div className="studio-status">
             <span className={`status-pill ${statusClass}`}>
@@ -183,6 +187,9 @@ export default function Studio({
               ))}
             </div>
 
+            {tab === 'agent' && (
+              <AgentPanel projectId={active.project_id} onChanged={refetch} />
+            )}
             {tab === 'seed' && (
               <SeedPanel projectId={active.project_id} onChanged={refetch} />
             )}
@@ -196,6 +203,7 @@ export default function Studio({
               <VolumesPanel projectId={active.project_id} onChanged={refetch} />
             )}
             {tab === 'summaries' && <SummariesPanel projectId={active.project_id} />}
+            {tab === 'memory' && <MemoryPanel projectId={active.project_id} />}
             {tab === 'pipeline' && (
               <PipelinePanel projectId={active.project_id} onChanged={refetch} />
             )}
@@ -923,6 +931,23 @@ function ForeshadowSettleChip({
     >
       🪝 回收 {settle.payoffs ?? 0} · 推进 {settle.advances ?? 0} · 提及 {settle.mentions ?? 0}
       {created.length > 0 && ` · 新建 ${created.length}`}
+    </span>
+  );
+}
+
+// v16: future-plan settlement stays separate from canon settlement.
+function PlanReconcileChip({
+  reconcile,
+}: { reconcile?: PipelineRunDetail['plan_reconcile'] }): JSX.Element | null {
+  if (!reconcile) return null;
+  const tone = reconcile.needs_replan ? '⚠' : '🧭';
+  return (
+    <span
+      className="rs-chip"
+      title={`未来路线对账：完成 ${reconcile.completed.length}，延期 ${reconcile.deferred.length}，偏航分 ${reconcile.divergence_score}${reconcile.needs_replan ? '；建议重新规划后续章节' : ''}`}
+    >
+      {tone} 路线对账 · 完成 {reconcile.completed.length} · 延期 {reconcile.deferred.length}
+      {reconcile.needs_replan && ' · 建议重排'}
     </span>
   );
 }
@@ -1919,6 +1944,7 @@ function PipelinePanel({
               )}
               <DimensionChips dims={doneData.quality_dimensions} />
               <PatchStatsChips stats={runDetail?.patch_stats} />
+              <PlanReconcileChip reconcile={runDetail?.plan_reconcile} />
             </div>
           )}
 
@@ -2086,7 +2112,8 @@ function PipelinePanel({
                     {(runDetails[rec.run_id].quality_dimensions ||
                       runDetails[rec.run_id].patch_stats ||
                       runDetails[rec.run_id].state_degraded ||
-                      runDetails[rec.run_id].foreshadow_settle) && (
+                      runDetails[rec.run_id].foreshadow_settle ||
+                      runDetails[rec.run_id].plan_reconcile) && (
                       <div className="run-summary" style={{ marginBottom: '0.5rem' }}>
                         {runDetails[rec.run_id].state_degraded && (
                           <span
@@ -2100,6 +2127,7 @@ function PipelinePanel({
                         <DimensionChips dims={runDetails[rec.run_id].quality_dimensions} />
                         <PatchStatsChips stats={runDetails[rec.run_id].patch_stats} />
                         <ForeshadowSettleChip settle={runDetails[rec.run_id].foreshadow_settle} />
+                        <PlanReconcileChip reconcile={runDetails[rec.run_id].plan_reconcile} />
                       </div>
                     )}
                     {/* 历史 run 的候选卡片：随时可回头 3 选 1 换稿 */}

@@ -18,6 +18,8 @@ from ..governance.gate import GateOutcome, Route, apply_gate_routes
 from ..governance.promotion_policy import GateDecision, PromotionPolicy
 from ..ids import new_id
 from ..memory.recall import gather_hard_context
+from ..planning.alignment import check_plan_alignment, reconcile_plan
+from ..planning.context import gather_plan_context
 from ..world.replay import get_world_state
 from .budget import BudgetLedger, CircuitTripped
 from .llm.gateway import LLMGateway
@@ -120,7 +122,7 @@ class Orchestrator:
                 enable_summaries=getattr(cfg.recall, "enable_summaries", True),
                 embedder=_embedder,
                 enable_vector=_vec_on,
-                scene_query=keyword_query,
+                scene_query=keyword_query or chapter_goal,
                 vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
                 rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
             )
@@ -132,6 +134,13 @@ class Orchestrator:
             _stable = recall_pack.to_stable_context_str()
             workspace["stable_context"] = f"## 世界设定（稳定）\n{_stable}" if _stable else ""
             workspace["dynamic_context"] = recall_pack.to_dynamic_context_str()
+
+            # v16：历史事实继续严格 as_of(N-1)；未来路线走独立 PlanContext，
+            # 只作为作者意图/创作护栏，绝不进入 World State 或 canon。
+            plan_context = gather_plan_context(conn, chapter, lookahead_chapters=5)
+            workspace["plan_context"] = plan_context
+            workspace["future_plan_context"] = plan_context.render_for_planner()
+            workspace["future_guardrails"] = plan_context.render_guardrails_for_draft()
 
             # P1#9：文风锚点 few-shot——按本章细纲目标情绪选段，注入动态段。
             # 无情绪/无匹配锚点 → 空块（fail-fast 不瞎编）；不碰稳定前缀，缓存无损。
@@ -155,14 +164,32 @@ class Orchestrator:
                 workspace["chapter_goal"] = (chapter_goal + "\n" + hint).strip()
 
             if progress_cb:
-                progress_cb("recall", "ok", {})
+                progress_cb("recall", "ok", {
+                    "future_cards": len(plan_context.lookahead),
+                    "active_arcs": len(plan_context.active_arcs),
+                    "due_milestones": len(plan_context.due_milestones),
+                    "locked_contract": plan_context.has_locked_contract,
+                })
 
             # ── 2. PLAN ───────────────────────────────────────────────────────
-            plan_result = self._reg.invoke("planner", skill_ctx)
-            if progress_cb:
-                progress_cb("plan", "ok" if plan_result.ok else "blocked", {})
-            if not plan_result.ok:
-                workspace["beats"] = []
+            if plan_context.has_locked_contract:
+                # 用户/Agent 已选细纲就是本章契约。Planner 不得静默重写。
+                workspace["beats"] = plan_context.selected_beats
+                workspace["planner_source"] = "selected_contract"
+                if progress_cb:
+                    progress_cb("plan", "ok", {
+                        "source": "selected_contract",
+                        "beats": len(plan_context.selected_beats),
+                    })
+            else:
+                plan_result = self._reg.invoke("planner", skill_ctx)
+                workspace["planner_source"] = "generated"
+                if progress_cb:
+                    progress_cb("plan", "ok" if plan_result.ok else "blocked", {
+                        "source": "generated",
+                    })
+                if not plan_result.ok:
+                    workspace["beats"] = []
 
             # ── 3. DRAFT（M3-①: n_candidates>1 时多候选 + 三级漏斗择优；
             #             候选间无依赖 → 线程池并行，单章等待时间 ≈ 最慢一稿）──
@@ -257,9 +284,12 @@ class Orchestrator:
 
             continuity_issues: list[dict] = workspace.get("continuity_issues", [])
             craft_issues: list[dict] = workspace.get("craft_issues", [])
+            plan_issues = check_plan_alignment(
+                plan_context, workspace.get("draft_text", ""), chapter)
+            workspace["plan_issues"] = plan_issues
             all_issues: list[dict] = continuity_issues + [
                 {"source": "craft", **i} for i in craft_issues
-            ]
+            ] + plan_issues
             if progress_cb:
                 progress_cb("check", "ok", {"issues": len(all_issues)})
 
@@ -284,9 +314,12 @@ class Orchestrator:
                 self._reg.invoke("craft_check", skill_ctx)
                 continuity_issues = workspace.get("continuity_issues", [])
                 craft_issues = workspace.get("craft_issues", [])
+                plan_issues = check_plan_alignment(
+                    plan_context, workspace.get("draft_text", ""), chapter)
+                workspace["plan_issues"] = plan_issues
                 all_issues = continuity_issues + [
                     {"source": "craft", **i} for i in craft_issues
-                ]
+                ] + plan_issues
                 hard_blocks = [i for i in all_issues if i.get("severity") == "block"]
 
             # ── 5b. 质量评分 + 软问题润色（M5-⑦，enabled=False 时零额外调用）──
@@ -298,9 +331,12 @@ class Orchestrator:
                 )
                 continuity_issues = workspace.get("continuity_issues", [])
                 craft_issues = workspace.get("craft_issues", [])
+                plan_issues = check_plan_alignment(
+                    plan_context, workspace.get("draft_text", ""), chapter)
+                workspace["plan_issues"] = plan_issues
                 all_issues = continuity_issues + [
                     {"source": "craft", **i} for i in craft_issues
-                ]
+                ] + plan_issues
 
             # ── 6. COMMIT-DRAFT（P1#11：正文先落袋，结算失败不丢章）─────────
             draft_text: str = workspace.get("draft_text", "")
@@ -308,8 +344,10 @@ class Orchestrator:
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
 
             # ── 7. SETTLE（canon 结算 + 写回类结算；失败降级不阻塞连载）──────
-            settle = self._settle_chapter(skill_ctx, conn, chapter, draft_text,
-                                          proposals, pacing, progress_cb)
+            settle = self._settle_chapter(
+                skill_ctx, conn, chapter, draft_text, proposals, pacing,
+                draft_id=draft_id, progress_cb=progress_cb,
+            )
 
             run_detail = workspace.get("candidate_report")
             if workspace.get("patch_stats"):
@@ -320,6 +358,9 @@ class Orchestrator:
             if settle["foreshadow_settle"] is not None:
                 run_detail = {**(run_detail or {}),
                               "foreshadow_settle": settle["foreshadow_settle"]}
+            if settle.get("plan_reconcile") is not None:
+                run_detail = {**(run_detail or {}),
+                              "plan_reconcile": settle["plan_reconcile"]}
             if settle["degraded"]:
                 run_detail = {**(run_detail or {}),
                               "state_degraded": True,
@@ -366,7 +407,7 @@ class Orchestrator:
     def _settle_chapter(
         self, skill_ctx: SkillContext, conn: sqlite3.Connection, chapter: int,
         draft_text: str, proposals: list[dict], pacing: PacingController,
-        progress_cb=None,
+        *, draft_id: Optional[str] = None, progress_cb=None,
     ) -> dict:
         """P1#11（inkos state-degraded）：结算块降级保护——正文已落袋，结算
         任一步失败只标记降级、不丢章。
@@ -381,7 +422,8 @@ class Orchestrator:
         workspace = skill_ctx.workspace
         out: dict = {"degraded": False, "error": None, "failed_steps": [],
                      "gate_outcome": None, "committed_ids": [], "queued": [],
-                     "foreshadow_settle": None}
+                     "foreshadow_settle": None, "plan_reconcile": None}
+        successful_candidates: list[FactCandidate] = []
 
         # ── 步骤 A：canon 结算（失败清理后重试一次）──────────────────────────
         for attempt in (1, 2):
@@ -389,7 +431,10 @@ class Orchestrator:
             try:
                 ctx = RunContext(conn=conn, policy_mode=cfg.governance.mode,
                                  actor="orchestrator")
-                candidates = _proposals_to_candidates(proposals, chapter, conn)
+                candidates = _proposals_to_candidates(
+                    proposals, chapter, conn, source_draft_id=draft_id
+                )
+                successful_candidates = list(candidates)
                 created = [c.candidate_id for c in candidates]
                 dedup_gw = self._gw if cfg.dedup.enable_llm_arbiter else None
                 dedup_engine = DeduplicationEngine(
@@ -420,6 +465,7 @@ class Orchestrator:
                 out["queued"] = gate_outcome.queued
                 break
             except Exception as e:
+                successful_candidates = []
                 try:
                     if created:
                         ph = ",".join("?" * len(created))
@@ -447,19 +493,53 @@ class Orchestrator:
                 if out["error"] is None:
                     out["error"] = f"{name}: {e}"
 
+        # L1 是 proposals 的证据/审计层，不参与 canon 裁决。复用已有提案，零额外
+        # LLM；即便本章无提案也会把 draft 标为 completed，区分“未处理”和“无原子”。
+        def _write_l1() -> None:
+            from ..memory.l1_atoms import persist_proposal_atoms
+
+            persist_proposal_atoms(
+                conn,
+                chapter=chapter,
+                draft_id=draft_id,
+                draft_text=draft_text,
+                proposals=proposals,
+                candidate_ids=[c.candidate_id for c in successful_candidates],
+            )
+
+        _step("l1_atoms", _write_l1)
         beats = workspace.get("beats", [])
         _step("pacing", lambda: pacing.update(chapter, beats, len(draft_text), conn))
         if getattr(cfg.recall, "enable_summaries", True) and draft_text:
             _step("summary", lambda: _persist_chapter_summary(
                 conn, self._gw, chapter, draft_text))
         _step("foreshadow_flip", lambda: _flip_overdue_foreshadow(conn, chapter))
+        plan_context = workspace.get("plan_context")
+        has_future_plan = bool(
+            plan_context is not None
+            and (
+                plan_context.story_plan
+                or plan_context.current_contract
+                or plan_context.active_arcs
+                or plan_context.due_milestones
+            )
+        )
+        if has_future_plan and draft_text:
+            def _reconcile() -> None:
+                out["plan_reconcile"] = reconcile_plan(
+                    conn, plan_context, draft_text, chapter)
+            _step("plan_reconcile", _reconcile)
+            if progress_cb:
+                progress_cb("plan_reconcile", "ok", out["plan_reconcile"] or {})
 
         # §06 L2/L3 异步记忆管线（默认关；各自降级互不阻塞）。
         mcfg = getattr(cfg, "memory", None)
         if mcfg is not None and mcfg.enable_l2 and draft_text:
             _step("l2_aggregate", lambda: _run_l2(conn, self._gw, cfg, chapter, draft_text))
         if mcfg is not None and mcfg.enable_l3 and draft_text:
-            _step("l3_events", lambda: _run_l3(conn, self._gw, cfg, chapter, draft_text))
+            _step("l3_events", lambda: _run_l3(
+                conn, self._gw, cfg, chapter, draft_text, draft_id=draft_id
+            ))
 
         scfg = getattr(cfg, "settle", None)
         if scfg is not None and scfg.enabled and draft_text:
@@ -644,7 +724,8 @@ def _infer_entity_ids(conn: sqlite3.Connection, chapter: int, limit: int = 10) -
 
 
 def _proposals_to_candidates(
-    proposals: list[dict], chapter: int, conn: sqlite3.Connection
+    proposals: list[dict], chapter: int, conn: sqlite3.Connection,
+    *, source_draft_id: str | None = None,
 ) -> list[FactCandidate]:
     candidates = []
     for p in proposals:
@@ -658,9 +739,11 @@ def _proposals_to_candidates(
         op = p.get("op", "add")
         conn.execute(
             "INSERT INTO fact_candidates"
-            "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier, source_chapter)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (cid, op, entity_id, fact_type, proposal_json, "proposed", risk_tier, chapter),
+            "(candidate_id, op, entity_id, fact_type, proposal_json, status, risk_tier,"
+            " source_chapter, source_draft_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (cid, op, entity_id, fact_type, proposal_json, "proposed", risk_tier,
+             chapter, source_draft_id),
         )
         conn.commit()
         candidates.append(FactCandidate(
@@ -799,7 +882,9 @@ def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: st
     窗口上界为本章、下界为 chapter-N+1，每次触发处理量有界（≤N 章）。
     enable_vector 时同步建场景向量（scene_vec）。失败由调用方 _step 降级。
     """
-    from ..memory.l2_aggregate import aggregate_chapter_scenes, should_run_l2
+    from ..memory.l2_aggregate import (
+        aggregate_chapter_scenes, pending_l2_chapters, should_run_l2,
+    )
 
     mcfg = cfg.memory
     n = max(1, mcfg.l2_every_n_chapters)
@@ -814,21 +899,28 @@ def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: st
     # 当前章用手头正文（可能尚未 flush 到 L0）
     aggregate_chapter_scenes(conn, gateway, chapter, draft_text, **kw)
     # 回填窗口内更早、尚无 L2 的章（从 L0 读回）
-    for ch in range(max(1, chapter - n + 1), chapter):
-        if conn.execute("SELECT 1 FROM l2_scenes WHERE chapter=? LIMIT 1", (ch,)).fetchone():
+    window_start = max(1, chapter - n + 1)
+    pending = set(pending_l2_chapters(conn, chapter))
+    for ch in range(window_start, chapter):
+        if ch not in pending:
             continue
         text = _load_chapter_text(conn, ch)
         if text:
             aggregate_chapter_scenes(conn, gateway, ch, text, **kw)
 
 
-def _run_l3(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: str) -> None:
+def _run_l3(
+    conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: str,
+    *, draft_id: str | None = None,
+) -> None:
     """§06.2.3 L3 事件驱动 canon 提案。产出的提案进 staging（proposed，人审兜底）。"""
     from ..memory.l3_events import extract_canon_events
 
     proposals = extract_canon_events(conn, gateway, chapter, draft_text, tier=cfg.memory.l3_tier)
     if proposals:
-        _proposals_to_candidates(proposals, chapter, conn)
+        _proposals_to_candidates(
+            proposals, chapter, conn, source_draft_id=draft_id
+        )
 
 
 def _is_volume_end(conn: sqlite3.Connection, chapter: int) -> bool:
@@ -843,19 +935,9 @@ def _is_volume_end(conn: sqlite3.Connection, chapter: int) -> bool:
 
 def _load_chapter_text(conn: sqlite3.Connection, chapter: int) -> Optional[str]:
     """从 draft_index 最新修订的 L0 文件读回该章正文（读不到返回 None）。"""
-    from pathlib import Path
+    from ..db.l0 import load_latest_draft_text
 
-    try:
-        row = conn.execute(
-            "SELECT file_path FROM draft_index WHERE chapter=?"
-            " ORDER BY revision_round DESC LIMIT 1",
-            (chapter,),
-        ).fetchone()
-        if not row or not row["file_path"]:
-            return None
-        return Path(row["file_path"]).read_text(encoding="utf-8")
-    except Exception:
-        return None
+    return load_latest_draft_text(conn, chapter)
 
 
 def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, draft_text: str) -> None:
@@ -982,10 +1064,20 @@ def _persist_draft(
         draft_id（draft_index.id），失败时返回 None。
     """
     from pathlib import Path
-    from ..db.l0 import atomic_write_l0
+    from ..db.connection import index_draft_fts
+    from ..db.l0 import atomic_write_l0, database_file
 
+    final_path = None
     try:
-        l0_dir = Path(db_path).parent / "l0"
+        actual_db = database_file(conn)
+        l0_dir = (actual_db.parent if actual_db is not None else Path(db_path).parent) / "l0"
+
+        # revision 分配、文件名、draft_index 与 FTS 必须属于同一个写临界区。
+        # BEGIN IMMEDIATE 会在读 MAX(revision_round) 前取得 SQLite 写锁，避免
+        # 两个请求同时拿到同一 revision 后造成文件/行/FTS 身份分裂。
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
 
         # 查当前章最大 revision_round，递增
         row = conn.execute(
@@ -994,24 +1086,72 @@ def _persist_draft(
         ).fetchone()
         revision_round = (row["max_r"] + 1) if (row and row["max_r"] is not None) else 0
 
-        filename = f"ch{chapter:04d}_r{revision_round:02d}.txt"
+        draft_id = new_id("draft")
+        filename = f"ch{chapter:04d}_r{revision_round:02d}_{draft_id[-8:]}.txt"
         relative_path = f"l0/{filename}"
 
         # 原子写文件
-        _, sha256 = atomic_write_l0(l0_dir, filename, text)
+        final_path, sha256 = atomic_write_l0(l0_dir, filename, text)
 
         # 写 draft_index
-        draft_id = new_id("draft")
         word_count = len(text)
         conn.execute(
             "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, word_count, status)"
-            " VALUES(?,?,?,?,?,?,'draft')"
-            " ON CONFLICT(chapter, revision_round) DO UPDATE SET"
-            "   file_path=excluded.file_path, sha256=excluded.sha256,"
-            "   word_count=excluded.word_count, status='draft'",
+            " VALUES(?,?,?,?,?,?,'draft')",
             (draft_id, chapter, revision_round, relative_path, sha256, word_count),
+        )
+        # 新修订是新的当前证据源；旧稿原子保留用于审计，但不再声称是当前证据。
+        try:
+            conn.execute(
+                "UPDATE l1_atoms SET status='superseded'"
+                " WHERE chapter=? AND status IN ('active','unanchored')"
+                " AND (draft_id IS NULL OR draft_id<>?)",
+                (chapter, draft_id),
+            )
+        except sqlite3.Error:
+            pass
+        # 新修订会使该章旧 L2 场景/向量失效；删除派生索引，等待本次 settle
+        # 或维护任务重建。L0 历史文件和 draft_index 修订记录仍完整保留。
+        try:
+            conn.execute(
+                "DELETE FROM scene_vec WHERE scene_id IN"
+                " (SELECT id FROM l2_scenes WHERE chapter=?)",
+                (chapter,),
+            )
+            conn.execute("DELETE FROM l2_scenes WHERE chapter=?", (chapter,))
+        except sqlite3.Error:
+            pass
+        # 章/卷/全书摘要同样是正文派生快照；换稿后宁可暂缺，也不能继续召回旧稿摘要。
+        try:
+            conn.execute("DELETE FROM chapter_summaries WHERE chapter=?", (chapter,))
+            conn.execute(
+                "UPDATE volumes SET rolling_summary=NULL"
+                " WHERE start_chapter IS NOT NULL AND start_chapter<=?"
+                " AND (end_chapter IS NULL OR end_chapter>=?)",
+                (chapter, chapter),
+            )
+            conn.execute("DELETE FROM meta_kv WHERE key='global_synopsis'")
+        except sqlite3.Error:
+            pass
+        # L0 FTS 与 draft_index 同事务提交；只索引最新修订。
+        index_draft_fts(conn, draft_id, chapter, text)
+        # 已选择的章节卡进入 drafted；未来卡仍保持 planned。
+        conn.execute(
+            "UPDATE chapter_cards SET status='drafted', draft_id=?, word_count=?"
+            " WHERE chapter=? AND status='planned'",
+            (draft_id, word_count, chapter),
         )
         conn.commit()
         return draft_id
     except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # DB 未登记成功时删除本次新文件，避免产生不可追踪的 L0 孤儿。
+        try:
+            if final_path is not None and final_path.exists():
+                final_path.unlink()
+        except OSError:
+            pass
         return None

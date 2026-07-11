@@ -18,6 +18,7 @@ job 线程串行），前端轮询 job 状态。与 AutopilotManager 同款单�
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import sqlite3
@@ -187,6 +188,7 @@ def tier_route_proposals(
     *,
     auto_promote_low_risk: bool = False,
     actor: str = "cold_start",
+    source_draft_ids: Optional[dict[int, str]] = None,
 ) -> dict:
     """按 risk_tier 分层落库：
 
@@ -202,7 +204,7 @@ def tier_route_proposals(
     from ..governance.commit import commit_canon
 
     out = {"candidate_ids": [], "auto_promoted": [], "staged_low": [],
-           "queued_review": [], "errors": []}
+           "queued_review": [], "errors": [], "candidate_links": []}
     for p in proposals:
         p = normalize_proposal_fact_type(dict(p))
         p.setdefault("op", "add")
@@ -211,18 +213,35 @@ def tier_route_proposals(
         if risk not in ("low", "medium", "high"):
             risk = "low"
         chapter = int(p.get("valid_from_chapter") or 0)
-        cid = new_id("cand")
-        prop_json = json.dumps({**p, "source": "cold_start"}, ensure_ascii=False)
-        status = "pending_review" if risk != "low" else "proposed"
-        conn.execute(
-            "INSERT INTO fact_candidates"
-            "(candidate_id, op, entity_id, fact_type, proposal_json,"
-            " status, risk_tier, source_chapter, source_skill)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (cid, p["op"], None, p.get("fact_type", "misc"), prop_json,
-             status, risk, chapter, "cold_extract"),
+        source_draft_id = (source_draft_ids or {}).get(chapter)
+        prop_json = json.dumps(
+            {**p, "source": "cold_start"}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
         )
+        cid = (
+            "cand_" + hashlib.sha256(
+                f"{source_draft_id}:{prop_json}".encode("utf-8")
+            ).hexdigest()[:26]
+            if source_draft_id else new_id("cand")
+        )
+        status = "pending_review" if risk != "low" else "proposed"
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO fact_candidates"
+            "(candidate_id, op, entity_id, fact_type, proposal_json,"
+            " status, risk_tier, source_chapter, source_skill, source_draft_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (cid, p["op"], None, p.get("fact_type", "misc"), prop_json,
+             status, risk, chapter, "cold_extract", source_draft_id),
+        ).rowcount
         out["candidate_ids"].append(cid)
+        out["candidate_links"].append({
+            "candidate_id": cid, "chapter": chapter,
+            "source_draft_id": source_draft_id, "proposal": p,
+        })
+
+        # 同一 L0 + proposal 的稳定候选已存在时，不重复建 review_queue/commit。
+        if not inserted:
+            continue
 
         if risk != "low":
             conn.execute(
@@ -352,8 +371,8 @@ class ColdStartJobManager:
 
         try:
             cfg = NovelForgeConfig(project_id=job.project_id, db_path="")
-            key = api_key or os.environ.get("NOVELFORGE_API_KEY") \
-                or os.environ.get("DEEPSEEK_API_KEY")
+            key = api_key or os.environ.get("DEEPSEEK_API_KEY") \
+                or os.environ.get("ANTHROPIC_API_KEY")
             if key:
                 cfg.provider.api_key = key
                 cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
@@ -378,7 +397,11 @@ class ColdStartJobManager:
                             {"chapter": ch["chapter_no"], "error": str(e)[:200]})
                 with self._lock:
                     job.chapters_done += 1
-                return ws.get("proposals", []) or []
+                proposals = ws.get("proposals", []) or []
+                for proposal in proposals:
+                    if isinstance(proposal, dict):
+                        proposal.setdefault("valid_from_chapter", ch["chapter_no"])
+                return proposals
 
             workers = max(1, min(8, max_concurrency))
             all_props: list[dict] = []
@@ -390,18 +413,75 @@ class ColdStartJobManager:
 
             conn = registry.open_conn(job.project_id)
             try:
-                # 冷启动原子登记（每章一条，供追溯）
+                from ..control_plane.orchestrator import _persist_draft
+
+                project_meta = registry.get(job.project_id)
+                draft_ids: dict[int, str] = {}
+                chapter_texts: dict[int, str] = {}
+                # 冷启动正文先进入 L0；来源原子因此可回读、可校验、可幂等。
                 for ch in chapters:
+                    chapter = int(ch["chapter_no"])
+                    text = ch["text"]
+                    chapter_texts[chapter] = text
+                    source_hash = hashlib.sha256(
+                        text.encode("utf-8")
+                    ).hexdigest()
+                    latest = conn.execute(
+                        "SELECT id, sha256 FROM draft_index WHERE chapter=?"
+                        " ORDER BY revision_round DESC LIMIT 1",
+                        (chapter,),
+                    ).fetchone()
+                    if latest is not None and latest["sha256"] == source_hash:
+                        draft_id = latest["id"]
+                    else:
+                        draft_id = _persist_draft(
+                            conn, text, chapter, job.project_id,
+                            project_meta.db_path if project_meta else "novel.db",
+                        )
+                    if draft_id is None:
+                        raise RuntimeError(f"第 {chapter} 章 L0 落盘失败")
+                    draft_ids[chapter] = draft_id
+                    atom_id = "atom_" + hashlib.sha256(
+                        f"{draft_id}:cold_start_source".encode("utf-8")
+                    ).hexdigest()[:26]
                     conn.execute(
-                        "INSERT INTO l1_atoms(id, chapter, atom_text, extracted_by,"
-                        " cold_start) VALUES(?,?,?,?,1)",
-                        (new_id("atom"), ch["chapter_no"], ch["text"][:500],
-                         "cold_extract_batch"),
+                        "INSERT INTO l1_atoms("
+                        " id, chapter, draft_id, atom_text, anchor, extracted_by,"
+                        " atom_type, payload_json,"
+                        " source_line_start, source_line_end, content_hash, status, cold_start)"
+                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',1)"
+                        " ON CONFLICT(id) DO UPDATE SET status='active', anchor=excluded.anchor,"
+                        " source_line_start=excluded.source_line_start,"
+                        " source_line_end=excluded.source_line_end",
+                        (atom_id, chapter, draft_id, text[:500], text[:500],
+                         "cold_extract_batch", "cold_start_source",
+                         json.dumps({"source": "cold_start_batch", "draft_id": draft_id},
+                                    ensure_ascii=False),
+                         1, max(1, len(text.splitlines())), source_hash),
                     )
                 kept, dropped = dedup_proposals(all_props, conn)
                 job.dedup_dropped = dropped
                 routed = tier_route_proposals(
-                    conn, kept, auto_promote_low_risk=auto_promote_low_risk)
+                    conn, kept, auto_promote_low_risk=auto_promote_low_risk,
+                    source_draft_ids=draft_ids)
+                from ..memory.l1_atoms import persist_proposal_atoms
+
+                links_by_chapter: dict[int, list[dict]] = {}
+                for link in routed["candidate_links"]:
+                    links_by_chapter.setdefault(int(link["chapter"]), []).append(link)
+                for chapter, draft_id in draft_ids.items():
+                    links = links_by_chapter.get(chapter, [])
+                    persist_proposal_atoms(
+                        conn,
+                        chapter=chapter,
+                        draft_id=draft_id,
+                        draft_text=chapter_texts[chapter],
+                        proposals=[link["proposal"] for link in links],
+                        candidate_ids=[link["candidate_id"] for link in links],
+                        extracted_by="cold_extract_batch_proposal_v2",
+                        cold_start=True,
+                        commit=False,
+                    )
                 job.candidates_created = len(routed["candidate_ids"])
                 job.auto_promoted = len(routed["auto_promoted"])
                 job.staged_low = len(routed["staged_low"])

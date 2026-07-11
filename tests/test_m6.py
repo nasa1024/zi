@@ -153,12 +153,26 @@ class TestSelectCandidate:
             "SELECT COUNT(*) AS n FROM fact_candidates").fetchone()["n"]
         # 选中稿提案入 staging
         new_cand = conn.execute(
-            "SELECT proposal_json FROM fact_candidates ORDER BY rowid DESC LIMIT 1"
+            "SELECT proposal_json, source_draft_id FROM fact_candidates"
+            " ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
+        latest_draft = conn.execute(
+            "SELECT id FROM draft_index WHERE chapter=1"
+            " ORDER BY revision_round DESC LIMIT 1"
+        ).fetchone()["id"]
+        l2 = conn.execute(
+            "SELECT scene_text FROM l2_scenes WHERE chapter=1 ORDER BY scene_seq LIMIT 1"
+        ).fetchone()
+        vectors = conn.execute(
+            "SELECT COUNT(*) AS n FROM scene_vec WHERE chapter=1"
+        ).fetchone()["n"]
         conn.close()
         assert after_revs == before_revs + 1          # 新修订落盘
         assert after_cands == before_cands + 1        # 提案入 staging
         assert "炼气三层" in new_cand["proposal_json"]
+        assert new_cand["source_draft_id"] == latest_draft
+        assert l2 is not None and "候选二号正文" in l2["scene_text"]
+        assert vectors >= 1
 
     def test_idempotent_reselect(self, client, project, multi_candidate_run):
         client.post(f"/v1/{project}/pipeline/runs/{multi_candidate_run}/select-candidate",

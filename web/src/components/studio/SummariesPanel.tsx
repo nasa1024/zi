@@ -146,7 +146,9 @@ export default function SummariesPanel({ projectId }: { projectId: string }): JS
     <div className="studio-panel">
       <div className="panel-head">
         <h3 className="cn">故事脉络</h3>
-        <span className="ph-hint">三层摘要：章大事记 → 卷概要 → 全书梗概 · 编辑即改真相源</span>
+        <span className="ph-hint">
+          叙事摘要：章大事记 → 卷概要 → 全书梗概 · 与 L1/L2/L3 记忆管线分开
+        </span>
         <button type="button" className="nf-btn ghost sm" onClick={() => void load()} disabled={loading}>
           ↻ 刷新
         </button>
@@ -157,7 +159,7 @@ export default function SummariesPanel({ projectId }: { projectId: string }): JS
 
       {board && (
         <>
-          {/* ── L3 全书梗概 ───────────────────────────── */}
+          {/* ── 全书级摘要（不是 L3 Canon 事件提案） ───── */}
           <div className="panel-section-head">
             <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>🌐 全书至此</span>
             <span className="ph-hint" style={{ marginLeft: 'auto' }}>
@@ -176,7 +178,7 @@ export default function SummariesPanel({ projectId }: { projectId: string }): JS
             />
           </div>
 
-          {/* ── L2 卷概要 + L1 章时间轴 ───────────────── */}
+          {/* ── 卷级摘要 + 章节级摘要（不是 L2 场景 / L1 原子） ── */}
           {volumes.length === 0 && grouped.size === 0 && (
             <div className="nf-hollow" style={{ marginTop: '0.8rem' }}>
               暂无摘要数据 —— 生成章节后自动产生章摘要；也可在下方手动补录。

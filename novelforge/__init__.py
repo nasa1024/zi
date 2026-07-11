@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "15"  # +scene_vec 向量召回回退表（§06 L2/向量）
+SCHEMA_VERSION = "19"  # +fact_candidates.source_draft_id 候选事实来源草稿追溯

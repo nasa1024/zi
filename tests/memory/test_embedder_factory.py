@@ -99,3 +99,22 @@ class TestOpenAIEmbedder:
         assert row["version"] == "text-embedding-3-small"
         assert row["dim"] == 3
         conn.close()
+
+    def test_l2_aggregate_records_discovered_dimension_on_first_scene(self):
+        from novelforge.memory.l2_aggregate import aggregate_chapter_scenes
+
+        conn = connect(":memory:")
+        init_db_from_conn(conn)
+        emb = OpenAIEmbedder(model="text-embedding-3-small", client=_FakeClient())
+        aggregate_chapter_scenes(
+            conn, None, 1, "首次聚合时维度尚未预先发现。", embedder=emb
+        )
+        scene = conn.execute(
+            "SELECT embedding_model, embedding_version, embedding_dim"
+            " FROM l2_scenes WHERE chapter=1"
+        ).fetchone()
+        vec = conn.execute("SELECT dim FROM scene_vec").fetchone()
+        assert scene["embedding_model"] == "openai"
+        assert scene["embedding_version"] == "text-embedding-3-small"
+        assert scene["embedding_dim"] == vec["dim"] == 3
+        conn.close()

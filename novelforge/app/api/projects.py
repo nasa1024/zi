@@ -12,6 +12,37 @@ from ..models import (
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+_GENRE_AUTO_TITLES = {
+    "xuanhuan": "万界初章",
+    "xianxia": "问道长生",
+    "dushi": "城市异闻录",
+    "kehuan": "群星之外",
+    "lishi": "山河新局",
+    "wuxia": "江湖未远",
+    "yanqing": "与你相逢",
+    "xuanyi": "迷雾来信",
+    "default": "未完待续",
+}
+
+
+def _project_name(name: str, genre: str, setting: dict | None) -> str:
+    """Return a usable title for both form-based and zero-text Agent starts."""
+    explicit = (name or "").strip()
+    if explicit:
+        return explicit
+    setting = setting or {}
+    premise = str(setting.get("premise") or "").strip()
+    if premise:
+        # A concise premise-derived working title remains editable later while
+        # avoiding an empty project chip in the Studio.
+        compact = "".join(premise.split())
+        for separator in ("。", "，", ",", "；", ";", "：", ":"):
+            compact = compact.split(separator, 1)[0]
+        if compact:
+            return compact[:14]
+    return _GENRE_AUTO_TITLES.get(genre, _GENRE_AUTO_TITLES["default"])
+
+
 def _project_view(registry: ProjectRegistry, pid: str):
     """返回 (chapter_count, canon_fact_count, power_system, premise)。
 
@@ -51,7 +82,11 @@ def create_project(
     # 向后兼容：旧调用方只传 power_system（无 setting）时，也写进 meta_kv
     if setting is None and req.power_system:
         setting = {"power_system": req.power_system}
-    pm = registry.create(name=req.name, genre=genre, setting=setting)
+    pm = registry.create(
+        name=_project_name(req.name, genre, setting),
+        genre=genre,
+        setting=setting,
+    )
     chapters, facts, power_system, premise = _project_view(registry, pm.project_id)
     return ProjectResponse(
         project_id=pm.project_id, name=pm.name, genre=pm.genre,
@@ -75,7 +110,7 @@ def suggest_setting(req: SettingSuggestRequest):
     from ...control_plane.skill_base import SkillContext
     from ...skills.setting_gen_skill import SettingGenSkill
 
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     cfg = NovelForgeConfig(project_id="setup", db_path="")
     degraded = False
     if api_key:

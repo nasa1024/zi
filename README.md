@@ -20,18 +20,18 @@
 ## 快速开始
 
 ```bash
-pip install fastapi uvicorn jieba pydantic
+pip install -r requirements.txt
 
 # 启动 API 服务（开发模式，无需 API key）
 uvicorn novelforge.app.main:app --host 127.0.0.1 --port 8787 --reload
 
-# 新建项目
+# 零输入新建项目（后端生成工作名）
 curl -s -X POST http://localhost:8787/v1/projects \
   -H "Content-Type: application/json" \
-  -d '{"name":"我的小说","genre":"xuanhuan"}' | python -m json.tool
+  -d '{}' | python -m json.tool
 
-# 全量测试（265 个用例）
-python -m pytest -q
+# 全量测试
+.venv/bin/python -m pytest -q
 ```
 
 ## 前端（`web/`，Vite + React + TypeScript）
@@ -48,6 +48,7 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173 ——落地页下方的 **⚙️ 工作台 / STUDIO** 真实驱动确定性核心（无需 LLM）：
 
+- **创作 Agent** → 生成全书/卷/未来章节候选，作者选择或让 AI 决定；支持 checkpoint 恢复
 - **建项目** → `POST /v1/projects`（乐观更新，新书即时可用）
 - **录入设定 / 填充示例** → `POST /v1/{id}/seed`（三元组写入 canon 账本）
 - **世界圣经** → `GET /v1/{id}/bible`（由 canon 确定性渲染 Markdown）
@@ -91,10 +92,10 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 
 | 模块 | 说明 |
 |---|---|
-| `db/schema.sql` | §02 全量 DDL（SCHEMA_VERSION=7）：canon / World State / 治理 / 工艺 / FTS5 / 分支 / pipeline_run / sessions |
-| `db/connection.py` | 建库 / PRAGMA / `rebuild_facts_fts` / 启动期孤儿扫描 |
-| `db/migrations/` | v3→v7 增量迁移器（volumes/branches/pipeline_run/sessions/turns） |
-| `db/l0.py` | L0 原子写入（temp→fsync→rename）+ orphan sweep + crashed_runs sweep |
+| `db/schema.sql` | §02 全量 DDL（SCHEMA_VERSION=19）：canon / World State / L0-L2 记忆 / 未来计划 / Agent 决策 / sessions |
+| `db/connection.py` | 建库 / PRAGMA / facts + L0 drafts FTS 重建 / 启动期孤儿扫描 |
+| `db/migrations/` | 增量迁移器；v16 选择式规划，v17 durable replay，v18 记忆状态与证据链，v19 candidate→draft 来源追溯 |
+| `db/l0.py` | L0 原子写入 + 项目隔离路径解析 + orphan/crashed_runs sweep |
 | `db/write.py` | 写入辅助函数 |
 | `world/replay.py` | as-of 投影（replay_power/knowledge/items/numeric/gimmick/timeline），支持 branch_id |
 | `world/branch.py` | 分支祖先链 SQL 过滤器（§9.4 分支隔离） |
@@ -102,11 +103,16 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 | `validators/` | 确定性 Python 验证器（power / knowledge / timeline / numeric / gimmick） |
 | `governance/` | Promote / Revert / Gate / Conflict 治理层 |
 | `control_plane/orchestrator.py` | 主循环：plan→recall→draft→check→gate，pipeline_run 状态机 |
+| `planning/` | 全书路线、情节弧、未来章节窗口、PlanContext 与偏航对账 |
+| `app/agent_runtime.py` | LangGraph 选择式创作状态图、interrupt/resume、同步 durability 与 SQLite checkpoint |
 | `control_plane/llm/` | 多供应商 LLM 接入层（DeepSeek / OpenAI-compat / Anthropic / Fake） |
 | `control_plane/budget.py` | Token/USD 预算 + 断路器 |
 | `skills/` | 5 个核心 Skill：planner / chapter_draft / continuity_check / craft_check / cold_extract |
 | `dedup/` | DeduplicationEngine（BM25 + 可选 LLM 裁判） |
-| `memory/recall.py` | 实体优先召回 + FTS5 关键词检索 |
+| `memory/l1_atoms.py` | L1 提案原子、L0 证据行、candidate 血缘与重放 |
+| `memory/l2_aggregate.py` | L2 场景切分、摘要、向量索引与全量回填 |
+| `memory/maintenance.py` | L0/L1/L2 健康检查与一键重建 |
+| `memory/recall.py` | 实体/摘要/L0 FTS/L2 hybrid recall |
 | `memory/bible_render.py` | World Bible Markdown 渲染 |
 | `craft/` | Pacing Controller + PayoffBinding + VoiceProfile |
 | `app/main.py` | FastAPI 应用装配（API-key 认证中间件） |
@@ -121,6 +127,10 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 |---|---|---|
 | POST | `/projects` | 新建项目 |
 | GET | `/projects` | 列出所有项目 |
+| POST | `/{pid}/agent/start` | 启动选择式创作 Agent |
+| GET | `/{pid}/agent/sessions` | 列出可恢复 Agent 会话 |
+| POST | `/{pid}/agent/{sid}/choose` | 选择方案、AI 代选或 reroll |
+| GET | `/{pid}/story-map` | 查看全书路线、情节弧与未来章节地图 |
 | POST | `/{pid}/seed` | 批量播种 canon facts（冷启动） |
 | POST | `/{pid}/pipeline/run` | 生成一章（完整 plan→draft→check→gate 流水线） |
 | GET | `/{pid}/facts` | 查询 facts（支持 FTS 关键词） |
@@ -133,6 +143,9 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 | GET | `/{pid}/sessions/{sid}/turns/{tid}/stream` | SSE 断线续传 |
 | POST | `/{pid}/admin/backup` | 热备份（novel.db + l0/） |
 | POST | `/{pid}/admin/rebuild_fts` | 全量重建 FTS5 索引 |
+| GET/PATCH | `/{pid}/memory/settings` | 项目级 L2/向量/摘要设置 |
+| GET | `/{pid}/memory/health` | L0/L1/L2/摘要覆盖与告警 |
+| POST | `/{pid}/memory/rebuild` | 从 L0/候选表重建 FTS、L1、L2 与向量 |
 | POST | `/{pid}/admin/add_terms` | 增量追加 jieba 词典 |
 | GET | `/health` | 健康检查（无需认证） |
 
@@ -145,7 +158,15 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 
 ### L0 原子写入（F7）
 - 草稿落盘：`tmp = write + fsync → os.replace(final)`，同目录保证同文件系统
+- `draft_index.file_path` 永远相对项目 `novel.db` 解析，杜绝跨项目同名章节串读
+- 同章并发先以 `BEGIN IMMEDIATE` 串行分配 revision；draft/file/FTS 始终使用同一 ID
+- 同一事务写入 `draft_index` 与最新修订 `drafts_fts`，可通过维护 API完整重建
 - `pipeline_run` 状态机：启动时写 `'running'`，完成时更新 `'completed'`；下次启动扫描残留 `'running'` → `'crashed'`
+
+### L1/L2 记忆职责
+- L1 保留为**证据与审计层**：复用选中正文已有 proposals，记录来源 draft、L0 行号、candidate_id 和处理状态；旧 revision 标记 superseded，不直接当 canon 注入模型，零新增 LLM 调用
+- L2 是**情节场景层**：按场景切块、摘要并 hybrid recall，项目运行时默认开启离线 hash 向量；L3 canon 安全网仍默认关闭
+- 章/卷/全书摘要是独立的叙事压缩层，不再称为 L1/L2/L3，避免和原子/场景/事件管线混淆
 
 ### 分支隔离（§9.4）
 - `facts.branch_id = NULL` 为主线，非 NULL 为分支专属
@@ -159,7 +180,7 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 
 ## 文档
 
-设计文档在 [`docs/NovelForge/`](docs/NovelForge/)（共 15 节，从 `00-总览与阅读指南.md` 入）：
+设计文档在 [`docs/NovelForge/`](docs/NovelForge/)（从 `00-总览与阅读指南.md` 入）：
 
 | 节 | 主题 |
 |---|---|
@@ -170,13 +191,14 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 | 09 | MVP 路线图与验收 |
 | 10–11 | 数据契约与命名权威 · 核心算法补全 |
 | 12–14 | Agent 循环与工具调用 · 交互模型（CLI/REST/Web/对话式）· LLM 多供应商接入层 |
+| 21 | 选择式创作 Agent、LangGraph vs Deep Agents、未来计划与 canon 边界 |
 
 实现级规格（可直接照着写代码）在 [`docs/NovelForge/impl/`](docs/NovelForge/impl/)。
 
 ## 测试
 
 ```
-265 passed in ~15s
+681 passed
 ```
 
 覆盖范围：schema 迁移、L0 原子写入、pipeline_run 状态机、会话/turn/SSE、API-key 认证、Prompt Injection 净化、热备份、FTS 重建、分支隔离 World State、软冲突检查、卷/分支 CRUD、冷启动、工艺层、自动驾驶、端到端 MVP 流水线。

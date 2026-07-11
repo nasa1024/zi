@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,17 @@ class TestAtomicWriteL0:
         atomic_write_l0(l0_dir, "ch0001_r00.txt", "content")
         tmp_files = list(l0_dir.glob("*.tmp"))
         assert tmp_files == []
+
+    def test_rejects_l0_directory_symlink_outside_project(self, tmp_path):
+        from novelforge.db.l0 import atomic_write_l0
+
+        project = tmp_path / "project"
+        outside = tmp_path / "outside"
+        project.mkdir()
+        outside.mkdir()
+        (project / "l0").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="越出项目根目录"):
+            atomic_write_l0(project / "l0", "ch0001.txt", "secret")
 
     def test_overwrites_existing_file(self, tmp_path):
         from novelforge.db.l0 import atomic_write_l0
@@ -123,6 +136,24 @@ class TestSweepOrphans:
         stats = sweep_orphans(conn, l0_dir)
         conn.close()
         assert stats["orphaned_db_rows"] == 0
+
+    def test_path_escape_is_rejected_and_counted_orphan(self, tmp_path):
+        from novelforge.db.connection import init_db
+        from novelforge.db.l0 import load_draft_text_by_id, sweep_orphans
+
+        db_path = tmp_path / "novel.db"
+        conn = init_db(db_path)
+        (tmp_path / "secret.txt").write_text("不应被 L0 读取", encoding="utf-8")
+        conn.execute(
+            "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256)"
+            " VALUES('escape',1,0,'../secret.txt','x')"
+        )
+        conn.commit()
+
+        assert load_draft_text_by_id(conn, "escape") is None
+        stats = sweep_orphans(conn, tmp_path / "l0")
+        assert stats["orphaned_db_rows"] == 1
+        conn.close()
 
 
 # ── sweep_crashed_runs ─────────────────────────────────────────────────────────
@@ -197,6 +228,18 @@ class TestPipelineRunStateMachine:
         assert file_path.exists()
         assert file_path.read_text(encoding="utf-8") == text
 
+    def test_persist_draft_uses_connected_database_root_not_stale_config_path(self, tmp_conn):
+        from novelforge.control_plane.orchestrator import _persist_draft
+
+        conn, tmp_path = tmp_conn
+        stale_db = tmp_path / "other-project" / "novel.db"
+        draft_id = _persist_draft(conn, "连接所属项目正文", 2, "proj", str(stale_db))
+        row = conn.execute(
+            "SELECT file_path FROM draft_index WHERE id=?", (draft_id,)
+        ).fetchone()
+        assert (tmp_path / row["file_path"]).read_text(encoding="utf-8") == "连接所属项目正文"
+        assert not (stale_db.parent / row["file_path"]).exists()
+
     def test_persist_draft_revision_round_increments(self, tmp_conn):
         from novelforge.control_plane.orchestrator import _persist_draft
         conn, tmp_path = tmp_conn
@@ -209,6 +252,85 @@ class TestPipelineRunStateMachine:
         ).fetchall()
         rounds = [r["revision_round"] for r in rows]
         assert rounds == [0, 1]
+
+    def test_new_revision_invalidates_stale_narrative_summaries(self, tmp_conn):
+        from novelforge.control_plane.orchestrator import _persist_draft
+
+        conn, tmp_path = tmp_conn
+        db_path = str(tmp_path / "novel.db")
+        _persist_draft(conn, "旧稿正文", 3, "proj", db_path)
+        conn.execute(
+            "INSERT INTO chapter_summaries(id,chapter,summary)"
+            " VALUES('sum3',3,'旧稿章摘要')"
+        )
+        conn.execute(
+            "INSERT INTO volumes(id,volume_no,title,start_chapter,end_chapter,rolling_summary)"
+            " VALUES('vol1',1,'第一卷',1,10,'包含旧稿的卷摘要')"
+        )
+        conn.execute(
+            "INSERT INTO meta_kv(key,value) VALUES('global_synopsis','包含旧稿的全书梗概')"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+        )
+        conn.commit()
+
+        _persist_draft(conn, "新稿正文", 3, "proj", db_path)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM chapter_summaries WHERE chapter=3"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT rolling_summary FROM volumes WHERE id='vol1'"
+        ).fetchone()["rolling_summary"] is None
+        assert conn.execute(
+            "SELECT value FROM meta_kv WHERE key='global_synopsis'"
+        ).fetchone() is None
+
+    def test_concurrent_same_chapter_keeps_ids_files_and_fts_consistent(self, tmp_path):
+        from novelforge.control_plane.orchestrator import _persist_draft
+        from novelforge.db.connection import connect, init_db
+        from novelforge.db.l0 import load_latest_draft_text
+
+        db_path = tmp_path / "novel.db"
+        init_db(db_path).close()
+        barrier = threading.Barrier(2)
+
+        def write(text: str) -> str | None:
+            conn = connect(db_path)
+            try:
+                barrier.wait(timeout=5)
+                return _persist_draft(conn, text, 9, "proj", str(db_path))
+            finally:
+                conn.close()
+
+        texts = {"并发稿甲：山门风雪。", "并发稿乙：夜渡寒江。"}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ids = list(pool.map(write, texts))
+
+        assert all(ids)
+        assert len(set(ids)) == 2
+        conn = connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT id, revision_round, file_path FROM draft_index"
+                " WHERE chapter=9 ORDER BY revision_round"
+            ).fetchall()
+            assert [row["revision_round"] for row in rows] == [0, 1]
+            assert {row["id"] for row in rows} == set(ids)
+            assert len({row["file_path"] for row in rows}) == 2
+            stored = {
+                (tmp_path / row["file_path"]).read_text(encoding="utf-8") for row in rows
+            }
+            assert stored == texts
+
+            latest_id = rows[-1]["id"]
+            fts_ids = {
+                row["draft_id"] for row in conn.execute(
+                    "SELECT DISTINCT draft_id FROM drafts_fts WHERE chapter_no=9"
+                ).fetchall()
+            }
+            assert fts_ids == {latest_id}
+            assert load_latest_draft_text(conn, 9) in texts
+        finally:
+            conn.close()
 
     def test_begin_and_complete_pipeline_run(self, tmp_conn):
         from novelforge.control_plane.orchestrator import (

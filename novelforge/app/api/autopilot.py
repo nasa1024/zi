@@ -83,7 +83,7 @@ def autopilot_start(
         raise HTTPException(422, f"from_chapter ({req.from_chapter}) > to_chapter ({req.to_chapter})")
 
     mgr = get_autopilot_manager()
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
     internal_req = _StartReq(
         project_id=project_id,
@@ -293,7 +293,7 @@ def autopilot_resume(
         quality_check=req.get("quality_check", False),
         n_candidates=req.get("n_candidates", 1),
     )
-    api_key = os.environ.get("NOVELFORGE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)
     return _session_to_info(session)
 

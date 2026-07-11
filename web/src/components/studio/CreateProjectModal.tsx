@@ -135,7 +135,7 @@ export default function CreateProjectModal({
   onCreated,
 }: CreateProjectModalProps): JSX.Element | null {
   const [name, setName] = useState<string>('');
-  const [mode, setMode] = useState<Mode>('manual');
+  const [mode, setMode] = useState<Mode>('generate');
   const [draft, setDraft] = useState<PlotSetting>(() => emptyDraft('xuanhuan'));
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [edited, setEdited] = useState<boolean>(false);
@@ -157,7 +157,7 @@ export default function CreateProjectModal({
   useEffect(() => {
     if (open) {
       setName('');
-      setMode('manual');
+      setMode('generate');
       setDraft(emptyDraft('xuanhuan'));
       setShowAdvanced(false);
       setEdited(false);
@@ -192,7 +192,9 @@ export default function CreateProjectModal({
 
   const trimmedName = name.trim();
   const busy = submitting || generating;
-  const canSubmit = trimmedName.length > 0 && !busy;
+  // Zero-text start is intentional: the backend assigns a working title and
+  // the Agent immediately offers story-route choices.
+  const canSubmit = !busy;
   const showEditor = mode === 'manual' || selectedIdx !== null;
   const showFieldTools = mode === 'generate' && selectedIdx !== null;
 
@@ -500,13 +502,13 @@ export default function CreateProjectModal({
         <form className="nf-form single" onSubmit={handleSubmit}>
           <div className="nf-field full">
             <label htmlFor="cp-name">
-              书名 / NAME<span className="req">*</span>
+              书名 / NAME<span className="setting-optional">（可留空，由系统生成）</span>
             </label>
             <input
               id="cp-name"
               className="nf-input"
               type="text"
-              placeholder="例如：万古第一剑修"
+              placeholder="可留空；例如：万古第一剑修"
               value={name}
               onChange={(e) => setName(e.target.value)}
               autoFocus
@@ -709,7 +711,7 @@ export default function CreateProjectModal({
                     <span className="nf-spin" /> 创建中…
                   </>
                 ) : (
-                  <>⚡ 创建项目</>
+                  <>{trimmedName ? '⚡ 创建项目' : '✨ 零输入开始创作'}</>
                 )}
               </button>
               <button type="button" className="nf-btn ghost" onClick={onClose} disabled={busy}>
@@ -717,7 +719,7 @@ export default function CreateProjectModal({
               </button>
             </div>
             {!trimmedName && !busy && (
-              <span className="nf-actions-hint">请先填写「书名」再创建</span>
+              <span className="nf-actions-hint">无需填写背景或故事线；创建后直接进入 Agent 选择路线。</span>
             )}
           </div>
         </form>

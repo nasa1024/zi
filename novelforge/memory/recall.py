@@ -134,15 +134,18 @@ def gather_hard_context(
     pack.taboos = _fetch_taboos(conn)
     pack.gimmick_rules = _fetch_gimmicks(as_of, conn)
     pack.recent_beats = _fetch_recent_beats(as_of, conn, context_window)
-    pack.canon_facts = _fetch_canon_facts(entity_ids, conn)
+    pack.canon_facts = _fetch_canon_facts(entity_ids, as_of, conn)
 
     if enable_summaries:
         pack.chapter_summaries = _fetch_recent_summaries(as_of, conn, summary_window)
-        pack.volume_summary = _fetch_volume_summary(as_of, conn)
-        pack.global_synopsis = _fetch_global_synopsis(conn)
+        # volume/global 摘要只保存「当前最新值」，没有历史版本可供 as-of 回放。
+        # 历史查询宁可省略，也不将未来章节的滚动结果注入上下文。
+        if as_of >= _latest_recall_chapter(conn):
+            pack.volume_summary = _fetch_volume_summary(as_of, conn)
+            pack.global_synopsis = _fetch_global_synopsis(conn)
 
     if keyword_query:
-        pack.keyword_hits = _fts_search(keyword_query, max_keywords, conn)
+        pack.keyword_hits = _fts_search(keyword_query, as_of, max_keywords, conn)
 
     if enable_vector and embedder is not None and scene_query:
         try:
@@ -333,18 +336,50 @@ def _fetch_recent_beats(as_of: int, conn, window: int) -> list[dict]:
         return []
 
 
-def _fetch_canon_facts(ids: list[str], conn) -> list[dict]:
+def _fetch_canon_facts(ids: list[str], as_of: int, conn) -> list[dict]:
+    select = (
+        "SELECT id, entity_id, fact_type, subject, predicate, object,"
+        " valid_from_chapter, valid_to_chapter FROM facts"
+        " WHERE status='canon' AND valid_from_chapter<=?"
+        " AND (valid_to_chapter IS NULL OR valid_to_chapter>?)"
+    )
     if not ids:
-        base = "SELECT id, entity_id, fact_type, subject, object, valid_from_chapter FROM facts WHERE status='canon' ORDER BY valid_from_chapter DESC LIMIT 50"
-        return _rows(conn, base)
+        return _rows(
+            conn,
+            select + " ORDER BY valid_from_chapter DESC, id LIMIT 50",
+            (as_of, as_of),
+        )
     ph = ",".join("?" * len(ids))
     return _rows(
         conn,
-        f"SELECT id, entity_id, fact_type, subject, object, valid_from_chapter"
-        f" FROM facts WHERE status='canon' AND entity_id IN ({ph})"
-        f" ORDER BY valid_from_chapter DESC",
-        tuple(ids),
+        select + f" AND entity_id IN ({ph})"
+        " ORDER BY valid_from_chapter DESC, id LIMIT 50",
+        (as_of, as_of) + tuple(ids),
     )
+
+
+def _latest_recall_chapter(conn) -> int:
+    """返回可能已经推进「当前摘要」的最新章节。
+
+    滚动卷摘要和全书梗概没有版本表；因此只要任一可回放层显示故事
+    已超过 as-of，历史 Recall 就不应读取这两个最新值。
+    """
+    latest = 0
+    queries = (
+        "SELECT MAX(chapter) AS chapter FROM draft_index",
+        "SELECT MAX(chapter) AS chapter FROM chapter_summaries",
+        "SELECT MAX(chapter) AS chapter FROM l2_scenes",
+        "SELECT MAX(chapter) AS chapter FROM timeline_events",
+        "SELECT MAX(valid_from_chapter) AS chapter FROM facts WHERE status='canon'",
+    )
+    for sql in queries:
+        try:
+            row = conn.execute(sql).fetchone()
+        except Exception:
+            continue
+        if row is not None and row["chapter"] is not None:
+            latest = max(latest, int(row["chapter"]))
+    return latest
 
 
 def _fetch_recent_summaries(as_of: int, conn, window: int) -> list[dict]:
@@ -387,14 +422,47 @@ def _fetch_global_synopsis(conn) -> str:
         return ""
 
 
-def _fts_search(query: str, limit: int, conn) -> list[dict]:
+def _fts_search(query: str, as_of: int, limit: int, conn) -> list[dict]:
+    from ..db.l0 import load_draft_text_by_id
+    from ..tokenizer import cut
+
     try:
+        query = (query or "").strip()[:500]
+        if not query or limit <= 0:
+            return []
+        as_of = max(0, int(as_of))
+        limit = min(int(limit), 100)
+        query_tokens = []
+        for token in cut(query):
+            token = "".join(
+                ch for ch in token.strip() if ch.isalnum() or ch == "_"
+            )[:64]
+            if token and token not in query_tokens:
+                query_tokens.append(token)
+        if not query_tokens:
+            return []
+        # OR 召回优先，后续按 BM25 排序；逐 token 引号包裹避免 FTS 操作符注入。
+        match_query = " OR ".join(f'"{token}"' for token in query_tokens[:30])
         rows = _rows(
             conn,
-            "SELECT chapter, snippet(drafts_fts, 0, '<b>', '</b>', '...', 20) AS snippet"
-            " FROM drafts_fts WHERE drafts_fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit),
+            "SELECT draft_id, CAST(chapter_no AS INTEGER) AS chapter,"
+            " line_start, line_end,"
+            " snippet(drafts_fts, 4, '<b>', '</b>', '...', 20) AS tokenized_snippet,"
+            " bm25(drafts_fts) AS bm25_score"
+            " FROM drafts_fts WHERE drafts_fts MATCH ?"
+            " AND CAST(chapter_no AS INTEGER)<=?"
+            " ORDER BY bm25_score LIMIT ?",
+            (match_query, as_of, limit),
         )
+        for row in rows:
+            text = load_draft_text_by_id(conn, row["draft_id"])
+            if text is not None:
+                lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                start = max(1, int(row.get("line_start") or 1))
+                end = max(start, int(row.get("line_end") or start))
+                row["snippet"] = "\n".join(lines[start - 1:end]).strip()
+            else:
+                row["snippet"] = row.get("tokenized_snippet", "")
         return rows
     except Exception:
         # FTS5 表不存在时静默降级

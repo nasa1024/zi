@@ -3,6 +3,9 @@
 // ApiError on non-2xx responses. See SHARED CONTRACT.
 
 import type {
+  AgentChoiceRequest,
+  AgentSessionResponse,
+  AgentStartRequest,
   ApproveRequest,
   ApproveResponse,
   AutopilotSSEEvent,
@@ -14,6 +17,11 @@ import type {
   ChapterCardUpdateRequest,
   ForeshadowHealth,
   HealthResponse,
+  MemoryHealth,
+  MemoryRebuildRequest,
+  MemoryRebuildResponse,
+  MemorySettings,
+  MemorySettingsPatch,
   NextChapterSuggestion,
   PipelineRunDetail,
   PipelineRunRecord,
@@ -33,6 +41,7 @@ import type {
   SettleKrResponse,
   SSEPipelineEvent,
   StateQueryRequest,
+  StoryMap,
   SummaryBoardResponse,
   SummaryChapterItem,
   VolumeCreateRequest,
@@ -84,6 +93,31 @@ export function getApiKey(): string | null {
 
 type HttpMethod = 'GET' | 'POST' | 'DELETE' | 'PUT' | 'PATCH';
 
+function fastApiDetailMessage(detail: unknown): string | undefined {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.msg !== 'string') return [];
+      const location = Array.isArray(entry.loc)
+        ? entry.loc
+            .filter((part) => part !== 'body')
+            .map((part) => String(part))
+            .join('.')
+        : '';
+      return [location ? `${location}: ${entry.msg}` : entry.msg];
+    });
+    return messages.length > 0 ? messages.join('; ') : undefined;
+  }
+  if (detail && typeof detail === 'object') {
+    const entry = detail as Record<string, unknown>;
+    if (typeof entry.message === 'string') return entry.message;
+    if (typeof entry.msg === 'string') return entry.msg;
+  }
+  return undefined;
+}
+
 async function request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -113,6 +147,8 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
           } else if (data && typeof data === 'object' && typeof data.message === 'string') {
             message = data.message;
             code = typeof data.code === 'string' ? data.code : undefined;
+          } else if (data && typeof data === 'object' && 'detail' in data) {
+            message = fastApiDetailMessage(data.detail) ?? text;
           } else {
             message = text;
           }
@@ -148,6 +184,44 @@ export const api = {
 
   createProject(req: ProjectCreateRequest): Promise<ProjectResponse> {
     return request<ProjectResponse>('POST', '/v1/projects', req);
+  },
+
+  startAgent(id: string, req: AgentStartRequest): Promise<AgentSessionResponse> {
+    return request<AgentSessionResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/agent/start`,
+      req,
+    );
+  },
+
+  listAgentSessions(id: string): Promise<AgentSessionResponse[]> {
+    return request<AgentSessionResponse[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/agent/sessions`,
+    );
+  },
+
+  getAgentSession(id: string, sessionId: string): Promise<AgentSessionResponse> {
+    return request<AgentSessionResponse>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/agent/${encodeURIComponent(sessionId)}`,
+    );
+  },
+
+  chooseAgent(
+    id: string,
+    sessionId: string,
+    req: AgentChoiceRequest,
+  ): Promise<AgentSessionResponse> {
+    return request<AgentSessionResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/agent/${encodeURIComponent(sessionId)}/choose`,
+      req,
+    );
+  },
+
+  storyMap(id: string): Promise<StoryMap> {
+    return request<StoryMap>('GET', `/v1/${encodeURIComponent(id)}/story-map`);
   },
 
   // 生成情节设定候选（建项目前；无 key 或解析失败时返回示例数据 degraded=true）。
@@ -189,6 +263,36 @@ export const api = {
 
   state(id: string, req: StateQueryRequest): Promise<WorldStateSnapshot> {
     return request<WorldStateSnapshot>('POST', `/v1/${encodeURIComponent(id)}/state`, req);
+  },
+
+  getMemorySettings(id: string): Promise<MemorySettings> {
+    return request<MemorySettings>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/memory/settings`,
+    );
+  },
+
+  updateMemorySettings(id: string, req: MemorySettingsPatch): Promise<MemorySettings> {
+    return request<MemorySettings>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/memory/settings`,
+      req,
+    );
+  },
+
+  getMemoryHealth(id: string): Promise<MemoryHealth> {
+    return request<MemoryHealth>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/memory/health`,
+    );
+  },
+
+  rebuildMemory(id: string, req: MemoryRebuildRequest): Promise<MemoryRebuildResponse> {
+    return request<MemoryRebuildResponse>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/memory/rebuild`,
+      req,
+    );
   },
 
   runPipeline(id: string, req: PipelineRunRequest): Promise<PipelineRunResponse> {

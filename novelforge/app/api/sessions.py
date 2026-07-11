@@ -30,6 +30,7 @@ def _row_to_session(row) -> SessionResponse:
         client=row["client"],
         mode=row["mode"],
         actor=row["actor"],
+        interaction_mode=row["interaction_mode"] if "interaction_mode" in row.keys() else "guided",
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         budget_spent_tokens=row["budget_spent_tokens"] or 0,
@@ -83,8 +84,8 @@ def create_session(
     conn = registry.open_conn(project_id)
     try:
         conn.execute(
-            "INSERT INTO sessions(id, client, mode, actor) VALUES(?,?,?,?)",
-            (sid, req.client, req.mode, req.actor),
+            "INSERT INTO sessions(id, client, mode, actor, interaction_mode) VALUES(?,?,?,?,?)",
+            (sid, req.client, req.mode, req.actor, req.interaction_mode),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()

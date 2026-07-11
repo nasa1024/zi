@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── 通用 ──────────────────────────────────────────────────────────────────────
@@ -45,7 +45,9 @@ class PlotSetting(BaseModel):
 
 
 class ProjectCreateRequest(BaseModel):
-    name: str
+    # Choice-driven Agent entry permits a zero-text start.  The projects API
+    # assigns a genre-aware title when this is blank or omitted.
+    name: str = ""
     genre: str = "xuanhuan"
     power_system: Optional[str] = None
     config_overrides: Optional[dict] = None
@@ -114,31 +116,32 @@ class CaptureResponse(BaseModel):
 # ── Recall ────────────────────────────────────────────────────────────────────
 
 class RecallRequest(BaseModel):
-    entities: list[str] = []
-    as_of_chapter: int
-    keyword_query: Optional[str] = None
-    top_k: int = 20
+    entities: list[str] = Field(default_factory=list, max_length=100)
+    as_of_chapter: int = Field(ge=0, le=1_000_000)
+    keyword_query: Optional[str] = Field(default=None, max_length=500)
+    top_k: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("keyword_query")
+    @classmethod
+    def normalize_keyword_query(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class RecallItem(BaseModel):
     source: str
     fact_id: Optional[str] = None
+    scene_id: Optional[str] = None
+    draft_id: Optional[str] = None
     content: str
     entity: Optional[str] = None
     valid_from_chapter: int = 0
+    valid_to_chapter: Optional[int] = None
     score: Optional[float] = None
-
-
-class RecallResponse(BaseModel):
-    items: list[RecallItem]
-    world_state_snapshot: dict
-
-
-# ── State ─────────────────────────────────────────────────────────────────────
-
-class StateQueryRequest(BaseModel):
-    as_of_chapter: int
-    entity_filter: Optional[list[str]] = None
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
 
 
 class WorldStateSnapshot(BaseModel):
@@ -149,6 +152,72 @@ class WorldStateSnapshot(BaseModel):
     item_ownership: dict = Field(default_factory=dict)
     gimmick_rules: list = Field(default_factory=list)
     numeric_facts: dict = Field(default_factory=dict)
+
+
+class RecallResponse(BaseModel):
+    items: list[RecallItem]
+    world_state_snapshot: WorldStateSnapshot
+
+
+# ── Memory lifecycle / health ─────────────────────────────────────────────────
+
+class MemorySettingsPatch(BaseModel):
+    enable_l2: Optional[bool] = None
+    enable_vector: Optional[bool] = None
+    enable_l3: Optional[bool] = None
+    enable_summaries: Optional[bool] = None
+    l2_every_n_chapters: Optional[int] = Field(default=None, ge=1, le=50)
+    l2_max_scenes_per_chapter: Optional[int] = Field(default=None, ge=1, le=20)
+    vector_top_k: Optional[int] = Field(default=None, ge=1, le=50)
+    summary_window_chapters: Optional[int] = Field(default=None, ge=1, le=50)
+
+
+class MemorySettingsResponse(BaseModel):
+    enable_l2: bool
+    enable_vector: bool
+    enable_l3: bool
+    enable_summaries: bool
+    l2_every_n_chapters: int
+    l2_max_scenes_per_chapter: int
+    vector_top_k: int
+    summary_window_chapters: int
+    embedding_provider: str = "hash"
+    embedding_model: str = "text-embedding-3-small"
+    env_overrides: list[str] = Field(default_factory=list)
+
+
+class MemoryLayerHealth(BaseModel):
+    rows: int = 0
+    chapters: int = 0
+    completed_chapters: int = 0
+    coverage_pct: float = 0.0
+    details: dict = Field(default_factory=dict)
+
+
+class MemoryHealthResponse(BaseModel):
+    latest_chapter: int = 0
+    settings: dict = Field(default_factory=dict)
+    layers: dict[str, MemoryLayerHealth] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class MemoryRebuildRequest(BaseModel):
+    rebuild_l0: bool = True
+    rebuild_l1: bool = True
+    rebuild_l2: bool = True
+    rebuild_vectors: bool = True
+    force: bool = False
+
+
+class MemoryRebuildResponse(BaseModel):
+    result: dict = Field(default_factory=dict)
+
+
+# ── State ─────────────────────────────────────────────────────────────────────
+
+class StateQueryRequest(BaseModel):
+    as_of_chapter: int
+    entity_filter: Optional[list[str]] = None
 
 
 # ── Bible ─────────────────────────────────────────────────────────────────────
@@ -230,7 +299,7 @@ class PipelineRunRequest(BaseModel):
 
 class StageResult(BaseModel):
     stage: str
-    status: Literal["ok", "blocked", "skipped", "circuit_broken"]
+    status: Literal["ok", "blocked", "skipped", "circuit_broken", "degraded"]
     detail: dict = Field(default_factory=dict)
 
 
@@ -277,6 +346,7 @@ class PipelineRunDetail(PipelineRunRecord):
     quality_dimensions: Optional[dict] = None  # 维度分 {hook,pacing,character,prose}
     state_degraded: bool = False         # P1#11: 结算降级（正文已落袋，世界状态待修复）
     foreshadow_settle: Optional[dict] = None   # P1#6: 伏笔结算报告
+    plan_reconcile: Optional[dict] = None      # v16: 未来计划完成/延期/偏航对账
 
 
 class CandidateInfo(BaseModel):
@@ -738,6 +808,7 @@ class SessionCreateRequest(BaseModel):
     client: Literal["cli", "web", "chat", "api"] = "api"
     actor: str = "user"
     mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
+    interaction_mode: Literal["guided", "copilot", "autonomous"] = "guided"
 
 
 class SessionResponse(BaseModel):
@@ -745,6 +816,7 @@ class SessionResponse(BaseModel):
     client: str
     mode: Optional[str] = None
     actor: str
+    interaction_mode: str = "guided"
     started_at: str
     ended_at: Optional[str] = None
     budget_spent_tokens: int = 0
@@ -781,3 +853,33 @@ class TurnEventItem(BaseModel):
     event_type: str
     data: dict
     created_at: str
+
+
+# ── Choice-driven Author Agent (v16) ─────────────────────────────────────────
+
+class AgentStartRequest(BaseModel):
+    interaction_mode: Literal["guided", "copilot", "autonomous"] = "guided"
+    actor: str = Field(default="agent:web", max_length=200)
+    governance_mode: Literal["human_gate", "auto_promote", "hybrid"] = "human_gate"
+    hints: Optional[str] = Field(default=None, max_length=2000)
+    planning_horizon: int = Field(default=5, ge=1, le=10)
+    auto_chapters: int = Field(default=1, ge=1, le=50)
+
+
+class AgentChoiceRequest(BaseModel):
+    action: Literal["select", "auto", "reroll"] = "select"
+    option_id: Optional[str] = Field(default=None, max_length=200)
+    hints: Optional[str] = Field(default=None, max_length=2000)
+
+
+class AgentSessionResponse(BaseModel):
+    session_id: str
+    project_id: str
+    interaction_mode: str
+    stage: str
+    status: str
+    decision: Optional[dict] = None
+    last_decision: Optional[dict] = None
+    state: dict = Field(default_factory=dict)
+    story_map: dict = Field(default_factory=dict)
+    error: Optional[str] = None
