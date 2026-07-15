@@ -36,7 +36,7 @@ curl -s -X POST http://localhost:8787/v1/projects \
 
 ## 前端（`web/`，Vite + React + TypeScript）
 
-营销官网（霓虹蛮荒多巴胺风格落地页）+ 创作工作台 Studio（真实接入后端 REST API）。
+营销官网 + URL 驱动的创作工作台 Studio（真实接入后端 REST API）。写作页采用三栏“编辑部作战台”：左侧卷/章节树、中间正文编辑器、右侧章节契约与偏航证据。
 
 ```bash
 # 1) 先起后端（同上，:8787）
@@ -46,7 +46,17 @@ uvicorn novelforge.app.main:app --port 8787
 cd web && npm install && npm run dev
 ```
 
-打开 http://localhost:5173 ——落地页下方的 **⚙️ 工作台 / STUDIO** 真实驱动确定性核心（无需 LLM）：
+打开 http://localhost:5173；项目工作区支持可复制、可刷新的深链：
+
+```text
+/studio/:projectId/write/:chapter
+/studio/:projectId/plan
+/studio/:projectId/world
+/studio/:projectId/review
+/studio/:projectId/settings
+```
+
+工作台真实驱动确定性核心（无需 LLM）：
 
 - **创作 Agent** → 生成全书/卷/未来章节候选，作者选择或让 AI 决定；支持 checkpoint 恢复
 - **建项目** → `POST /v1/projects`（乐观更新，新书即时可用）
@@ -92,9 +102,9 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 
 | 模块 | 说明 |
 |---|---|
-| `db/schema.sql` | §02 全量 DDL（SCHEMA_VERSION=19）：canon / World State / L0-L2 记忆 / 未来计划 / Agent 决策 / sessions |
+| `db/schema.sql` | §02 全量 DDL（SCHEMA_VERSION=20）：canon / World State / L0-L2 记忆 / 可版本化未来计划 / actuals 与偏航报告 / Agent 决策 / sessions |
 | `db/connection.py` | 建库 / PRAGMA / facts + L0 drafts FTS 重建 / 启动期孤儿扫描 |
-| `db/migrations/` | 增量迁移器；v16 选择式规划，v17 durable replay，v18 记忆状态与证据链，v19 candidate→draft 来源追溯 |
+| `db/migrations/` | 增量迁移器；v16 选择式规划，v17 durable replay，v18 记忆状态与证据链，v19 candidate→draft 来源追溯，v20 章节契约版本 / actuals / alignment |
 | `db/l0.py` | L0 原子写入 + 项目隔离路径解析 + orphan/crashed_runs sweep |
 | `db/write.py` | 写入辅助函数 |
 | `world/replay.py` | as-of 投影（replay_power/knowledge/items/numeric/gimmick/timeline），支持 branch_id |
@@ -103,7 +113,7 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 | `validators/` | 确定性 Python 验证器（power / knowledge / timeline / numeric / gimmick） |
 | `governance/` | Promote / Revert / Gate / Conflict 治理层 |
 | `control_plane/orchestrator.py` | 主循环：plan→recall→draft→check→gate，pipeline_run 状态机 |
-| `planning/` | 全书路线、情节弧、未来章节窗口、PlanContext 与偏航对账 |
+| `planning/` | 统一规划服务、完整章节契约、append-only 计划版本、actuals 提取、加权偏航评分与重规划 |
 | `app/agent_runtime.py` | LangGraph 选择式创作状态图、interrupt/resume、同步 durability 与 SQLite checkpoint |
 | `control_plane/llm/` | 多供应商 LLM 接入层（DeepSeek / OpenAI-compat / Anthropic / Fake） |
 | `control_plane/budget.py` | Token/USD 预算 + 断路器 |
@@ -133,6 +143,13 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 | GET | `/{pid}/story-map` | 查看全书路线、情节弧与未来章节地图 |
 | POST | `/{pid}/seed` | 批量播种 canon facts（冷启动） |
 | POST | `/{pid}/pipeline/run` | 生成一章（完整 plan→draft→check→gate 流水线） |
+| POST | `/{pid}/planning/windows/generate` | 生成未来章节路线候选（不直接覆盖计划） |
+| POST | `/{pid}/planning/windows/{decision_id}/approve` | 批准并以整窗事务应用路线 |
+| GET | `/{pid}/chapters/{chapter}/contract` | 查看当前章节完整契约 |
+| GET | `/{pid}/chapters/{chapter}/alignment` | 查看 actuals、证据与偏航报告 |
+| POST | `/{pid}/chapters/{chapter}/replan` | 预览或应用后续章节重规划 |
+| GET | `/{pid}/chapters/{chapter}/plan-versions` | 查看 append-only 计划版本时间线 |
+| GET/PATCH | `/{pid}/chapters/{chapter}/draft` | 读取正文或按 revision CAS 保存新修订 |
 | GET | `/{pid}/facts` | 查询 facts（支持 FTS 关键词） |
 | POST | `/{pid}/governance/review` | 人工审批 review queue 条目 |
 | POST | `/{pid}/governance/revert` | 回滚 fact 到指定版本 |
@@ -198,7 +215,7 @@ set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
 ## 测试
 
 ```
-681 passed
+726 passed
 ```
 
-覆盖范围：schema 迁移、L0 原子写入、pipeline_run 状态机、会话/turn/SSE、API-key 认证、Prompt Injection 净化、热备份、FTS 重建、分支隔离 World State、软冲突检查、卷/分支 CRUD、冷启动、工艺层、自动驾驶、端到端 MVP 流水线。
+覆盖范围：schema 迁移、统一规划多入口一致性、整窗事务回滚、append-only 计划版本、完整章节契约、final-only proposals、actuals/alignment/replan 闭环、候选人工换稿、正文 revision CAS、L0 原子写入、pipeline_run 状态机、会话/turn/SSE、API-key 认证、热备份、FTS 重建、分支隔离 World State、工艺层、自动驾驶和端到端 MVP 流水线。

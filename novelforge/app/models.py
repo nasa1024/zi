@@ -291,6 +291,7 @@ class PipelineRunRequest(BaseModel):
     entity_ids: Optional[list[str]] = None
     keyword_query: Optional[str] = None
     mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
+    interaction_mode: Literal["guided", "copilot", "autonomous"] = "guided"
     budget_max_tokens: Optional[int] = None
     budget_max_usd: Optional[float] = None
     n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # M3-①: 多候选择优
@@ -320,6 +321,10 @@ class PipelineRunResponse(BaseModel):
     quality_score: Optional[float] = None  # M5-⑦
     quality_dimensions: Optional[dict] = None  # 维度分 {hook,pacing,character,prose}
     cache_read_tokens: int = 0             # M1-⑥: 前缀缓存命中量
+    alignment_report: Optional[dict] = None
+    recommended_plan_action: Optional[
+        Literal["keep", "patch", "replan", "pause"]
+    ] = None
     error: Optional[str] = None
 
 
@@ -347,6 +352,10 @@ class PipelineRunDetail(PipelineRunRecord):
     state_degraded: bool = False         # P1#11: 结算降级（正文已落袋，世界状态待修复）
     foreshadow_settle: Optional[dict] = None   # P1#6: 伏笔结算报告
     plan_reconcile: Optional[dict] = None      # v16: 未来计划完成/延期/偏航对账
+    alignment_report: Optional[dict] = None
+    recommended_plan_action: Optional[
+        Literal["keep", "patch", "replan", "pause"]
+    ] = None
 
 
 class CandidateInfo(BaseModel):
@@ -356,6 +365,11 @@ class CandidateInfo(BaseModel):
     length: int
     score: Optional[float] = None
     hard_blocks: int = 0
+    continuity_blocks: int = 0
+    plan_blocks: int = 0
+    contract_score: Optional[float] = None
+    arc_progress_score: Optional[float] = None
+    quality_score: Optional[float] = None
     is_winner: bool = False
     proposal_count: int = 0
 
@@ -415,6 +429,8 @@ class PlannedBeat(BaseModel):
     beat_type: str
     summary: str
     value_axis: Optional[str] = None
+    arc_id: Optional[str] = None
+    constraint_level: Literal["soft", "hard"] = "soft"
 
 
 class ChapterCardModel(BaseModel):
@@ -428,6 +444,21 @@ class ChapterCardModel(BaseModel):
     opening_hook_type: Optional[str] = None
     hook_type: Optional[str] = None
     expectation_score: Optional[int] = None
+    plan_version: int = 1
+    locked: bool = False
+    source_decision_id: Optional[str] = None
+    current_plan_version_id: Optional[str] = None
+    arc_targets: list[str] = Field(default_factory=list)
+    volume_kr_targets: list[str] = Field(default_factory=list)
+    milestone_targets: list[str] = Field(default_factory=list)
+    must_advance: list[str] = Field(default_factory=list)
+    must_resolve: list[str] = Field(default_factory=list)
+    must_include_entities: list[str] = Field(default_factory=list)
+    must_not_reveal: list[str] = Field(default_factory=list)
+    must_not_resolve: list[str] = Field(default_factory=list)
+    forbidden_state_changes: list[str] = Field(default_factory=list)
+    target_state: dict = Field(default_factory=dict)
+    success_criteria: list[str] = Field(default_factory=list)
     beats: list[PlannedBeat] = Field(default_factory=list)
 
 
@@ -449,6 +480,17 @@ class ChapterCardUpdateRequest(BaseModel):
     opening_hook_type: Optional[str] = None
     hook_type: Optional[str] = None
     expectation_score: Optional[int] = Field(default=None, ge=1, le=5)
+    arc_targets: Optional[list[str]] = None
+    volume_kr_targets: Optional[list[str]] = None
+    milestone_targets: Optional[list[str]] = None
+    must_advance: Optional[list[str]] = None
+    must_resolve: Optional[list[str]] = None
+    must_include_entities: Optional[list[str]] = None
+    must_not_reveal: Optional[list[str]] = None
+    must_not_resolve: Optional[list[str]] = None
+    forbidden_state_changes: Optional[list[str]] = None
+    target_state: Optional[dict] = None
+    success_criteria: Optional[list[str]] = None
 
 
 class NextChapterSuggestion(BaseModel):

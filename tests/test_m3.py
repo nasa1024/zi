@@ -59,16 +59,23 @@ class TestSelectBest:
         assert r["reason"] == "single_candidate"
         assert not r["judge_used"]
 
-    def test_prescreen_eliminates_short_and_proposalless(self):
+    def test_prescreen_eliminates_short_but_allows_empty_proposals(self):
         cands = [
             {"draft_text": "短", "proposals": [{}]},            # 太短
-            {"draft_text": "y" * 2000, "proposals": []},        # 无提案
+            {"draft_text": "y" * 2100, "proposals": []},        # 无提案但正文有效
             {"draft_text": "z" * 2000, "proposals": [{}]},      # 合格
         ]
         r = select_best(cands)
-        assert r["winner"] == 2
-        assert r["reason"] == "prescreen_single_survivor"
+        assert r["eligible"] == [1, 2]
+        assert r["winner"] == 1
+        assert r["reason"] == "judge_unavailable_pick_longest"
         assert not r["judge_used"]
+
+    def test_empty_proposals_single_candidate_is_valid(self):
+        r = select_best([{"draft_text": "x" * 2000, "proposals": []}])
+        assert r["winner"] == 0
+        assert r["eligible"] == [0]
+        assert r["reason"] == "single_candidate"
 
     def test_all_failed_picks_longest(self):
         cands = [
@@ -203,8 +210,8 @@ class TestPipelineWithCandidates:
         temps = sorted(round(c["temperature"], 2) for c in draft_calls)
         assert temps == [0.7, 0.85, 1.0]
 
-    def test_single_candidate_no_judge_no_detail(self, client, project):
-        """n=1：行为同旧版，无候选事件、无 detail_json。"""
+    def test_single_candidate_no_judge_with_alignment_detail(self, client, project):
+        """n=1 不产生候选事件，但仍保存最终稿对账报告。"""
         orch, fake = self._build_orch(
             project, 1, draft_responses=[_draft_response("单稿正文。" * 200)],
         )
@@ -221,7 +228,9 @@ class TestPipelineWithCandidates:
             ).fetchone()
         finally:
             conn.close()
-        assert row["detail_json"] is None
+        detail = json.loads(row["detail_json"])
+        assert detail["alignment_report"]["chapter"] == 1
+        assert detail["recommended_plan_action"] in {"keep", "patch", "replan", "pause"}
         assert not any(s == "candidates" for (s, _, _) in stages)
         draft_calls = [c for c in fake.calls
                        if "本章任务" in str(c["messages"][-1].content)]

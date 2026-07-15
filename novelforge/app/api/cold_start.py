@@ -110,7 +110,7 @@ def cold_start(
         from ...config import NovelForgeConfig
         from ...control_plane.skill_base import SkillContext
         from ...control_plane.budget import BudgetLedger
-        from ...control_plane.llm.factory import build_gateway
+        from ...control_plane.llm.runtime import build_configured_gateway
         from ...skills.cold_extract_skill import ColdExtractSkill
 
         api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
@@ -128,7 +128,7 @@ def cold_start(
 
         for chapter_item in req.chapters:
             ledger = BudgetLedger()
-            gw = build_gateway(cfg, ledger=ledger)
+            gw = build_configured_gateway(cfg, ledger=ledger)
             ws: dict = {
                 "source_text": chapter_item.text,
                 "chapter_no": chapter_item.chapter_no,

@@ -21,6 +21,7 @@ from ..control_plane.skill_base import DoDOutcome, SkillContext, SkillResult
 from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
+from ..craft.hooks import hook_menu
 
 _CONTRACT = SkillContract(
     name="volume_plan",
@@ -39,7 +40,6 @@ _CONTRACT = SkillContract(
     description="按卷大纲批量生成逐章细纲（章节卡 + planned beats），网文工艺字段显式化",
 )
 
-# 钩子枚举两处同步：菜单字符串与 craft/hooks.py 的枚举保持一致（枚举变更时同改）
 _SYSTEM = """\
 你是 NovelForge 的卷规划师，为网文一卷生成逐章细纲（章节卡）。
 
@@ -51,13 +51,24 @@ _SYSTEM = """\
     "chapter": 12,
     "title": "章节名",
     "goal": "本章目标：必须含明确冲突或爽点",
+    "arc_targets": ["本章服务的 story_arcs.id"],
+    "volume_kr_targets": ["本章服务的 KR id"],
+    "milestone_targets": ["本章服务的 arc_milestones.id"],
+    "must_advance": ["本章必须推进的事件"],
+    "must_resolve": ["本章必须解决的承诺"],
+    "must_include_entities": ["必须登场或被明确涉及的实体"],
+    "must_not_reveal": ["本章禁止提前揭示的信息"],
+    "must_not_resolve": ["本章禁止提前解决的矛盾"],
+    "forbidden_state_changes": ["禁止发生的状态变化"],
+    "target_state": {"写完本章后应成立的故事状态": "值"},
+    "success_criteria": ["可从正文举证的验收标准"],
     "hook_text": "章末悬念一句话（必填）",
     "target_emotion": "本章目标情绪词（如 紧张/扬眉吐气/悲怆）",
-    "opening_hook_type": "章首钩子，7 式选一: suspense(悬念)/conflict(冲突)/dialogue(对话切入)/action(动作)/anomaly(反常)/crisis(危机)/flashback(倒叙)",
-    "hook_type": "章尾钩子，13 式选一: cliffhanger(命悬一线)/reversal(反转)/reveal(揭秘)/new_threat(新威胁)/mystery(新谜团)/promise(承诺约战)/arrival(神秘登场)/decision(重大抉择)/countdown(倒计时)/loss(失去代价)/power_tease(力量预告)/relationship(关系变化)/humiliation(受辱蓄势)",
+    "opening_hook_type": "章首钩子，从 __OPENING_HOOK_MENU__ 中选一",
+    "hook_type": "章尾钩子，从 __ENDING_HOOK_MENU__ 中选一",
     "expectation_score": 4,
     "beats": [
-      {"beat_type": "setup|turn|tension_point|payoff_beat|hook", "summary": "...", "value_axis": "如 安全→危机"}
+      {"beat_type": "setup|turn|tension_point|payoff_beat|hook", "summary": "...", "value_axis": "如 安全→危机", "arc_id": null, "constraint_level": "soft|hard"}
     ]
   }
 ]
@@ -68,10 +79,14 @@ _SYSTEM = """\
 - hook_text 必填：让读者点开下一章的钩子
 - 相邻两章 hook_type 不得相同（钩子同质化让读者疲劳）；expectation_score 是章尾钩子期待度 1-5
 - beats 每章 3-5 条，最后一条必须是 hook 类型
+- 每章至少一条 hard beat；hard beat 绑定 arc_id 时必须使用上下文给出的真实 ID
+- success_criteria 必须能验证 target_state，禁止项必须具体到可从正文举证
 - 若给出"待回收伏笔"，必须在其到期章或之前安排回收（payoff_beat）
 - 章节号严格按给定范围连续编号，不重不漏
 只输出 plans 代码块，不要其他说明。
-"""
+""".replace("__OPENING_HOOK_MENU__", hook_menu("opening")).replace(
+    "__ENDING_HOOK_MENU__", hook_menu("ending")
+)
 
 
 class VolumePlanSkill:
@@ -96,6 +111,12 @@ class VolumePlanSkill:
         if foreshadow_due:
             fs = "、".join(f"{f.get('label')}（第{f.get('due_chapter')}章到期）" for f in foreshadow_due)
             parts.append(f"## 待回收伏笔\n{fs}")
+        future = ctx.workspace.get("future_plan_context", "")
+        if future:
+            parts.append(future)
+        hints = ctx.workspace.get("planning_hints", "")
+        if hints:
+            parts.append(f"## 作者提示\n{hints}")
         parts.append(f"## 规划范围\n第 {plan_from} 章 至 第 {plan_to} 章（共 {plan_to - plan_from + 1} 章）")
         user_msg = "\n\n".join(parts)
 
@@ -179,7 +200,15 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
                 "beat_type": bt,
                 "summary": str(b.get("summary", ""))[:500],
                 "value_axis": str(b.get("value_axis", ""))[:100] or None,
+                "arc_id": str(b.get("arc_id"))[:100] if b.get("arc_id") else None,
+                "constraint_level": (
+                    b.get("constraint_level")
+                    if b.get("constraint_level") in {"soft", "hard"}
+                    else ("hard" if i == 0 or bt == "hook" else "soft")
+                ),
             })
+        if beats and not any(b["constraint_level"] == "hard" for b in beats):
+            beats[0]["constraint_level"] = "hard"
         exp = p.get("expectation_score")
         try:
             exp = max(1, min(5, int(exp))) if exp is not None else None
@@ -189,6 +218,21 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             "chapter": ch,
             "title": str(p.get("title", ""))[:100],
             "goal": str(p.get("goal", ""))[:1000],
+            "arc_targets": _string_list(p.get("arc_targets")),
+            "volume_kr_targets": _string_list(p.get("volume_kr_targets")),
+            "milestone_targets": _string_list(p.get("milestone_targets")),
+            "must_advance": _string_list(p.get("must_advance")) or [
+                str(p.get("goal", "推进本章目标"))[:500]
+            ],
+            "must_resolve": _string_list(p.get("must_resolve")),
+            "must_include_entities": _string_list(p.get("must_include_entities")),
+            "must_not_reveal": _string_list(p.get("must_not_reveal")),
+            "must_not_resolve": _string_list(p.get("must_not_resolve")),
+            "forbidden_state_changes": _string_list(p.get("forbidden_state_changes")),
+            "target_state": p.get("target_state") if isinstance(p.get("target_state"), dict) else {},
+            "success_criteria": _string_list(p.get("success_criteria")) or [
+                "完成本章 goal 并以章末钩子形成后续行动动力"
+            ],
             "hook_text": str(p.get("hook_text", ""))[:300],
             "target_emotion": (str(p.get("target_emotion"))[:50]
                                if p.get("target_emotion") else None),
@@ -199,3 +243,9 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
         })
     plans.sort(key=lambda x: x["chapter"])
     return plans
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip()[:500] for item in value if str(item).strip()]

@@ -60,6 +60,49 @@ export interface UseProjectsResult {
   addProject: (p: ProjectResponse) => void;
 }
 
+export interface UseProjectResult {
+  project: ProjectResponse | null;
+  loading: boolean;
+  error: string | null;
+  refetch: () => void;
+}
+
+// A routed workspace resolves only the project named in the URL. Listing the
+// whole registry is reserved for /studio, so a large shelf cannot block a
+// deep link to one manuscript.
+export function useProject(projectId: string): UseProjectResult {
+  const [project, setProject] = useState<ProjectResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refetch = useCallback(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getProject(projectId)
+      .then((response) => {
+        if (!cancelled) setProject(response);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setProject(null);
+        setError(err instanceof Error ? err.message : '加载项目失败');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  useEffect(() => {
+    const cancel = refetch();
+    return cancel;
+  }, [refetch]);
+
+  return { project, loading, error, refetch };
+}
+
 export function useProjects(): UseProjectsResult {
   const [projects, setProjects] = useState<ProjectResponse[]>([]);
   const [loading, setLoading] = useState<boolean>(true);

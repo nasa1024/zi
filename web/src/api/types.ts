@@ -185,6 +185,8 @@ export interface PipelineRunDetail extends PipelineRunRecord {
     divergence_score: number;
     needs_replan: boolean;
   } | null;
+  alignment_report?: AlignmentReport | null;
+  recommended_plan_action?: PlanAction | null;
 }
 
 // v16: Choice-driven Author Agent
@@ -319,6 +321,11 @@ export interface CandidateInfo {
   hard_blocks: number;
   is_winner: boolean;
   proposal_count: number;
+  continuity_blocks?: number;
+  plan_blocks?: number;
+  contract_score?: number | null;
+  arc_progress_score?: number | null;
+  quality_score?: number | null;
 }
 
 export interface NextChapterSuggestion {
@@ -492,6 +499,9 @@ export interface PlannedBeat {
   beat_type: string;
   summary: string;
   value_axis?: string | null;
+  arc_id?: string | null;
+  constraint_level?: 'soft' | 'hard' | string | null;
+  source_decision_id?: string | null;
 }
 
 export interface ChapterCard {
@@ -505,7 +515,173 @@ export interface ChapterCard {
   opening_hook_type?: string | null;
   hook_type?: string | null;
   expectation_score?: number | null;
+  plan_version?: number;
+  locked?: number | boolean;
+  source_decision_id?: string | null;
   beats: PlannedBeat[];
+}
+
+// 大纲闭环：章节契约、实际结果、偏航报告和 append-only 计划版本。
+export type ContractItem = string | {
+  id?: string;
+  text?: string;
+  label?: string;
+  status?: 'pending' | 'met' | 'missed' | string;
+  evidence?: string | null;
+};
+
+export interface ChapterContract {
+  chapter: number;
+  title?: string | null;
+  goal?: string | null;
+  plan_version_id?: string | null;
+  current_plan_version_id?: string | null;
+  plan_version?: number;
+  locked?: boolean | number;
+  premise?: string | null;
+  ending_direction?: string | null;
+  volume?: {
+    volume_no?: number;
+    title?: string | null;
+    objective?: string | null;
+    key_results?: KeyResult[];
+  } | null;
+  arc_targets: ContractItem[];
+  volume_kr_targets: ContractItem[];
+  milestone_targets: ContractItem[];
+  must_advance: ContractItem[];
+  must_resolve: ContractItem[];
+  must_include_entities: ContractItem[];
+  must_not_reveal: ContractItem[];
+  must_not_resolve: ContractItem[];
+  forbidden_state_changes: ContractItem[];
+  target_state: Record<string, unknown>;
+  success_criteria: ContractItem[];
+  target_emotion?: string | null;
+  opening_hook_type?: string | null;
+  hook_type?: string | null;
+  expectation_score?: number | null;
+  beats: PlannedBeat[];
+}
+
+export interface EvidenceSpan {
+  label?: string | null;
+  quote?: string | null;
+  start?: number | null;
+  end?: number | null;
+  confidence?: number | null;
+}
+
+export interface ChapterActuals {
+  id?: string;
+  chapter: number;
+  events: unknown[];
+  state_changes: unknown[];
+  completed_beats: unknown[];
+  arc_progress: unknown[];
+  revealed_information: unknown[];
+  unresolved_promises: string[];
+  involved_entities: string[];
+  evidence_spans: EvidenceSpan[];
+}
+
+export type PlanAction = 'keep' | 'patch' | 'replan' | 'pause';
+export type DivergenceLevel = 'normal' | 'minor' | 'major' | 'severe';
+
+export interface AlignmentReport {
+  id?: string;
+  chapter: number;
+  plan_version_id?: string | null;
+  actuals_id?: string | null;
+  goal_score: number;
+  beat_score: number;
+  arc_score: number;
+  volume_score: number;
+  reveal_score: number;
+  divergence_score: number;
+  level?: DivergenceLevel | string;
+  decision?: string | null;
+  recommended_plan_action?: PlanAction | null;
+  hard_reveal?: boolean;
+  detail?: Record<string, unknown>;
+  evidence_spans?: EvidenceSpan[];
+  actuals?: ChapterActuals | null;
+  created_at?: string | null;
+}
+
+export interface ChapterPlanVersion {
+  id: string;
+  chapter: number;
+  version: number;
+  payload: Record<string, unknown>;
+  status: 'candidate' | 'active' | 'superseded' | 'executed' | 'abandoned' | string;
+  source_decision_id?: string | null;
+  based_on_chapter?: number | null;
+  reason?: string | null;
+  divergence_score?: number | null;
+  created_at: string;
+}
+
+export interface ChapterDraft {
+  chapter: number;
+  draft_id?: string | null;
+  revision_id?: string | null;
+  revision_round?: number | null;
+  draft_text: string;
+  word_count?: number | null;
+  updated_at?: string | null;
+}
+
+export interface ChapterDraftUpdateRequest {
+  draft_text: string;
+  base_revision_id: string;
+}
+
+export interface PlanningWindowGenerateRequest {
+  start_chapter: number;
+  horizon: number;
+  hints?: string | null;
+  candidate_count?: number;
+}
+
+export interface PlanningWindowCandidate {
+  id?: string;
+  title?: string | null;
+  summary?: string | null;
+  chapters: ChapterCard[];
+  score?: number | null;
+}
+
+export interface GeneratedPlanWindow {
+  decision_id: string;
+  start_chapter: number;
+  horizon: number;
+  candidates: PlanningWindowCandidate[];
+  recommended_option_id?: string | null;
+}
+
+export interface AppliedPlanWindow {
+  decision_id: string;
+  selected_option_id?: string | null;
+  planned: number[];
+  skipped?: number[];
+  version_ids?: Record<string, string>;
+}
+
+export interface ChapterReplanRequest {
+  mode: 'patch' | 'replan';
+  horizon: number;
+  preserve_locked: boolean;
+  reason?: string | null;
+  apply?: boolean;
+}
+
+export interface ChapterReplanResponse {
+  action?: PlanAction;
+  decision_id?: string | null;
+  window?: GeneratedPlanWindow | null;
+  alignment_report?: AlignmentReport | null;
+  applied?: AppliedPlanWindow | null;
 }
 
 export interface VolumePlanRequest {
@@ -640,6 +816,8 @@ export interface SSEDoneEvent {
   cache_read_tokens?: number;
   quality_score?: number | null;
   quality_dimensions?: Record<string, number> | null;
+  alignment_report?: AlignmentReport | null;
+  recommended_plan_action?: PlanAction | null;
   error?: string | null;
 }
 

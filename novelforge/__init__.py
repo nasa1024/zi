@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "19"  # +fact_candidates.source_draft_id 候选事实来源草稿追溯
+SCHEMA_VERSION = "20"  # +章节契约版本、actuals 与偏航对账报告

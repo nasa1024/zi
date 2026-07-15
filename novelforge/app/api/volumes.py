@@ -45,6 +45,16 @@ def _parse_kr(raw) -> list[dict]:
         return []
 
 
+def _parse_json(raw, fallback):
+    if not raw:
+        return fallback
+    try:
+        import json
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return fallback
+
+
 def _volume_row_to_resp(row) -> VolumeResponse:
     keys = row.keys() if hasattr(row, "keys") else []
     return VolumeResponse(
@@ -62,18 +72,21 @@ def _volume_row_to_resp(row) -> VolumeResponse:
 
 
 def _build_kr_gateway(project_id: str, registry):
-    """构建 LLM 网关供 KR 结算用（与 plan_volume 同款 provider 装配）。"""
-    import os
-    from ...config import NovelForgeConfig
-    from ...control_plane.llm import factory as llm_factory
+    """构建 KR 网关；与规划/正文共享唯一运行时装配入口。"""
+    from ...control_plane.llm.runtime import build_project_gateway
 
-    cfg = NovelForgeConfig(project_id=project_id,
-                           db_path=registry.get(project_id).db_path)
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        cfg.provider.api_key = api_key
-        cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-    return llm_factory.build_gateway(cfg)
+    project = registry.get(project_id)
+    settings_conn = registry.open_conn(project_id) if project else None
+    try:
+        return build_project_gateway(
+            project_id,
+            project.db_path if project else "novel.db",
+            settings_conn,
+            allow_missing=True,
+        )
+    finally:
+        if settings_conn is not None:
+            settings_conn.close()
 
 
 def _branch_row_to_resp(row) -> BranchResponse:
@@ -192,11 +205,9 @@ def volume_wizard(
 ) -> VolumeWizardResponse:
     """设定→卷大纲端到端向导：锁定的情节设定 → 建卷（大纲+OKR）→ 预填前几章细纲。"""
     import json as _json
-    import os
 
-    from ...config import NovelForgeConfig
-    from ...control_plane.llm import factory as llm_factory
     from ...control_plane.llm.provider import Message
+    from ...control_plane.llm.runtime import build_project_gateway
     from ...control_plane.llm.tiers import ModelTier
     from ...craft.volume_kr import normalize_key_results
     from ..chapter_suggest import next_chapter_no
@@ -221,17 +232,19 @@ def volume_wizard(
         end_chapter = start_chapter + req.volume_span - 1
 
         # ── LLM 生成卷大纲（MID 起跑、失败升 STRONG；无 key → 确定性兜底）──
-        cfg = NovelForgeConfig(project_id=project_id,
-                               db_path=registry.get(project_id).db_path)
-        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-        if api_key:
-            cfg.provider.api_key = api_key
-            cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
         degraded = False
         tier_used = None
         data = None
         try:
-            gw = llm_factory.build_gateway(cfg)
+            project = registry.get(project_id)
+            gw = build_project_gateway(
+                project_id,
+                project.db_path if project else "novel.db",
+                conn,
+                allow_missing=True,
+            )
+            if gw is None:
+                raise RuntimeError("LLM 网关不可用")
             lines = [f"- {k}: {v}" for k, v in setting.items()
                      if v and k != "power_ranks"]
             if setting.get("power_ranks"):
@@ -422,14 +435,19 @@ def delete_volume(
 def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
     row = conn.execute(
         "SELECT chapter, title, goal, hook_text, status,"
-        "       target_emotion, opening_hook_type, hook_type, expectation_score"
+        " target_emotion, opening_hook_type, hook_type, expectation_score,"
+        " plan_version, locked, source_decision_id, current_plan_version_id,"
+        " arc_targets_json, volume_kr_targets_json, milestone_targets_json,"
+        " must_advance_json, must_resolve_json, must_include_entities_json,"
+        " must_not_reveal_json, must_not_resolve_json,"
+        " forbidden_state_changes_json, target_state_json, success_criteria_json"
         " FROM chapter_cards WHERE chapter=?",
         (chapter,),
     ).fetchone()
     if row is None:
         return None
     beats = conn.execute(
-        "SELECT seq, beat_type, summary, value_axis FROM beats"
+        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level FROM beats"
         " WHERE chapter=? AND status='planned' ORDER BY seq",
         (chapter,),
     ).fetchall()
@@ -440,8 +458,25 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
         opening_hook_type=row["opening_hook_type"],
         hook_type=row["hook_type"],
         expectation_score=row["expectation_score"],
+        plan_version=row["plan_version"],
+        locked=bool(row["locked"]),
+        source_decision_id=row["source_decision_id"],
+        current_plan_version_id=row["current_plan_version_id"],
+        arc_targets=_parse_json(row["arc_targets_json"], []),
+        volume_kr_targets=_parse_json(row["volume_kr_targets_json"], []),
+        milestone_targets=_parse_json(row["milestone_targets_json"], []),
+        must_advance=_parse_json(row["must_advance_json"], []),
+        must_resolve=_parse_json(row["must_resolve_json"], []),
+        must_include_entities=_parse_json(row["must_include_entities_json"], []),
+        must_not_reveal=_parse_json(row["must_not_reveal_json"], []),
+        must_not_resolve=_parse_json(row["must_not_resolve_json"], []),
+        forbidden_state_changes=_parse_json(row["forbidden_state_changes_json"], []),
+        target_state=_parse_json(row["target_state_json"], {}),
+        success_criteria=_parse_json(row["success_criteria_json"], []),
         beats=[PlannedBeat(seq=b["seq"], beat_type=b["beat_type"],
-                           summary=b["summary"], value_axis=b["value_axis"]) for b in beats],
+                           summary=b["summary"], value_axis=b["value_axis"],
+                           arc_id=b["arc_id"],
+                           constraint_level=b["constraint_level"]) for b in beats],
     )
 
 
@@ -452,21 +487,8 @@ def plan_volume(
     req: VolumePlanRequest,
     registry: ProjectRegistry = Depends(get_registry),
 ):
-    """按卷大纲批量生成逐章章节卡 + planned beats（单次 ≤10 章）。
-
-    只覆盖 status='planned' 且尚无草稿的章——已 drafted/committed 的章跳过，
-    保护既成事实。生成结果是 /pipeline/next「最优建议」的直接数据源。
-    """
-    import os
-    from ...config import (
-        NovelForgeConfig,
-        apply_project_memory_settings,
-        apply_runtime_env,
-    )
-    from ...control_plane.skill_base import SkillContext
-    from ...control_plane.skill_registry import SkillRegistry
-    from ...ids import new_id
-    from ...skills import register_default_skills
+    """兼容卷规划入口；生成与落库均转交统一 PlanningService。"""
+    from ...planning.service import PlanningService
     from ..chapter_suggest import next_chapter_no
 
     if registry.get(project_id) is None:
@@ -474,15 +496,8 @@ def plan_volume(
     conn = registry.open_conn(project_id)
     try:
         project = registry.get(project_id)
-        cfg = NovelForgeConfig(
-            project_id=project_id,
-            db_path=project.db_path if project else "novel.db",
-        )
-        apply_project_memory_settings(cfg, conn)
-        apply_runtime_env(cfg)
-
         vol = conn.execute(
-            "SELECT volume_no, title, synopsis, start_chapter, end_chapter, rolling_summary"
+            "SELECT volume_no, title, synopsis, start_chapter, end_chapter"
             " FROM volumes WHERE volume_no=?", (volume_no,),
         ).fetchone()
         if vol is None:
@@ -498,108 +513,60 @@ def plan_volume(
             plan_to = min(plan_to, vol["end_chapter"])
         if plan_from > plan_to:
             raise HTTPException(422, f"规划范围为空: from={plan_from} > to={plan_to}")
-
-        # ── 组装 skill 输入 ────────────────────────────────────────────────────
-        from ...memory.recall import gather_hard_context
-        ent_rows = conn.execute("SELECT id FROM entities LIMIT 10").fetchall()
-        pack = gather_hard_context(
-            [r["id"] for r in ent_rows],
-            plan_from - 1,
-            conn,
-            summary_window=cfg.recall.summary_window_chapters,
-            enable_summaries=cfg.recall.enable_summaries,
-        )
-        _stable = pack.to_stable_context_str()
-        fs_rows = conn.execute(
-            "SELECT label, due_chapter FROM foreshadow"
-            " WHERE state IN ('planted','reinforced','misled','overdue')"
-            "   AND due_chapter IS NOT NULL AND due_chapter<=?"
-            " ORDER BY due_chapter LIMIT 10",
-            (plan_to,),
-        ).fetchall()
-
-        # ── 构建 LLM 网关并调用 skill ─────────────────────────────────────────
-        from ...control_plane.llm import factory as llm_factory
-        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-        if api_key:
-            cfg.provider.api_key = api_key
-            cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-
         try:
-            gw = llm_factory.build_gateway(cfg)
-            reg = SkillRegistry()
-            register_default_skills(reg)
-            ctx = SkillContext(
+            service = PlanningService(
+                db_path=project.db_path if project else None,
+            )
+            window = service.generate_window(
+                conn,
                 project_id=project_id,
-                target_chapter=plan_from,
-                mode="human_gate",
-                as_of_chapter=plan_from - 1,
-                budget=gw.ledger if gw else None,
-                llm=gw,
-                conn=conn,
-                workspace={
-                    "volume_brief": {
-                        "volume_no": vol["volume_no"], "title": vol["title"],
-                        "synopsis": vol["synopsis"],
-                        "rolling_summary": vol["rolling_summary"],
-                    },
-                    "plan_from": plan_from,
-                    "plan_to": plan_to,
-                    "foreshadow_due": [dict(r) for r in fs_rows],
-                    "stable_context": f"## 世界设定（稳定）\n{_stable}" if _stable else "",
-                },
+                start_chapter=plan_from,
+                horizon=plan_to - plan_from + 1,
+                source="volume_api",
+                volume_no=volume_no,
             )
-            result = reg.invoke("volume_plan", ctx)
-            plans: list[dict] = ctx.workspace.get("chapter_plans", [])
-            error = None if result.ok else (result.error or "规划无产出")
-        except Exception as e:
-            plans, error = [], str(e)
-
-        # ── 落库：只覆盖 planned，保护既成事实 ────────────────────────────────
-        planned: list[ChapterCardModel] = []
-        skipped: list[int] = []
-        for p in plans:
-            ch = p["chapter"]
-            drafted = conn.execute(
-                "SELECT 1 FROM draft_index WHERE chapter=? LIMIT 1", (ch,)
-            ).fetchone()
-            card = conn.execute(
-                "SELECT status FROM chapter_cards WHERE chapter=?", (ch,)
-            ).fetchone()
-            if drafted or (card and card["status"] != "planned"):
-                skipped.append(ch)
-                continue
-            conn.execute(
-                "INSERT INTO chapter_cards(id, chapter, title, goal, hook_text,"
-                " target_emotion, opening_hook_type, hook_type, expectation_score, status)"
-                " VALUES(?,?,?,?,?,?,?,?,?,'planned')"
-                " ON CONFLICT(chapter) DO UPDATE SET"
-                "   title=excluded.title, goal=excluded.goal,"
-                "   hook_text=excluded.hook_text,"
-                "   target_emotion=excluded.target_emotion,"
-                "   opening_hook_type=excluded.opening_hook_type,"
-                "   hook_type=excluded.hook_type,"
-                "   expectation_score=excluded.expectation_score,"
-                "   status='planned'",
-                (new_id("card"), ch, p.get("title"), p.get("goal"), p.get("hook_text"),
-                 p.get("target_emotion"), p.get("opening_hook_type"),
-                 p.get("hook_type"), p.get("expectation_score")),
-            )
-            conn.execute("DELETE FROM beats WHERE chapter=? AND status='planned'", (ch,))
-            for b in p.get("beats", []):
-                conn.execute(
-                    "INSERT OR IGNORE INTO beats(id, chapter, seq, beat_type, summary, value_axis, status)"
-                    " VALUES(?,?,?,?,?,?,'planned')",
-                    (new_id("beat"), ch, b["seq"], b["beat_type"], b["summary"], b.get("value_axis")),
+            if window.error:
+                return VolumePlanResponse(
+                    volume_no=volume_no,
+                    from_chapter=plan_from,
+                    to_chapter=plan_to,
+                    planned=[],
+                    skipped=[],
+                    error=window.error,
                 )
+            decision = service.create_compatibility_decision(
+                conn,
+                project_id=project_id,
+                window=window,
+                actor="planning:volume_api",
+            )
+            applied = service.apply_window(
+                conn,
+                window=window,
+                decision_id=decision["decision_id"],
+                lock=True,
+                replace_policy="preserve_locked",
+                reason="volume_api",
+            )
             conn.commit()
-            loaded = _load_chapter_card(conn, ch)
-            if loaded:
-                planned.append(loaded)
+        except Exception as e:
+            return VolumePlanResponse(
+                volume_no=volume_no,
+                from_chapter=plan_from,
+                to_chapter=plan_to,
+                planned=[],
+                skipped=[],
+                error=str(e),
+            )
+
+        planned = [
+            card for chapter in applied.planned
+            if (card := _load_chapter_card(conn, chapter)) is not None
+        ]
 
         return VolumePlanResponse(
             volume_no=volume_no, from_chapter=plan_from, to_chapter=plan_to,
-            planned=planned, skipped=skipped, error=error,
+            planned=planned, skipped=applied.skipped, error=None,
         )
     finally:
         conn.close()
@@ -631,23 +598,84 @@ def update_chapter_card(
     req: ChapterCardUpdateRequest,
     registry: ProjectRegistry = Depends(get_registry),
 ) -> ChapterCardModel:
-    """人审/手改章节卡（human_gate 精神在规划层的延伸）。"""
+    """人审修改也生成 append-only 计划版本，不直接覆盖审计历史。"""
+    from ...planning.models import DecisionOptionDraft
+    from ...planning.service import GeneratedPlanWindow, PlanningService
+
     conn = registry.open_conn(project_id)
     try:
-        row = conn.execute(
-            "SELECT chapter FROM chapter_cards WHERE chapter=?", (chapter,)
-        ).fetchone()
-        if row is None:
+        current = _load_chapter_card(conn, chapter)
+        if current is None:
             raise HTTPException(404, f"chapter_cards 无第 {chapter} 章")
-        updates = {k: v for k, v in req.model_dump().items() if v is not None}
-        if updates:
-            set_clause = ", ".join(f"{k}=?" for k in updates)
-            conn.execute(
-                f"UPDATE chapter_cards SET {set_clause} WHERE chapter=?",
-                list(updates.values()) + [chapter],
-            )
-            conn.commit()
+        if current.status != "planned":
+            raise HTTPException(409, "已进入正文阶段的章节不能直接改写计划")
+        updates = req.model_dump(exclude_none=True)
+        if not updates:
+            return current
+        payload = {
+            "chapter": chapter,
+            "title": current.title,
+            "goal": current.goal or "推进本章目标",
+            "hook_text": current.hook_text,
+            "target_emotion": current.target_emotion,
+            "opening_hook_type": current.opening_hook_type,
+            "hook_type": current.hook_type,
+            "expectation_score": current.expectation_score,
+            "arc_targets": current.arc_targets,
+            "volume_kr_targets": current.volume_kr_targets,
+            "milestone_targets": current.milestone_targets,
+            "must_advance": current.must_advance,
+            "must_resolve": current.must_resolve,
+            "must_include_entities": current.must_include_entities,
+            "must_not_reveal": current.must_not_reveal,
+            "must_not_resolve": current.must_not_resolve,
+            "forbidden_state_changes": current.forbidden_state_changes,
+            "target_state": current.target_state,
+            "success_criteria": current.success_criteria,
+            "beats": [beat.model_dump() for beat in current.beats],
+        }
+        payload.update(updates)
+        if payload["beats"] and not any(
+            beat.get("constraint_level") == "hard" for beat in payload["beats"]
+        ):
+            payload["beats"][0]["constraint_level"] = "hard"
+        option = DecisionOptionDraft(
+            title=f"人工修订第 {chapter} 章契约",
+            summary=str(payload.get("goal") or "人工修订"),
+            payload={
+                "route_title": "人工修订",
+                "route_summary": "作者显式修改章节契约",
+                "chapters": [payload],
+            },
+        )
+        window = GeneratedPlanWindow(
+            project_id=project_id,
+            start_chapter=chapter,
+            horizon=1,
+            source="manual_edit",
+            options=[option],
+        )
+        service = PlanningService(
+            db_path=(registry.get(project_id).db_path if registry.get(project_id) else None)
+        )
+        decision = service.create_compatibility_decision(
+            conn,
+            project_id=project_id,
+            window=window,
+            actor="planning:manual_edit",
+        )
+        service.apply_window(
+            conn,
+            window=window,
+            decision_id=decision["decision_id"],
+            lock=True,
+            replace_policy="replace_unwritten",
+            reason="manual_edit",
+        )
+        conn.commit()
         return _load_chapter_card(conn, chapter)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     finally:
         conn.close()
 

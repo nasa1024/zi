@@ -3,6 +3,8 @@
 // ApiError on non-2xx responses. See SHARED CONTRACT.
 
 import type {
+  AlignmentReport,
+  AppliedPlanWindow,
   AgentChoiceRequest,
   AgentSessionResponse,
   AgentStartRequest,
@@ -15,7 +17,14 @@ import type {
   BibleRenderResponse,
   ChapterCard,
   ChapterCardUpdateRequest,
+  ChapterContract,
+  ChapterDraft,
+  ChapterDraftUpdateRequest,
+  ChapterPlanVersion,
+  ChapterReplanRequest,
+  ChapterReplanResponse,
   ForeshadowHealth,
+  GeneratedPlanWindow,
   HealthResponse,
   MemoryHealth,
   MemoryRebuildRequest,
@@ -29,6 +38,7 @@ import type {
   PipelineRunResponse,
   PipelineStats,
   PipelineStreamHandlers,
+  PlanningWindowGenerateRequest,
   ProjectCreateRequest,
   ProjectResponse,
   RejectRequest,
@@ -173,6 +183,218 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
   return JSON.parse(text) as T;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function normalizeChapterCard(value: unknown): ChapterCard {
+  const item = record(value);
+  const chapter = Number(item.chapter);
+  return {
+    ...(item as unknown as ChapterCard),
+    chapter: Number.isFinite(chapter) ? chapter : 0,
+    status: stringOrNull(item.status) ?? 'candidate',
+    beats: Array.isArray(item.beats) ? item.beats as ChapterCard['beats'] : [],
+  };
+}
+
+export function normalizePlanningWindow(value: unknown): GeneratedPlanWindow {
+  const raw = record(value);
+  const decision = record(raw.decision);
+  const decisionOptions = Array.isArray(decision.options) ? decision.options : [];
+  const generatedCandidates = Array.isArray(raw.candidates) ? raw.candidates : [];
+  // Durable decision options carry the option id required by the approve API.
+  // Prefer them over the generator's id-less candidate drafts.
+  const options = decisionOptions.length > 0 ? decisionOptions : generatedCandidates;
+  const decisionId = stringOrNull(decision.decision_id) ?? stringOrNull(raw.decision_id);
+  if (!decisionId) {
+    throw new ApiError('规划响应缺少 decision_id，无法批准候选路线', 502);
+  }
+
+  return {
+    decision_id: decisionId,
+    start_chapter: Number(raw.start_chapter) || 1,
+    horizon: Number(raw.horizon) || 1,
+    recommended_option_id:
+      stringOrNull(decision.recommended_option_id) ?? stringOrNull(raw.recommended_option_id),
+    candidates: options.map((value) => {
+      const option = record(value);
+      const payload = record(option.payload);
+      const chapters = Array.isArray(payload.chapters)
+        ? payload.chapters
+        : Array.isArray(option.chapters) ? option.chapters : [];
+      return {
+        id: stringOrNull(option.id) ?? undefined,
+        title: stringOrNull(option.title) ?? stringOrNull(payload.route_title),
+        summary: stringOrNull(option.summary) ?? stringOrNull(payload.route_summary),
+        chapters: chapters.map(normalizeChapterCard),
+        score: typeof option.score === 'number' ? option.score : null,
+      };
+    }),
+  };
+}
+
+export function normalizeChapterContract(value: unknown): ChapterContract {
+  const envelope = record(value);
+  const source = Object.keys(record(envelope.contract)).length > 0
+    ? record(envelope.contract)
+    : envelope;
+  const storyPlan = record(envelope.story_plan);
+  const volume = record(envelope.current_volume);
+  const version = record(envelope.plan_version);
+  const rawKeyResults = Array.isArray(volume.key_results) ? volume.key_results : [];
+  const normalizedVolume = Object.keys(volume).length === 0 ? null : {
+    ...volume,
+    volume_no: Number(volume.volume_no) || undefined,
+    title: stringOrNull(volume.title),
+    objective: stringOrNull(volume.objective),
+    key_results: rawKeyResults.map((value, index) => {
+      if (typeof value === 'string') {
+        return { id: `kr-${index}`, text: value, status: 'pending', evidence: '' };
+      }
+      const item = record(value);
+      return {
+        id: stringOrNull(item.id) ?? `kr-${index}`,
+        text: stringOrNull(item.text) ?? stringOrNull(item.title) ?? '未命名 KR',
+        status: stringOrNull(item.status) ?? 'pending',
+        evidence: stringOrNull(item.evidence) ?? '',
+      };
+    }),
+  } as ChapterContract['volume'];
+
+  const list = (key: string): ChapterContract['arc_targets'] => (
+    Array.isArray(source[key]) ? source[key] as ChapterContract['arc_targets'] : []
+  );
+
+  return {
+    ...(source as unknown as ChapterContract),
+    chapter: Number(envelope.chapter ?? source.chapter) || 1,
+    premise: stringOrNull(source.premise) ?? stringOrNull(storyPlan.premise),
+    ending_direction:
+      stringOrNull(source.ending_direction) ?? stringOrNull(storyPlan.ending_direction),
+    volume: Object.keys(record(source.volume)).length > 0
+      ? source.volume as ChapterContract['volume']
+      : normalizedVolume,
+    plan_version: Number(source.plan_version ?? version.version) || 1,
+    arc_targets: list('arc_targets'),
+    volume_kr_targets: list('volume_kr_targets'),
+    milestone_targets: list('milestone_targets'),
+    must_advance: list('must_advance'),
+    must_resolve: list('must_resolve'),
+    must_include_entities: list('must_include_entities'),
+    must_not_reveal: list('must_not_reveal'),
+    must_not_resolve: list('must_not_resolve'),
+    forbidden_state_changes: list('forbidden_state_changes'),
+    success_criteria: list('success_criteria'),
+    target_state: record(source.target_state),
+    beats: Array.isArray(source.beats) ? source.beats as ChapterContract['beats'] : [],
+  };
+}
+
+export function normalizeAlignmentReport(value: unknown): AlignmentReport {
+  const raw = record(value);
+  const detail = record(raw.detail);
+  const actualsEnvelope = record(raw.actuals);
+  const actualsPayload = record(actualsEnvelope.payload);
+  const actualsSource = Object.keys(actualsPayload).length > 0 ? actualsPayload : actualsEnvelope;
+  const findings = Array.isArray(raw.findings) ? raw.findings : [];
+  const findingEvidence = findings.flatMap((finding) => {
+    const spans = record(finding).evidence_spans;
+    return Array.isArray(spans) ? spans : [];
+  });
+  const evidenceSource = Array.isArray(raw.evidence_spans)
+    ? raw.evidence_spans
+    : Array.isArray(actualsSource.evidence_spans)
+      ? actualsSource.evidence_spans
+      : findingEvidence;
+  const evidenceSpans = evidenceSource.map((value) => {
+    const span = record(value);
+    return {
+      label: stringOrNull(span.label),
+      quote: stringOrNull(span.quote) ?? stringOrNull(span.text),
+      start: typeof span.start === 'number'
+        ? span.start
+        : typeof span.start_char === 'number' ? span.start_char : null,
+      end: typeof span.end === 'number'
+        ? span.end
+        : typeof span.end_char === 'number' ? span.end_char : null,
+      confidence: typeof span.confidence === 'number' ? span.confidence : null,
+    };
+  });
+  const actuals = Object.keys(actualsSource).length === 0 ? null : {
+    ...(actualsSource as unknown as NonNullable<AlignmentReport['actuals']>),
+    id: stringOrNull(actualsEnvelope.id) ?? stringOrNull(actualsSource.id) ?? undefined,
+    chapter: Number(actualsSource.chapter ?? raw.chapter) || 1,
+    events: Array.isArray(actualsSource.events) ? actualsSource.events : [],
+    state_changes: Array.isArray(actualsSource.state_changes) ? actualsSource.state_changes : [],
+    completed_beats: Array.isArray(actualsSource.completed_beats) ? actualsSource.completed_beats : [],
+    arc_progress: Array.isArray(actualsSource.arc_progress) ? actualsSource.arc_progress : [],
+    revealed_information: Array.isArray(actualsSource.revealed_information)
+      ? actualsSource.revealed_information
+      : [],
+    unresolved_promises: Array.isArray(actualsSource.unresolved_promises)
+      ? actualsSource.unresolved_promises.map(String)
+      : [],
+    involved_entities: Array.isArray(actualsSource.involved_entities)
+      ? actualsSource.involved_entities.map(String)
+      : [],
+    evidence_spans: evidenceSpans,
+  };
+  const action = stringOrNull(raw.recommended_plan_action) ?? stringOrNull(raw.decision);
+
+  return {
+    ...(raw as unknown as AlignmentReport),
+    chapter: Number(raw.chapter) || 1,
+    goal_score: Number(raw.goal_score) || 0,
+    beat_score: Number(raw.beat_score) || 0,
+    arc_score: Number(raw.arc_score) || 0,
+    volume_score: Number(raw.volume_score) || 0,
+    reveal_score: Number(raw.reveal_score) || 0,
+    divergence_score: Number(raw.divergence_score) || 0,
+    level: stringOrNull(raw.level) ?? stringOrNull(raw.divergence_level) ?? undefined,
+    recommended_plan_action: action as AlignmentReport['recommended_plan_action'],
+    hard_reveal: Boolean(raw.hard_reveal ?? detail.hard_reveal),
+    detail,
+    evidence_spans: evidenceSpans,
+    actuals,
+  };
+}
+
+function normalizePipelineRunDetail(value: unknown): PipelineRunDetail {
+  const raw = record(value);
+  const alignment = record(raw.alignment_report);
+  return {
+    ...(raw as unknown as PipelineRunDetail),
+    alignment_report: Object.keys(alignment).length > 0
+      ? normalizeAlignmentReport(alignment)
+      : undefined,
+  };
+}
+
+function normalizeAppliedWindow(value: unknown, decisionId: string): AppliedPlanWindow {
+  const raw = record(value);
+  const versionIds = record(raw.version_ids);
+  return {
+    decision_id: stringOrNull(raw.decision_id) ?? decisionId,
+    selected_option_id: stringOrNull(raw.selected_option_id),
+    planned: Array.isArray(raw.planned)
+      ? raw.planned.map(Number).filter(Number.isFinite)
+      : [],
+    skipped: Array.isArray(raw.skipped)
+      ? raw.skipped.map(Number).filter(Number.isFinite)
+      : [],
+    version_ids: Object.fromEntries(
+      Object.entries(versionIds).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    ),
+  };
+}
+
 export const api = {
   health(): Promise<HealthResponse> {
     return request<HealthResponse>('GET', '/health');
@@ -222,6 +444,98 @@ export const api = {
 
   storyMap(id: string): Promise<StoryMap> {
     return request<StoryMap>('GET', `/v1/${encodeURIComponent(id)}/story-map`);
+  },
+
+  async generatePlanningWindow(
+    id: string,
+    req: PlanningWindowGenerateRequest,
+  ): Promise<GeneratedPlanWindow> {
+    const response = await request<unknown>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/planning/windows/generate`,
+      req,
+    );
+    return normalizePlanningWindow(response);
+  },
+
+  async approvePlanningWindow(
+    id: string,
+    decisionId: string,
+    optionId?: string | null,
+  ): Promise<AppliedPlanWindow> {
+    const response = await request<unknown>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/planning/windows/${encodeURIComponent(decisionId)}/approve`,
+      { option_id: optionId ?? null },
+    );
+    return normalizeAppliedWindow(response, decisionId);
+  },
+
+  async getChapterContract(id: string, chapter: number): Promise<ChapterContract> {
+    const response = await request<unknown>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/contract`,
+    );
+    return normalizeChapterContract(response);
+  },
+
+  async getChapterAlignment(id: string, chapter: number): Promise<AlignmentReport> {
+    const response = await request<unknown>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/alignment`,
+    );
+    return normalizeAlignmentReport(response);
+  },
+
+  async replanChapter(
+    id: string,
+    chapter: number,
+    req: ChapterReplanRequest,
+  ): Promise<ChapterReplanResponse> {
+    const response = await request<unknown>(
+      'POST',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/replan`,
+      req,
+    );
+    const raw = record(response);
+    const decision = record(raw.decision);
+    const decisionId = stringOrNull(decision.decision_id) ?? stringOrNull(raw.decision_id);
+    const applied = Object.keys(record(raw.applied)).length > 0 && decisionId
+      ? normalizeAppliedWindow({ ...record(raw.applied), decision_id: decisionId }, decisionId)
+      : null;
+    const window = applied ? null : normalizePlanningWindow(response);
+    return {
+      action: req.mode,
+      decision_id: decisionId,
+      window,
+      applied,
+    };
+  },
+
+  getChapterDraft(id: string, chapter: number): Promise<ChapterDraft> {
+    return request<ChapterDraft>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/draft`,
+    );
+  },
+
+  updateChapterDraft(
+    id: string,
+    chapter: number,
+    req: ChapterDraftUpdateRequest,
+  ): Promise<ChapterDraft> {
+    return request<ChapterDraft>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/draft`,
+      req,
+    );
+  },
+
+  getChapterPlanVersions(id: string, chapter: number): Promise<ChapterPlanVersion[]> {
+    return request<ChapterPlanVersion[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/chapters/${chapter}/plan-versions`,
+    );
   },
 
   // 生成情节设定候选（建项目前；无 key 或解析失败时返回示例数据 degraded=true）。
@@ -339,7 +653,14 @@ export const api = {
         try {
           const ev = JSON.parse(line.slice(6)) as SSEPipelineEvent;
           if (ev.event === 'stage') handlers.onStage?.(ev);
-          else if (ev.event === 'done') handlers.onDone?.(ev);
+          else if (ev.event === 'done') {
+            handlers.onDone?.({
+              ...ev,
+              alignment_report: ev.alignment_report
+                ? normalizeAlignmentReport(ev.alignment_report)
+                : ev.alignment_report,
+            });
+          }
           else if (ev.event === 'error') handlers.onError?.(ev);
         } catch { /* malformed line */ }
       }
@@ -533,19 +854,21 @@ export const api = {
     );
   },
 
-  getPipelineRun(id: string, runId: string): Promise<PipelineRunDetail> {
-    return request<PipelineRunDetail>(
+  async getPipelineRun(id: string, runId: string): Promise<PipelineRunDetail> {
+    const response = await request<unknown>(
       'GET',
       `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}`,
     );
+    return normalizePipelineRunDetail(response);
   },
 
-  selectCandidate(id: string, runId: string, candidateIndex: number): Promise<PipelineRunDetail> {
-    return request<PipelineRunDetail>(
+  async selectCandidate(id: string, runId: string, candidateIndex: number): Promise<PipelineRunDetail> {
+    const response = await request<unknown>(
       'POST',
       `/v1/${encodeURIComponent(id)}/pipeline/runs/${encodeURIComponent(runId)}/select-candidate`,
       { candidate_index: candidateIndex },
     );
+    return normalizePipelineRunDetail(response);
   },
 
   reviews(id: string): Promise<ReviewQueueItem[]> {

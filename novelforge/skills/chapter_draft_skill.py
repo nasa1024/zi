@@ -1,8 +1,8 @@
-"""ChapterDraftSkill：生成章节草稿 + BibleChangeProposal 列表（§07.5）。
+"""ChapterDraftSkill：生成纯章节正文候选（§07.5）。
 
 输出：
-  workspace["draft_text"]    原始草稿正文
-  workspace["proposals"]     list[BibleChangeProposal dict]
+    workspace["draft_text"]    原始草稿正文
+    workspace["proposals"]     兼容旧模型输出的可选提案；允许空列表
 """
 from __future__ import annotations
 
@@ -23,51 +23,29 @@ _CONTRACT = SkillContract(
     trigger=SkillTrigger.CHAPTER_DRAFT,
     model_tier=ModelTier.STRONG,
     inputs=IOSpec(["recall_pack", "beats"], "召回包 + beat sheet"),
-    outputs=IOSpec(["draft_text", "proposals"], "草稿正文 + BibleChangeProposal 列表"),
+    outputs=IOSpec(["draft_text", "proposals"], "草稿正文 + 可选兼容提案"),
     dod=[
         DoDCheck("min_length", "草稿字数 ≥ 1000 字"),
-        DoDCheck("has_proposals", "proposals 非空（至少 1 条）"),
+        DoDCheck("proposal_output_valid", "无提案或合法 proposals 数组"),
     ],
     read_scopes=["entities", "facts", "beats"],
     write_scopes=["drafts", "fact_candidates", "workspace"],
     cache_prefix_keys=["project_id", "as_of_chapter"],
-    description="按 beat sheet 起草章节正文，同时抽取 BibleChangeProposal",
+    description="按完整计划契约与 beat sheet 起草章节正文",
 )
 
 _SYSTEM = """\
 你是 NovelForge 的创作助手，负责起草中文网文章节。
 
 ## 输出格式
-请输出两个 JSON 代码块：
+请只输出一个草稿代码块：
 
-### 块1: 草稿
 ```draft
 （章节正文，纯中文，≥ 1000 字）
 ```
 
-### 块2: 提案
-```proposals
-[
-  {
-    "op": "add",
-    "fact_type": "power_system|knowledge|item|numeric|event|character_trait|world_rule|misc",
-    "entity": "实体名或ID",
-    "new": {
-      "subject": "...", "predicate": "...", "object": "...",
-      "facet": "power|knowledge|item|numeric|timeline",
-      ...字段按 fact_type 不同
-    },
-    "valid_from_chapter": 章节号
-  }
-]
-```
-
-### 提案规则
-- 只提取文中**明确发生**的世界状态变化（境界突破、知情、获得道具、数值变化、关键事件）
-- 不写纯叙事、情绪描写的提案
-- risk_tier: low(小细节) / medium(人物弧线变化) / high(世界规则/retcon)
-
-只输出以上两个代码块，不要其他说明。
+正文完成后系统会只对最终胜出稿抽取实际事件、状态变化与提案；候选阶段不要输出 proposals。
+只输出以上代码块，不要其他说明。
 """
 
 
@@ -97,14 +75,17 @@ class ChapterDraftSkill:
         ) or "(无召回上下文)"
         beats_str = _fmt_beats(beats)
 
-        # P1#9：文风锚点块在稳定段之后、本章任务之前——跨章前缀缓存无损，
-        # 同章多候选间字节一致（候选间缓存同样无损）
+        # Prompt 顺序固定为：稳定世界 → 当前状态 → 计划契约 → 文风 →
+        # 本章任务/Beat Sheet。同章多候选间字节一致，前缀缓存不受影响。
         anchor_block = ctx.workspace.get("style_anchor_block", "")
-        future_guardrails = ctx.workspace.get("future_guardrails", "")
+        contract_block = (
+            ctx.workspace.get("chapter_contract_context")
+            or ctx.workspace.get("future_guardrails", "")
+        )
         user_msg = (
             f"{context_block}\n\n"
+            + (f"{contract_block}\n\n" if contract_block else "")
             + (f"{anchor_block}\n\n" if anchor_block else "")
-            + (f"{future_guardrails}\n\n" if future_guardrails else "")
             + f"## 本章任务\n"
             f"第 {ctx.target_chapter} 章\n"
             f"目标字数：约 {target_chars} 字\n"
@@ -150,11 +131,12 @@ class ChapterDraftSkill:
         ctx.workspace["draft_tier_used"] = result.tier_used
 
         char_count = len(draft_text)
+        proposal_output_valid = _proposal_output_valid(raw_text)
         dod = [
             DoDOutcome("min_length", passed=char_count >= 1000,
                        detail=f"字数={char_count}"),
-            DoDOutcome("has_proposals", passed=bool(proposals),
-                       detail=f"proposals={len(proposals)}"),
+            DoDOutcome("proposal_output_valid", passed=proposal_output_valid,
+                       detail=f"proposals={len(proposals)}; valid={proposal_output_valid}"),
         ]
 
         return SkillResult(
@@ -225,6 +207,19 @@ def _try_parse_proposals(raw: str, chapter: int) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return []
+
+
+def _proposal_output_valid(text: str) -> bool:
+    """The pure-draft format and an explicit empty proposal list are valid."""
+    match = re.search(r"```proposals\s*(.*?)\s*```", text, re.DOTALL)
+    if match is None:
+        # New-format draft candidates intentionally omit proposal extraction.
+        return "```proposals" not in text
+    try:
+        value = json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, (list, dict))
 
 
 def _normalize_proposal(p: dict, chapter: int) -> dict:

@@ -1,5 +1,5 @@
 // 落地页：营销官网（霓虹蛮荒多巴胺风格）。
-// 新建项目后跳转到 /studio（通过 localStorage 共享 activeProjectId）。
+// 新建项目后直接跳转到 URL 驱动的项目规划室。
 
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -17,15 +17,6 @@ import Stats from '../components/Stats';
 import CreateProjectModal from '../components/studio/CreateProjectModal';
 import type { ProjectResponse } from '../api/types';
 
-const ACTIVE_PROJECT_STORAGE = 'nf_active_project';
-
-function writeActiveProject(id: string | null): void {
-  try {
-    if (id) localStorage.setItem(ACTIVE_PROJECT_STORAGE, id);
-    else localStorage.removeItem(ACTIVE_PROJECT_STORAGE);
-  } catch { /* ignore */ }
-}
-
 export default function LandingPage(): JSX.Element {
   const navigate = useNavigate();
   const [modalOpen, setModalOpen] = useState<boolean>(false);
@@ -35,9 +26,8 @@ export default function LandingPage(): JSX.Element {
 
   const handleCreated = useCallback(
     (p: ProjectResponse) => {
-      writeActiveProject(p.project_id);
       setModalOpen(false);
-      navigate('/studio');
+      navigate(`/studio/${encodeURIComponent(p.project_id)}/plan`);
     },
     [navigate],
   );

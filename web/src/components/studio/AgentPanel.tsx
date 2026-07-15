@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../../api/client';
 import type {
   AgentChoiceRequest,
@@ -16,7 +17,6 @@ interface AgentPanelProps {
 
 
 const EMPTY_MAP: StoryMap = { plan: null, arcs: [], volumes: [], chapters: [] };
-const SESSION_STORAGE_PREFIX = 'nf_agent_session:';
 
 const MODE_OPTIONS: Array<{
   value: AgentInteractionMode;
@@ -69,20 +69,6 @@ const IMPACT_LABELS: Record<string, string> = {
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError || error instanceof Error) return error.message;
   return fallback;
-}
-
-
-function storedSession(projectId: string): string | null {
-  try { return localStorage.getItem(SESSION_STORAGE_PREFIX + projectId); } catch { return null; }
-}
-
-
-function rememberSession(projectId: string, sessionId: string | null): void {
-  try {
-    const key = SESSION_STORAGE_PREFIX + projectId;
-    if (sessionId) localStorage.setItem(key, sessionId);
-    else localStorage.removeItem(key);
-  } catch { /* localStorage may be unavailable */ }
 }
 
 
@@ -259,6 +245,8 @@ function StoryMapPanel({ map }: { map: StoryMap }): JSX.Element {
 
 
 export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): JSX.Element {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedSession = searchParams.get('session');
   const [mode, setMode] = useState<AgentInteractionMode>('guided');
   const [governanceMode, setGovernanceMode] = useState<'human_gate' | 'hybrid' | 'auto_promote'>('human_gate');
   const [hints, setHints] = useState('');
@@ -280,7 +268,9 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
     setSession(next);
     setStoryMap(next.story_map || EMPTY_MAP);
     setRecent((rows) => [next, ...rows.filter((row) => row.session_id !== next.session_id)]);
-    rememberSession(projectId, next.session_id);
+    const params = new URLSearchParams(searchParams);
+    params.set('session', next.session_id);
+    setSearchParams(params, { replace: true });
   };
 
   useEffect(() => {
@@ -296,8 +286,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
         if (!alive) return;
         setRecent(sessions);
         setStoryMap(map);
-        const remembered = storedSession(projectId);
-        const recovered = sessions.find((item) => item.session_id === remembered)
+        const recovered = sessions.find((item) => item.session_id === requestedSession)
           ?? sessions.find((item) => item.status === 'awaiting_choice' || item.status === 'running')
           ?? null;
         if (recovered) {
@@ -314,7 +303,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
       });
 
     return () => { alive = false; };
-  }, [projectId]);
+  }, [projectId, requestedSession]);
 
   const start = async (): Promise<void> => {
     setBusy(true);
@@ -368,7 +357,9 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
 
   const newSession = (): void => {
     setSession(null);
-    rememberSession(projectId, null);
+    const params = new URLSearchParams(searchParams);
+    params.delete('session');
+    setSearchParams(params, { replace: true });
     setError(null);
   };
 

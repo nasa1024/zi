@@ -18,7 +18,11 @@ from ..governance.gate import GateOutcome, Route, apply_gate_routes
 from ..governance.promotion_policy import GateDecision, PromotionPolicy
 from ..ids import new_id
 from ..memory.recall import gather_hard_context
-from ..planning.alignment import check_plan_alignment, reconcile_plan
+from ..planning.alignment import (
+    check_plan_alignment,
+    evaluate_and_persist_alignment,
+    reconcile_plan,
+)
 from ..planning.context import gather_plan_context
 from ..world.replay import get_world_state
 from .budget import BudgetLedger, CircuitTripped
@@ -26,6 +30,17 @@ from .llm.gateway import LLMGateway
 from .llm.tiers import ModelTier
 from .skill_base import SkillContext, SkillResult
 from .skill_registry import SkillRegistry, get_registry
+
+
+class DraftRevisionConflict(RuntimeError):
+    """The requested base draft is no longer the chapter's latest revision."""
+
+    def __init__(self, expected_id: str, current_id: str | None) -> None:
+        self.expected_id = expected_id
+        self.current_id = current_id
+        super().__init__(
+            f"draft base revision changed: expected={expected_id}, current={current_id}"
+        )
 
 
 @dataclass
@@ -45,6 +60,8 @@ class ChapterOutcome:
     quality_score: Optional[float] = None
     quality_dimensions: Optional[dict] = None  # {hook,pacing,character,prose: 0-10}
     state_degraded: bool = False   # P1#11: 结算块失败但正文已落袋（连载继续，留修复入口）
+    alignment_report: Optional[dict] = None
+    recommended_plan_action: Optional[str] = None
 
     def summary(self) -> str:
         if not self.ok:
@@ -54,6 +71,171 @@ class ChapterOutcome:
             f" queued={len(self.candidates_queued)}"
             f" tokens={self.usage_tokens}"
         )
+
+
+def _ensure_final_proposals(
+    registry: SkillRegistry,
+    skill_ctx: SkillContext,
+) -> bool:
+    """Ensure proposals correspond to the currently selected draft text.
+
+    Returns ``True`` when the selected text changed and extraction was refreshed.
+    Empty output is a valid, memoized result and is not repeatedly re-extracted.
+    """
+    workspace = skill_ctx.workspace
+    draft_text = str(workspace.get("draft_text") or "")
+    if workspace.get("proposal_source_text") == draft_text:
+        return False
+
+    # Compatibility: an older chapter-draft model may already have returned
+    # proposals alongside the selected candidate.  They belong to this text.
+    if workspace.get("proposal_source_text") is None and workspace.get("proposals"):
+        workspace["proposal_source_text"] = draft_text
+        workspace["final_proposals_extracted"] = True
+        return True
+
+    previous_proposals = list(workspace.get("proposals") or [])
+    workspace["proposals"] = []
+    if draft_text:
+        workspace["source_text"] = draft_text
+        workspace["chapter_no"] = skill_ctx.target_chapter
+        try:
+            registry.invoke("cold_extract", skill_ctx)
+        except Exception as exc:
+            workspace["proposals"] = []
+            workspace["actuals_extractor_error"] = str(exc)
+    if not workspace.get("proposals") and previous_proposals:
+        # A revision may leave an already extracted state change untouched.
+        # Retain only proposals whose explicit evidence/value still occurs in
+        # the accepted text; removed events must not leak into settlement.
+        workspace["proposals"] = [
+            proposal for proposal in previous_proposals
+            if _proposal_supported_by_text(proposal, draft_text)
+        ]
+    workspace["proposal_source_text"] = draft_text
+    workspace["final_proposals_extracted"] = True
+    return True
+
+
+def _proposal_supported_by_text(proposal: dict, draft_text: str) -> bool:
+    refs = proposal.get("evidence_refs") or []
+    quotes = [
+        str(ref.get("quote") or "").strip()
+        for ref in refs if isinstance(ref, dict)
+    ]
+    quotes = [quote for quote in quotes if quote]
+    if quotes:
+        return any(quote in draft_text for quote in quotes)
+    new = proposal.get("new") if isinstance(proposal.get("new"), dict) else {}
+    values = [
+        new.get("object"),
+        new.get("value"),
+        new.get("after"),
+        new.get("statement"),
+        new.get("detail"),
+    ]
+    targets = [str(value).strip() for value in values if value is not None]
+    return any(len(target) >= 2 and target in draft_text for target in targets)
+
+
+def validate_final_candidate(
+    skill_ctx: SkillContext,
+    draft_text: str,
+    *,
+    plan_context=None,
+    proposals: Optional[list[dict]] = None,
+    registry: Optional[SkillRegistry] = None,
+    score_quality: bool = True,
+    judge_tier: str = "mid",
+) -> dict:
+    """Validate a generated or manually selected final candidate.
+
+    The order is intentional and shared by the manual replacement API:
+    continuity → plan alignment → craft.  Validation runs in a copied workspace
+    so inspecting a candidate cannot overwrite the caller's selected draft.
+    """
+    workspace = dict(skill_ctx.workspace)
+    workspace["draft_text"] = draft_text
+    workspace["proposals"] = list(proposals or [])
+    context = plan_context or workspace.get("plan_context")
+    if context is None:
+        context = gather_plan_context(skill_ctx.conn, skill_ctx.target_chapter)
+    workspace["plan_context"] = context
+    if not workspace.get("beats") and context is not None:
+        workspace["beats"] = list(context.selected_beats)
+    if workspace.get("world_state") is None:
+        workspace["world_state"] = get_world_state(
+            skill_ctx.as_of_chapter, skill_ctx.conn
+        )
+
+    check_ctx = SkillContext(
+        project_id=skill_ctx.project_id,
+        target_chapter=skill_ctx.target_chapter,
+        mode=skill_ctx.mode,
+        as_of_chapter=skill_ctx.as_of_chapter,
+        budget=skill_ctx.budget,
+        llm=skill_ctx.llm,
+        conn=skill_ctx.conn,
+        workspace=workspace,
+        extra=dict(skill_ctx.extra),
+    )
+    reg = registry or get_registry()
+
+    # Pure candidates intentionally carry no proposals.  Extract state changes
+    # once for the selected candidate before continuity/craft checks that may
+    # require payoff evidence.
+    _ensure_final_proposals(reg, check_ctx)
+
+    reg.invoke("continuity_check", check_ctx)
+    continuity_issues = list(workspace.get("continuity_issues") or [])
+
+    from ..planning.scoring import evaluate_candidate_against_plan
+    plan_evaluation = evaluate_candidate_against_plan(
+        draft_text,
+        chapter_contract=getattr(context, "current_contract", None),
+        plan_context=context,
+    )
+    plan_issues = list(plan_evaluation["plan_blocks"])
+
+    reg.invoke("craft_check", check_ctx)
+    raw_craft_issues = list(workspace.get("craft_issues") or [])
+    if not workspace.get("beats"):
+        # Legacy runs did not persist dynamically generated planner beats in
+        # detail_json.  Absence is then "unknown", not proof of a broken beat
+        # contract; retain all other craft checks.
+        raw_craft_issues = [
+            issue for issue in raw_craft_issues
+            if issue.get("check") != "beat_contract"
+        ]
+    craft_issues = [
+        issue if issue.get("source") else {"source": "craft", **issue}
+        for issue in raw_craft_issues
+    ]
+    issues = continuity_issues + plan_issues + craft_issues
+    hard_blocks = [issue for issue in issues if issue.get("severity") == "block"]
+
+    quality = None
+    if score_quality and draft_text:
+        from ..craft.candidate_judge import score_chapter_detailed
+        quality = score_chapter_detailed(
+            skill_ctx.llm,
+            judge_tier,
+            workspace.get("chapter_goal", ""),
+            draft_text,
+        )
+    return {
+        "ok": not hard_blocks,
+        "issues": issues,
+        "hard_blocks": hard_blocks,
+        "hard_block_count": len(hard_blocks),
+        "quality": quality,
+        "quality_score": quality.get("score") if quality else None,
+        "proposals": list(workspace.get("proposals") or []),
+        "continuity_issues": continuity_issues,
+        "plan_issues": plan_issues,
+        "craft_issues": craft_issues,
+        "plan_evaluation": plan_evaluation,
+    }
 
 
 class Orchestrator:
@@ -75,12 +257,18 @@ class Orchestrator:
         chapter_goal: str = "",
         entity_ids: Optional[list[str]] = None,
         keyword_query: Optional[str] = None,
+        interaction_mode: Optional[str] = None,
         progress_cb=None,  # Optional[Callable[[str, str, dict], None]]
     ) -> ChapterOutcome:
         cfg = self._cfg
         ledger = self._gw.ledger
         # 成本快照：落库本章净消耗（调用方复用 ledger 跨章时差值依然正确）
         _tokens0, _usd0 = ledger.tokens_spent, ledger.usd_spent
+        _cache0 = getattr(ledger, "cache_read_tokens", 0)
+        resolved_interaction_mode = interaction_mode or {
+            "auto_promote": "autonomous",
+            "hybrid": "copilot",
+        }.get(cfg.governance.mode, "guided")
 
         # ── 0. init workspace + pipeline_run 状态机 ──────────────────────────
         run_id = new_id("run")
@@ -141,6 +329,7 @@ class Orchestrator:
             workspace["plan_context"] = plan_context
             workspace["future_plan_context"] = plan_context.render_for_planner()
             workspace["future_guardrails"] = plan_context.render_guardrails_for_draft()
+            workspace["chapter_contract_context"] = plan_context.render_contract_for_draft()
 
             # P1#9：文风锚点 few-shot——按本章细纲目标情绪选段，注入动态段。
             # 无情绪/无匹配锚点 → 空块（fail-fast 不瞎编）；不碰稳定前缀，缓存无损。
@@ -240,6 +429,8 @@ class Orchestrator:
                     cand_list,
                     world=workspace.get("world_state"),
                     chapter_goal=workspace.get("chapter_goal", ""),
+                    chapter_contract=plan_context.current_contract,
+                    plan_context=plan_context,
                     gateway=self._gw,
                     judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
                 )
@@ -250,6 +441,7 @@ class Orchestrator:
                     **report,
                     "n_candidates": n_cands,
                     "lengths": [len(c["draft_text"]) for c in cand_list],
+                    "beats": list(workspace.get("beats") or []),
                     "selected_by": "auto",
                     # 候选全文 + 提案持久化（M6: human_gate 下前端 3 选 1 换稿的数据源）
                     "candidates": [
@@ -275,8 +467,17 @@ class Orchestrator:
                 return ChapterOutcome(
                     chapter=chapter, ok=False, run_id=run_id,
                     error="draft 失败: 所有候选均无产出",
-                    usage_tokens=ledger.tokens_spent,
+                    usage_tokens=ledger.tokens_spent - _tokens0,
+                    usage_usd=ledger.usd_spent - _usd0,
+                    cache_read_tokens=(
+                        getattr(ledger, "cache_read_tokens", 0) - _cache0
+                    ),
                 )
+
+            # Only the selected final candidate gets state-change extraction.
+            # This must precede craft validation because payoff_binding uses the
+            # extracted proposals as evidence that a promised payoff happened.
+            _ensure_final_proposals(self._reg, skill_ctx)
 
             # ── 4. CHECK（continuity + craft 并行）────────────────────────────
             _check_continuity = self._reg.invoke("continuity_check", skill_ctx)
@@ -309,6 +510,7 @@ class Orchestrator:
                     ledger.charge_revise_round()
                 revise_result = self._revise(skill_ctx, hard_blocks)
                 workspace.update(revise_result)
+                _ensure_final_proposals(self._reg, skill_ctx)
                 # 重跑两项 check
                 self._reg.invoke("continuity_check", skill_ctx)
                 self._reg.invoke("craft_check", skill_ctx)
@@ -329,6 +531,12 @@ class Orchestrator:
                 quality_score = self._quality_pass(
                     skill_ctx, cfg, hard_blocks, all_issues, progress_cb
                 )
+                # Polishing may have changed the accepted text.  Refresh its
+                # actual state changes before the final validation snapshot.
+                proposals_refreshed = _ensure_final_proposals(self._reg, skill_ctx)
+                if proposals_refreshed:
+                    self._reg.invoke("continuity_check", skill_ctx)
+                    self._reg.invoke("craft_check", skill_ctx)
                 continuity_issues = workspace.get("continuity_issues", [])
                 craft_issues = workspace.get("craft_issues", [])
                 plan_issues = check_plan_alignment(
@@ -340,13 +548,60 @@ class Orchestrator:
 
             # ── 6. COMMIT-DRAFT（P1#11：正文先落袋，结算失败不丢章）─────────
             draft_text: str = workspace.get("draft_text", "")
-            proposals: list[dict] = workspace.get("proposals", [])
+            proposals: list[dict] = list(workspace.get("proposals") or [])
             draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
+
+            try:
+                alignment = evaluate_and_persist_alignment(
+                    conn,
+                    plan_context,
+                    draft_text,
+                    chapter,
+                    draft_id=draft_id,
+                    seed_proposals=proposals,
+                    interaction_mode=resolved_interaction_mode,
+                )
+                workspace["chapter_actuals"] = alignment.actuals
+                workspace["alignment_report"] = alignment.report
+                workspace["chapter_actuals_id"] = alignment.actuals_id
+                workspace["alignment_report_id"] = alignment.report_id
+                workspace["recommended_plan_action"] = alignment.report.decision
+                proposals = alignment.proposals
+                workspace["proposals"] = proposals
+                conn.commit()
+                if progress_cb:
+                    progress_cb("plan_alignment", "ok", {
+                        "divergence_score": alignment.report.divergence_score,
+                        "divergence_level": alignment.report.divergence_level,
+                        "recommended_plan_action": alignment.report.decision,
+                    })
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                workspace["alignment_error"] = str(exc)
 
             # ── 7. SETTLE（canon 结算 + 写回类结算；失败降级不阻塞连载）──────
             settle = self._settle_chapter(
                 skill_ctx, conn, chapter, draft_text, proposals, pacing,
-                draft_id=draft_id, progress_cb=progress_cb,
+                draft_id=draft_id,
+                progress_cb=progress_cb,
+                interaction_mode=resolved_interaction_mode,
+            )
+
+            plan_reconcile = settle.get("plan_reconcile") or {}
+            final_alignment_report = (
+                plan_reconcile.get("alignment_report")
+                or (
+                    workspace["alignment_report"].model_dump(mode="json")
+                    if hasattr(workspace.get("alignment_report"), "model_dump")
+                    else workspace.get("alignment_report")
+                )
+            )
+            recommended_plan_action = (
+                plan_reconcile.get("recommended_plan_action")
+                or workspace.get("recommended_plan_action")
             )
 
             run_detail = workspace.get("candidate_report")
@@ -361,6 +616,20 @@ class Orchestrator:
             if settle.get("plan_reconcile") is not None:
                 run_detail = {**(run_detail or {}),
                               "plan_reconcile": settle["plan_reconcile"]}
+            if final_alignment_report is not None:
+                run_detail = {
+                    **(run_detail or {}),
+                    "alignment_report": final_alignment_report,
+                    "recommended_plan_action": recommended_plan_action,
+                    "chapter_actuals_id": workspace.get("chapter_actuals_id"),
+                    "alignment_report_id": workspace.get("alignment_report_id"),
+                }
+            if workspace.get("actuals_extractor_error") or workspace.get("alignment_error"):
+                run_detail = {
+                    **(run_detail or {}),
+                    "actuals_extractor_error": workspace.get("actuals_extractor_error"),
+                    "alignment_error": workspace.get("alignment_error"),
+                }
             if settle["degraded"]:
                 run_detail = {**(run_detail or {}),
                               "state_degraded": True,
@@ -389,25 +658,34 @@ class Orchestrator:
                 issues=all_issues,
                 gate=settle["gate_outcome"],
                 error=settle["error"] if settle["degraded"] else None,
-                usage_tokens=ledger.tokens_spent,
-                usage_usd=ledger.usd_spent,
-                cache_read_tokens=getattr(ledger, "cache_read_tokens", 0),
+                usage_tokens=ledger.tokens_spent - _tokens0,
+                usage_usd=ledger.usd_spent - _usd0,
+                cache_read_tokens=(
+                    getattr(ledger, "cache_read_tokens", 0) - _cache0
+                ),
                 quality_score=quality_score,
                 quality_dimensions=workspace.get("quality_dimensions"),
                 state_degraded=settle["degraded"],
+                alignment_report=final_alignment_report,
+                recommended_plan_action=recommended_plan_action,
             )
 
         except Exception as e:
             return ChapterOutcome(
                 chapter=chapter, ok=False,
                 error=str(e),
-                usage_tokens=ledger.tokens_spent,
+                usage_tokens=ledger.tokens_spent - _tokens0,
+                usage_usd=ledger.usd_spent - _usd0,
+                cache_read_tokens=(
+                    getattr(ledger, "cache_read_tokens", 0) - _cache0
+                ),
             )
 
     def _settle_chapter(
         self, skill_ctx: SkillContext, conn: sqlite3.Connection, chapter: int,
         draft_text: str, proposals: list[dict], pacing: PacingController,
         *, draft_id: Optional[str] = None, progress_cb=None,
+        interaction_mode: str = "guided",
     ) -> dict:
         """P1#11（inkos state-degraded）：结算块降级保护——正文已落袋，结算
         任一步失败只标记降级、不丢章。
@@ -527,7 +805,23 @@ class Orchestrator:
         if has_future_plan and draft_text:
             def _reconcile() -> None:
                 out["plan_reconcile"] = reconcile_plan(
-                    conn, plan_context, draft_text, chapter)
+                    conn,
+                    plan_context,
+                    draft_text,
+                    chapter,
+                    actuals=workspace.get("chapter_actuals"),
+                    report=workspace.get("alignment_report"),
+                    report_id=workspace.get("alignment_report_id"),
+                    interaction_mode=interaction_mode,
+                )
+                if out["plan_reconcile"]:
+                    workspace["alignment_report"] = out["plan_reconcile"].get(
+                        "alignment_report", workspace.get("alignment_report")
+                    )
+                    workspace["recommended_plan_action"] = out["plan_reconcile"].get(
+                        "recommended_plan_action",
+                        workspace.get("recommended_plan_action"),
+                    )
             _step("plan_reconcile", _reconcile)
             if progress_cb:
                 progress_cb("plan_reconcile", "ok", out["plan_reconcile"] or {})
@@ -1052,7 +1346,13 @@ def _update_global_synopsis(conn: sqlite3.Connection, gateway) -> None:
 
 
 def _persist_draft(
-    conn: sqlite3.Connection, text: str, chapter: int, project_id: str, db_path: str = "novel.db"
+    conn: sqlite3.Connection,
+    text: str,
+    chapter: int,
+    project_id: str,
+    db_path: str = "novel.db",
+    *,
+    expected_base_revision_id: Optional[str] = None,
 ) -> Optional[str]:
     """原子写入 L0 草稿文件并在 draft_index 登记（F7）。
 
@@ -1078,6 +1378,22 @@ def _persist_draft(
         if conn.in_transaction:
             conn.commit()
         conn.execute("BEGIN IMMEDIATE")
+
+        # Compare-and-swap must happen after acquiring the write lock.  A
+        # preflight check in an API handler cannot prevent two writers from
+        # accepting the same base revision concurrently.
+        latest = conn.execute(
+            "SELECT id FROM draft_index WHERE chapter=?"
+            " ORDER BY revision_round DESC, created_at DESC LIMIT 1",
+            (chapter,),
+        ).fetchone()
+        latest_id = latest["id"] if latest is not None else None
+        if (
+            expected_base_revision_id is not None
+            and latest_id != expected_base_revision_id
+        ):
+            conn.rollback()
+            raise DraftRevisionConflict(expected_base_revision_id, latest_id)
 
         # 查当前章最大 revision_round，递增
         row = conn.execute(
@@ -1137,12 +1453,29 @@ def _persist_draft(
         index_draft_fts(conn, draft_id, chapter, text)
         # 已选择的章节卡进入 drafted；未来卡仍保持 planned。
         conn.execute(
-            "UPDATE chapter_cards SET status='drafted', draft_id=?, word_count=?"
-            " WHERE chapter=? AND status='planned'",
+            "UPDATE chapter_cards SET"
+            " status=CASE WHEN status='planned' THEN 'drafted' ELSE status END,"
+            " draft_id=?, word_count=? WHERE chapter=?",
             (draft_id, word_count, chapter),
         )
+        # The version referenced by the chapter projection is the contract that
+        # produced this durable draft.  Mark only active→executed; historical
+        # superseded/candidate versions remain untouched and auditable.
+        try:
+            conn.execute(
+                "UPDATE chapter_plan_versions SET status='executed',"
+                " activated_at=COALESCE(activated_at, datetime('now'))"
+                " WHERE status='active' AND id=("
+                " SELECT current_plan_version_id FROM chapter_cards WHERE chapter=?"
+                " )",
+                (chapter,),
+            )
+        except sqlite3.Error:
+            pass
         conn.commit()
         return draft_id
+    except DraftRevisionConflict:
+        raise
     except Exception:
         try:
             conn.rollback()

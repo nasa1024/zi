@@ -62,11 +62,11 @@ def _optional_memory_gateway(cfg):
     if not key:
         return None
     try:
-        from ...control_plane.llm.factory import build_gateway
+        from ...control_plane.llm.runtime import build_configured_gateway
 
         cfg.provider.provider = provider
         cfg.provider.api_key = key
-        return build_gateway(cfg)
+        return build_configured_gateway(cfg)
     except Exception:
         return None
 

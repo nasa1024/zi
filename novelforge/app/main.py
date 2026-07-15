@@ -25,6 +25,7 @@ from .api.sessions import router as sessions_router
 from .api.admin import router as admin_router
 from .api.summaries import router as summaries_router
 from .api.agent import router as agent_router
+from .api.planning import router as planning_router
 
 
 @asynccontextmanager
@@ -88,8 +89,23 @@ async def not_found(request, exc):
 
 @app.exception_handler(409)
 async def conflict(request, exc):
-    return JSONResponse(status_code=409,
-                        content={"error": {"code": "conflict", "message": str(exc.detail)}})
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or "资源已被并发更新")
+        details = {key: value for key, value in detail.items() if key != "message"}
+    else:
+        message = str(detail)
+        details = {}
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": {
+                "code": "conflict",
+                "message": message,
+                "details": details,
+            }
+        },
+    )
 
 
 # 挂载路由（/v1 前缀）
@@ -106,6 +122,7 @@ app.include_router(sessions_router, prefix=PREFIX)
 app.include_router(admin_router, prefix=PREFIX)
 app.include_router(summaries_router, prefix=PREFIX)
 app.include_router(agent_router, prefix=PREFIX)
+app.include_router(planning_router, prefix=PREFIX)
 
 
 @app.get("/health")

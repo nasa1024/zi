@@ -381,8 +381,32 @@ CREATE TABLE IF NOT EXISTS chapter_cards (
     plan_version    INTEGER NOT NULL DEFAULT 1,     -- v16: 滚动规划版本
     locked          INTEGER NOT NULL DEFAULT 0,     -- v16: 1=用户/Agent 已确认，不得静默重写
     source_decision_id TEXT,                        -- v16: 对应 decision_sets.id
+    arc_targets_json TEXT NOT NULL DEFAULT '[]',    -- v20: 本章服务的长期情节弧
+    volume_kr_targets_json TEXT NOT NULL DEFAULT '[]', -- v20: 本章服务的卷 KR
+    milestone_targets_json TEXT NOT NULL DEFAULT '[]', -- v20: 本章服务的里程碑
+    must_advance_json TEXT NOT NULL DEFAULT '[]',   -- v20: 必须推进
+    must_resolve_json TEXT NOT NULL DEFAULT '[]',   -- v20: 必须解决
+    must_include_entities_json TEXT NOT NULL DEFAULT '[]', -- v20: 必须出场实体
+    must_not_reveal_json TEXT NOT NULL DEFAULT '[]', -- v20: 禁止提前揭示
+    must_not_resolve_json TEXT NOT NULL DEFAULT '[]', -- v20: 禁止本章解决
+    forbidden_state_changes_json TEXT NOT NULL DEFAULT '[]', -- v20: 禁止状态变化
+    target_state_json TEXT NOT NULL DEFAULT '{}',   -- v20: 章节完成后的目标状态
+    success_criteria_json TEXT NOT NULL DEFAULT '[]', -- v20: 可验证完成标准
+    current_plan_version_id TEXT,                   -- v20: 当前权威计划版本
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY(pov_entity_id) REFERENCES entities(id)
+    FOREIGN KEY(pov_entity_id) REFERENCES entities(id),
+    FOREIGN KEY(current_plan_version_id) REFERENCES chapter_plan_versions(id),
+    CHECK(json_valid(arc_targets_json)),
+    CHECK(json_valid(volume_kr_targets_json)),
+    CHECK(json_valid(milestone_targets_json)),
+    CHECK(json_valid(must_advance_json)),
+    CHECK(json_valid(must_resolve_json)),
+    CHECK(json_valid(must_include_entities_json)),
+    CHECK(json_valid(must_not_reveal_json)),
+    CHECK(json_valid(must_not_resolve_json)),
+    CHECK(json_valid(forbidden_state_changes_json)),
+    CHECK(json_valid(target_state_json)),
+    CHECK(json_valid(success_criteria_json))
 );
 
 -- v13: 文风锚点（P1#9——手动录入范文段，按情绪做 few-shot）
@@ -908,6 +932,119 @@ CREATE TABLE IF NOT EXISTS plan_revisions (
     CHECK(json_valid(after_json))
 );
 CREATE INDEX IF NOT EXISTS idx_plan_revisions_plan ON plan_revisions(plan_id, created_at);
+
+-- 16) 大纲契约版本、章节实际结果与偏航对账（v20）---------------------------
+-- chapter_cards 只保存当前投影；本表是 append-only 的章节计划审计源。
+CREATE TABLE IF NOT EXISTS chapter_plan_versions (
+    id                         TEXT PRIMARY KEY,
+    chapter                    INTEGER NOT NULL,
+    version                    INTEGER NOT NULL CHECK(version >= 1),
+    payload_json               TEXT NOT NULL DEFAULT '{}',
+    status                     TEXT NOT NULL DEFAULT 'candidate'
+                                   CHECK(status IN ('candidate','active','superseded',
+                                                    'executed','abandoned')),
+    source_decision_id         TEXT,
+    source_alignment_report_id TEXT,
+    based_on_chapter           INTEGER,
+    reason                     TEXT,
+    divergence_score           REAL
+                                   CHECK(divergence_score IS NULL OR
+                                         (divergence_score >= 0.0 AND divergence_score <= 1.0)),
+    created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at               TEXT,
+    superseded_at              TEXT,
+    UNIQUE(chapter, version),
+    CHECK(json_valid(payload_json))
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_versions_chapter
+    ON chapter_plan_versions(chapter, version DESC);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_versions_status
+    ON chapter_plan_versions(chapter, status);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_versions_source_decision
+    ON chapter_plan_versions(source_decision_id);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_versions_source_alignment
+    ON chapter_plan_versions(source_alignment_report_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chapter_plan_versions_one_active
+    ON chapter_plan_versions(chapter) WHERE status='active';
+
+-- 版本化 beat 快照不复用 beats(chapter,seq) 的唯一键，旧计划因此无需删除。
+CREATE TABLE IF NOT EXISTS chapter_plan_version_beats (
+    id               TEXT PRIMARY KEY,
+    plan_version_id  TEXT NOT NULL REFERENCES chapter_plan_versions(id),
+    seq              INTEGER NOT NULL CHECK(seq >= 1),
+    beat_type        TEXT NOT NULL
+                         CHECK(beat_type IN ('setup','turn','payoff_beat',
+                                             'tension_point','hook')),
+    summary          TEXT NOT NULL,
+    value_axis       TEXT,
+    arc_id           TEXT,
+    constraint_level TEXT NOT NULL DEFAULT 'soft'
+                         CHECK(constraint_level IN ('soft','hard')),
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(plan_version_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_version_beats_version
+    ON chapter_plan_version_beats(plan_version_id, seq);
+CREATE INDEX IF NOT EXISTS idx_chapter_plan_version_beats_arc
+    ON chapter_plan_version_beats(arc_id);
+
+-- 同章可有多次抽取，但仅一条 status=current 是权威实际结果。
+CREATE TABLE IF NOT EXISTS chapter_actuals (
+    id                TEXT PRIMARY KEY,
+    chapter           INTEGER NOT NULL,
+    draft_id          TEXT NOT NULL REFERENCES draft_index(id),
+    payload_json      TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'current'
+                          CHECK(status IN ('current','superseded')),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_at     TEXT,
+    UNIQUE(draft_id, extractor_version),
+    CHECK(json_valid(payload_json))
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_actuals_chapter
+    ON chapter_actuals(chapter, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chapter_actuals_draft
+    ON chapter_actuals(draft_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chapter_actuals_one_current
+    ON chapter_actuals(chapter) WHERE status='current';
+
+-- 对账报告同样保留历史，只允许每章一条 current 权威报告。
+CREATE TABLE IF NOT EXISTS plan_alignment_reports (
+    id                TEXT PRIMARY KEY,
+    chapter           INTEGER NOT NULL,
+    plan_version_id   TEXT REFERENCES chapter_plan_versions(id),
+    actuals_id         TEXT NOT NULL REFERENCES chapter_actuals(id),
+    goal_score         REAL NOT NULL CHECK(goal_score >= 0.0 AND goal_score <= 1.0),
+    beat_score         REAL NOT NULL CHECK(beat_score >= 0.0 AND beat_score <= 1.0),
+    arc_score          REAL NOT NULL CHECK(arc_score >= 0.0 AND arc_score <= 1.0),
+    volume_score       REAL NOT NULL CHECK(volume_score >= 0.0 AND volume_score <= 1.0),
+    reveal_score       REAL NOT NULL CHECK(reveal_score >= 0.0 AND reveal_score <= 1.0),
+    divergence_score   REAL NOT NULL
+                           CHECK(divergence_score >= 0.0 AND divergence_score <= 1.0),
+    divergence_level   TEXT NOT NULL
+                           CHECK(divergence_level IN ('normal','minor','major','severe')),
+    confidence         REAL CHECK(confidence IS NULL OR
+                                   (confidence >= 0.0 AND confidence <= 1.0)),
+    decision           TEXT CHECK(decision IS NULL OR
+                                  decision IN ('keep','patch','replan','pause')),
+    detail_json        TEXT NOT NULL DEFAULT '{}',
+    evaluator_version  TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'current'
+                           CHECK(status IN ('current','superseded')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_at      TEXT,
+    UNIQUE(plan_version_id, actuals_id, evaluator_version),
+    CHECK(json_valid(detail_json))
+);
+CREATE INDEX IF NOT EXISTS idx_plan_alignment_reports_chapter
+    ON plan_alignment_reports(chapter, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_plan_alignment_reports_plan_version
+    ON plan_alignment_reports(plan_version_id);
+CREATE INDEX IF NOT EXISTS idx_plan_alignment_reports_actuals
+    ON plan_alignment_reports(actuals_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_alignment_reports_one_current
+    ON plan_alignment_reports(chapter) WHERE status='current';
 
 -- 新增列由迁移器在已有库上追加（见 db/migrations.py）；
 -- 新建库通过 CREATE TABLE 定义直接包含（见 facts/draft_index/l1_atoms 表定义）。

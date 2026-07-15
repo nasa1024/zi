@@ -32,6 +32,50 @@ def _rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:
         return []
 
 
+_CONTRACT_LIST_FIELDS = (
+    "arc_targets",
+    "volume_kr_targets",
+    "milestone_targets",
+    "must_advance",
+    "must_resolve",
+    "must_include_entities",
+    "must_not_reveal",
+    "must_not_resolve",
+    "forbidden_state_changes",
+    "success_criteria",
+)
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        parsed = _json(value, None)
+        if isinstance(parsed, list):
+            return parsed
+        return [value] if value.strip() else []
+    return [value]
+
+
+def _bullet_block(title: str, values: Any, *, limit: int = 12) -> str:
+    items = [str(item).strip() for item in _as_list(values) if str(item).strip()]
+    if not items:
+        return ""
+    return title + "\n" + "\n".join(f"- {item}" for item in items[:limit])
+
+
+def _kr_text(item: Any) -> str:
+    if isinstance(item, dict):
+        text = str(item.get("text") or item.get("title") or item.get("id") or "").strip()
+        status = str(item.get("status") or "pending")
+        return f"[{status}] {text}" if text else ""
+    return str(item).strip()
+
+
 @dataclass
 class PlanContext:
     target_chapter: int
@@ -127,6 +171,104 @@ class PlanContext:
             parts.append("## 禁止提前揭示/兑现\n" + "\n".join(lines))
         return "\n\n".join(parts)
 
+    def render_contract_for_draft(self) -> str:
+        """Render the immutable story anchors and the complete chapter contract.
+
+        This is deliberately separate from historical recall: everything in
+        this block is author intent, never evidence that an event has already
+        happened.  The renderer also understands v16 cards, so older projects
+        degrade to the fields they actually possess.
+        """
+        parts: list[str] = []
+
+        if self.story_plan:
+            story_lines = [
+                f"- 核心前提：{self.story_plan.get('premise') or '未指定'}",
+                f"- 终局方向：{self.story_plan.get('ending_direction') or '未指定'}",
+            ]
+            if self.story_plan.get("phase_summary"):
+                story_lines.append(f"- 阶段路线：{self.story_plan['phase_summary']}")
+            constraints = self.story_plan.get("constraints") or {}
+            if constraints:
+                story_lines.append(
+                    "- 全书约束：" + json.dumps(constraints, ensure_ascii=False, separators=(",", ":"))
+                )
+            parts.append("## 全书不变锚点（未来计划，不是已发生事实）\n" + "\n".join(story_lines))
+
+        if self.current_volume:
+            volume_lines = [
+                f"- 卷名：《{self.current_volume.get('title') or '未命名'}》",
+                f"- Objective：{self.current_volume.get('objective') or '未指定'}",
+            ]
+            synopsis = self.current_volume.get("synopsis")
+            if synopsis:
+                volume_lines.append(f"- 卷纲：{synopsis}")
+            krs = [_kr_text(item) for item in _as_list(self.current_volume.get("key_results"))]
+            krs = [item for item in krs if item]
+            if krs:
+                volume_lines.append("- Key Results：\n  - " + "\n  - ".join(krs[:12]))
+            parts.append("## 当前卷契约\n" + "\n".join(volume_lines))
+
+        contract = self.current_contract or {}
+        if contract:
+            chapter_lines = [
+                f"- 章节：第 {contract.get('chapter') or self.target_chapter} 章",
+                f"- 标题：{contract.get('title') or '未命名'}",
+                f"- 核心目标：{contract.get('goal') or contract.get('summary') or '未指定'}",
+            ]
+            if contract.get("target_emotion"):
+                chapter_lines.append(f"- 目标情绪：{contract['target_emotion']}")
+            if contract.get("hook_text"):
+                chapter_lines.append(f"- 章末承诺：{contract['hook_text']}")
+            parts.append("## 本章硬契约\n" + "\n".join(chapter_lines))
+
+            required_blocks = [
+                _bullet_block("### 必须推进", contract.get("must_advance")),
+                _bullet_block("### 必须解决", contract.get("must_resolve")),
+                _bullet_block("### 必须出场实体", contract.get("must_include_entities")),
+                _bullet_block("### 服务的情节弧", contract.get("arc_targets")),
+                _bullet_block("### 服务的卷 KR", contract.get("volume_kr_targets")),
+                _bullet_block("### 服务的里程碑", contract.get("milestone_targets")),
+            ]
+            required = [block for block in required_blocks if block]
+            if required:
+                parts.append("\n\n".join(required))
+
+            forbidden_blocks = [
+                _bullet_block("### 禁止揭示", contract.get("must_not_reveal")),
+                _bullet_block("### 禁止解决", contract.get("must_not_resolve")),
+                _bullet_block("### 禁止状态变化", contract.get("forbidden_state_changes")),
+            ]
+            forbidden = [block for block in forbidden_blocks if block]
+            if forbidden:
+                parts.append("\n\n".join(forbidden))
+
+            target_state = contract.get("target_state") or {}
+            if target_state:
+                parts.append(
+                    "### 完成后目标状态\n```json\n"
+                    + json.dumps(target_state, ensure_ascii=False, indent=2)[:2400]
+                    + "\n```"
+                )
+            success = _bullet_block("### 成功标准", contract.get("success_criteria"))
+            if success:
+                parts.append(success)
+
+        if self.active_arcs:
+            lines = []
+            for arc in self.active_arcs[:12]:
+                lines.append(
+                    f"- {arc.get('id') or '?'} · {arc.get('title') or '未命名'}："
+                    f"{arc.get('objective') or arc.get('summary') or ''}"
+                )
+            parts.append("## 当前活跃情节弧\n" + "\n".join(lines))
+
+        guardrails = self.render_guardrails_for_draft()
+        if guardrails:
+            parts.append(guardrails)
+
+        return "\n\n".join(parts)
+
     def render_guardrails_for_draft(self) -> str:
         parts: list[str] = []
         if self.lookahead:
@@ -160,18 +302,45 @@ class PlanContext:
 
 def _chapter_contract(conn: sqlite3.Connection, chapter: int) -> dict[str, Any] | None:
     try:
-        row = conn.execute(
-            "SELECT chapter, title, goal, summary, hook_text, status, target_emotion,"
-            " opening_hook_type, hook_type, expectation_score, plan_version, locked,"
-            " source_decision_id FROM chapter_cards WHERE chapter=?",
-            (chapter,),
-        ).fetchone()
+        row = conn.execute("SELECT * FROM chapter_cards WHERE chapter=?", (chapter,)).fetchone()
     except sqlite3.OperationalError:
         return None
     if row is None:
         return None
     value = dict(row)
-    value["beats"] = _rows(
+    # v20 projects project the expanded contract into *_json columns.  Older
+    # databases simply omit them and continue with the v16 card fields.
+    for name in _CONTRACT_LIST_FIELDS:
+        raw = value.pop(f"{name}_json", None)
+        value[name] = _json(raw, value.get(name) or []) if raw is not None else _as_list(value.get(name))
+    raw_state = value.pop("target_state_json", None)
+    if raw_state is not None:
+        value["target_state"] = _json(raw_state, {})
+    else:
+        value["target_state"] = value.get("target_state") or {}
+
+    # The append-only version payload is authoritative when present.  This
+    # overlay also repairs a temporarily stale projection after interrupted
+    # maintenance without teaching callers about storage internals.
+    version_id = value.get("current_plan_version_id")
+    version_beats: list[dict[str, Any]] = []
+    if version_id:
+        version_rows = _rows(
+            conn,
+            "SELECT payload_json FROM chapter_plan_versions WHERE id=? LIMIT 1",
+            (version_id,),
+        )
+        if version_rows:
+            payload = _json(version_rows[0].get("payload_json"), {})
+            if isinstance(payload, dict):
+                value.update(payload)
+        version_beats = _rows(
+            conn,
+            "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level"
+            " FROM chapter_plan_version_beats WHERE plan_version_id=? ORDER BY seq",
+            (version_id,),
+        )
+    value["beats"] = version_beats or _rows(
         conn,
         "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level,"
         " source_decision_id FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",

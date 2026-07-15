@@ -51,7 +51,7 @@
 .sn-brand {
   display: flex;
   align-items: center;
-  font-family: var(--font-display);
+  font-family: var(--font-disp);
   font-size: 1.15rem;
   color: var(--cream);
   flex: 1;

@@ -22,6 +22,7 @@ from ..planning.generation import (
     generate_volume_options,
     recommend_decision_option,
 )
+from ..planning.service import PlanningService
 from ..planning.models import DecisionOptionDraft
 from ..planning.repository import (
     apply_chapter_route,
@@ -56,6 +57,8 @@ class AgentState(TypedDict, total=False):
     current_chapter: int | None
     last_error: str | None
     generation_meta: dict[str, Any]
+    alignment_report: dict[str, Any] | None
+    recommended_plan_action: Literal["keep", "patch", "replan", "pause"] | None
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -138,25 +141,32 @@ def _fixed_action_options(stage: str, state: AgentState) -> list[DecisionOptionD
             ),
         ]
     if stage == "post_chapter":
+        report = state.get("alignment_report") or {}
+        divergence = report.get("divergence_score")
+        divergence_note = (
+            f" 当前偏航 {float(divergence) * 100:.0f}%。"
+            if isinstance(divergence, (int, float)) else ""
+        )
         return [
             DecisionOptionDraft(
                 title="继续下一章",
-                summary="使用滚动路线和最新世界状态进入下一章。",
+                summary="保持当前路线，使用最新世界状态进入下一章。" + divergence_note,
                 payload={"action": "continue"},
-                score=9.0,
+                score=9.2 if state.get("recommended_plan_action") == "keep" else 7.0,
             ),
             DecisionOptionDraft(
                 title="接受本章并重排后续",
                 summary="保留本章正文，根据实际落点重新规划未来章节窗口。",
                 payload={"action": "replan"},
                 impact={"canon_changed": False, "future_plan_changed": True},
-                score=7.8,
+                score=(9.2 if state.get("recommended_plan_action") in {"patch", "replan"}
+                       else 7.8),
             ),
             DecisionOptionDraft(
                 title="结束本次创作",
                 summary="保存 checkpoint，稍后继续。",
                 payload={"action": "finish"},
-                score=5.0,
+                score=9.5 if state.get("recommended_plan_action") == "pause" else 5.0,
             ),
         ]
     raise ValueError(f"unsupported fixed option stage: {stage}")
@@ -204,6 +214,7 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
         scope_type = "project"
         scope_id = state["project_id"]
         question = "请选择下一步"
+        recommended_index = 0
 
         if stage == "story_plan":
             registry = _registry_for_state(state)
@@ -223,47 +234,20 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
             question = "下一卷采用哪一种冲突与节奏方案？"
             scope_type = "volume"
         elif stage == "chapter_route":
-            from ..config import (
-                NovelForgeConfig,
-                apply_project_memory_settings,
-                apply_runtime_env,
-            )
-            from ..memory.embedding import build_embedder
-            from ..memory.recall import gather_hard_context
-
             chapter = _next_unwritten_chapter(conn, state["project_id"])
-            ctx = gather_plan_context(
-                conn, chapter, lookahead_chapters=int(state.get("planning_horizon") or 5)
-            )
-            memory_cfg = NovelForgeConfig(
-                project_id=state["project_id"], db_path=state["db_path"]
-            )
-            apply_project_memory_settings(memory_cfg, conn)
-            apply_runtime_env(memory_cfg)
-            vector_on = bool(memory_cfg.recall.enable_vector)
-            embedder = (
-                build_embedder(memory_cfg.memory, dim=memory_cfg.memory.embedding_dim)
-                if vector_on else None
-            )
-            scene_query = (state.get("hints") or ctx.render_for_planner())[:2000]
-            history = gather_hard_context(
-                [], chapter - 1, conn,
-                keyword_query=state.get("hints") or None,
-                context_window=5,
-                summary_window=memory_cfg.recall.summary_window_chapters,
-                enable_summaries=memory_cfg.recall.enable_summaries,
-                embedder=embedder,
-                enable_vector=vector_on,
-                scene_query=scene_query,
-                vector_top_k=memory_cfg.memory.vector_top_k,
-                rrf_k=memory_cfg.memory.rrf_k,
-            )
-            options, meta = generate_chapter_route_options(
-                conn, project_id=state["project_id"], db_path=state["db_path"],
-                start_chapter=chapter, horizon=int(state.get("planning_horizon") or 5),
-                plan_context=ctx.to_dict(), history_context=history.to_context_str(),
+            window = PlanningService(
+                db_path=state["db_path"],
+                route_generator=generate_chapter_route_options,
+            ).generate_window(
+                conn,
+                project_id=state["project_id"],
+                start_chapter=chapter,
+                horizon=int(state.get("planning_horizon") or 5),
+                source="agent",
                 hints=state.get("hints") or None,
+                candidate_count=3,
             )
+            options, meta = window.options, window.metadata
             question = f"从第 {chapter} 章开始，未来路线选择哪一套？"
             scope_type = "chapter"
             scope_id = str(chapter)
@@ -305,7 +289,9 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
                 }
         elif stage == "post_chapter":
             options = _fixed_action_options(stage, state)
-            question = "本章已经落盘，接下来继续、重排还是结束？"
+            action = state.get("recommended_plan_action") or "keep"
+            recommended_index = 0 if action == "keep" else 1 if action in {"patch", "replan"} else 2
+            question = "本章已经完成计划与实际对账，接下来保持、重排还是暂停？"
             scope_type = "replan"
             scope_id = str(state.get("current_chapter") or "")
         elif stage == "finished":
@@ -321,8 +307,13 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
             scope_id=scope_id,
             question=question,
             options=options,
-            context={"generation": meta, "hints": state.get("hints") or None},
-            recommended_index=0,
+            context={
+                "generation": meta,
+                "hints": state.get("hints") or None,
+                "alignment_report": state.get("alignment_report"),
+                "recommended_plan_action": state.get("recommended_plan_action"),
+            },
+            recommended_index=recommended_index,
         )
         return {
             "stage": stage,
@@ -358,6 +349,20 @@ def _safety_auto_choice(decision: dict[str, Any], state: AgentState) -> str | No
         )
         if finish:
             return finish["id"]
+    if state.get("stage") == "post_chapter":
+        recommended = state.get("recommended_plan_action") or "keep"
+        target_action = (
+            "continue" if recommended == "keep"
+            else "replan" if recommended in {"patch", "replan"}
+            else "finish"
+        )
+        option = next(
+            (o for o in decision["options"]
+             if o["payload"].get("action") == target_action),
+            None,
+        )
+        if option:
+            return option["id"]
     return None
 
 
@@ -367,6 +372,17 @@ def _choose_node(state: AgentState) -> dict[str, Any]:
         decision = load_decision(conn, state["pending_decision_id"])
     finally:
         conn.close()
+    if (
+        state.get("interaction_mode") == "autonomous"
+        and state.get("stage") == "post_chapter"
+        and state.get("recommended_plan_action") == "pause"
+        and int(state.get("chapters_generated") or 0)
+        < int(state.get("auto_chapters") or 1)
+    ):
+        # Severe divergence or a hard reveal is a safety boundary, not a
+        # creative preference. Autonomous mode must hand control back to the
+        # author with the evidence-bearing decision still awaiting choice.
+        return {"choice": interrupt(decision)}
     if state.get("interaction_mode") == "autonomous":
         return {
             "choice": {
@@ -392,11 +408,17 @@ def _run_agent_chapter(state: AgentState, conn: sqlite3.Connection) -> dict[str,
         chapter_no=chapter,
         chapter_goal=goal,
         mode=state.get("governance_mode", "human_gate"),
+        interaction_mode=state.get("interaction_mode", "guided"),
         n_candidates=3,
         quality_check=True,
     )
     cfg = _make_cfg(state["project_id"], req, registry)
-    outcome = _build_orch(cfg).generate_chapter(chapter, conn, chapter_goal=goal)
+    outcome = _build_orch(cfg).generate_chapter(
+        chapter,
+        conn,
+        chapter_goal=goal,
+        interaction_mode=state.get("interaction_mode", "guided"),
+    )
     if not outcome.ok:
         raise RuntimeError(outcome.error or "chapter generation failed")
     detail = _load_run_detail(conn, registry, state["project_id"], outcome.run_id)
@@ -409,6 +431,10 @@ def _run_agent_chapter(state: AgentState, conn: sqlite3.Connection) -> dict[str,
         # when the draft was produced successfully.  Agent `error` is reserved
         # for failures that keep the workflow on chapter_action.
         "last_error": None,
+        "alignment_report": getattr(outcome, "alignment_report", None),
+        "recommended_plan_action": getattr(
+            outcome, "recommended_plan_action", None
+        ),
     }
 
 
@@ -531,12 +557,18 @@ def _apply_node(state: AgentState) -> dict[str, Any]:
 
             run_id = option["payload"]["run_id"]
             candidate_index = int(option["payload"]["candidate_index"])
-            select_candidate(
+            selected = select_candidate(
                 state["project_id"], run_id,
                 SelectCandidateRequest(candidate_index=candidate_index),
                 _registry_for_state(state),
             )
             updates["stage"] = "post_chapter"
+            updates["alignment_report"] = getattr(
+                selected, "alignment_report", None
+            )
+            updates["recommended_plan_action"] = getattr(
+                selected, "recommended_plan_action", None
+            )
         elif stage == "post_chapter":
             if action == "continue":
                 next_chapter = _next_unwritten_chapter(conn, state["project_id"])
@@ -547,6 +579,22 @@ def _apply_node(state: AgentState) -> dict[str, Any]:
                 updates["current_chapter"] = next_chapter
             elif action == "replan":
                 updates["stage"] = "chapter_route"
+                try:
+                    from ..planning.replanner import (
+                        build_replan_context,
+                        render_replan_hints,
+                    )
+
+                    source_chapter = int(state.get("current_chapter") or 0)
+                    replan_context = build_replan_context(
+                        conn,
+                        source_chapter=source_chapter,
+                        horizon=int(state.get("planning_horizon") or 5),
+                        reason="agent_post_chapter_replan",
+                    )
+                    updates["hints"] = render_replan_hints(replan_context)
+                except Exception:
+                    pass
             elif action == "finish":
                 updates.update({"stage": "finished", "status": "finished"})
         return updates
@@ -645,6 +693,8 @@ class AgentRuntime:
                     "current_chapter": None,
                     "last_error": None,
                     "generation_meta": {},
+                    "alignment_report": None,
+                    "recommended_plan_action": None,
                 }, config, durability="sync")
                 response = self._response(project_id, session_id, graph, config)
                 self._finish_turn(project_id, turn_id, response)

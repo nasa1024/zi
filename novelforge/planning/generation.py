@@ -14,10 +14,10 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from ..config import NovelForgeConfig
-from ..control_plane.llm.factory import build_gateway
 from ..control_plane.llm.provider import Message
+from ..control_plane.llm.runtime import build_project_gateway
 from ..control_plane.llm.tiers import ModelTier
+from ..craft.hooks import hook_menu
 from ..db.connection import get_meta
 from .models import (
     ChapterRoutePayload,
@@ -71,22 +71,9 @@ def _parse_option_list(model: type[T]) -> Callable[[str], list[T] | None]:
 
 def _gateway(project_id: str, db_path: str):
     """Return a configured gateway or None when no creative provider is available."""
-    cfg = NovelForgeConfig(project_id=project_id, db_path=db_path)
-    provider = os.environ.get("NOVELFORGE_PROVIDER", "").strip().lower()
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if provider == "fake":
-        cfg.provider.provider = "fake"
-        cfg.provider.api_key = None
-    elif deepseek_key:
-        cfg.provider.provider = provider or "deepseek"
-        cfg.provider.api_key = deepseek_key
-    elif anthropic_key:
-        cfg.provider.provider = provider or "anthropic"
-        cfg.provider.api_key = anthropic_key
-    else:
-        return None
-    return build_gateway(cfg)
+    return build_project_gateway(
+        project_id, db_path, allow_missing=True,
+    )
 
 
 def _setting_context(conn: sqlite3.Connection, *, genre: str, project_name: str) -> dict[str, Any]:
@@ -447,10 +434,18 @@ _ROUTE_SYSTEM = """\
 未来 5 章路线。只输出 JSON 数组；每项字段 route_title, route_summary, chapters。
 候选必须按推荐度从高到低排列。历史事实是已经发生的真相；未来计划只是作者意图，
 不得混淆二者，也不得为了迁就旧计划而否定已发生事实。
-chapters 每项字段 chapter,title,goal,hook_text,target_emotion,opening_hook_type,
-hook_type,expectation_score,beats。每章 4-6 个 beats，最后一项必须是 hook。
+chapters 每项字段 chapter,title,goal,arc_targets,volume_kr_targets,milestone_targets,
+must_advance,must_resolve,must_include_entities,must_not_reveal,must_not_resolve,
+forbidden_state_changes,target_state,success_criteria,hook_text,target_emotion,
+opening_hook_type,hook_type,expectation_score,beats。每章 3-6 个 beats，最后一项必须是 hook，
+并且至少一个 beat 的 constraint_level 为 hard。
 beats 字段：seq,beat_type,summary,value_axis,arc_id,constraint_level。
-不得提前兑现 not_before 之后的里程碑。"""
+opening_hook_type 只能来自：__OPENING_HOOK_MENU__；
+hook_type 只能来自：__ENDING_HOOK_MENU__。
+success_criteria 必须能验证 target_state；禁止项要明确到可从正文举证。
+不得提前兑现 not_before 之后的里程碑。""".replace(
+    "__OPENING_HOOK_MENU__", hook_menu("opening")
+).replace("__ENDING_HOOK_MENU__", hook_menu("ending"))
 
 
 def generate_chapter_route_options(
@@ -466,7 +461,7 @@ def generate_chapter_route_options(
 ) -> tuple[list[DecisionOptionDraft], dict[str, Any]]:
     horizon = max(1, min(10, horizon))
     volume = conn.execute(
-        "SELECT title, synopsis, objective, start_chapter, end_chapter FROM volumes"
+        "SELECT title, synopsis, objective, key_results, start_chapter, end_chapter FROM volumes"
         " WHERE start_chapter<=? AND (end_chapter IS NULL OR end_chapter>=?)"
         " ORDER BY volume_no LIMIT 1",
         (start_chapter, start_chapter),
@@ -482,7 +477,7 @@ def generate_chapter_route_options(
     )
     values, meta = _run_llm_options(
         project_id=project_id, db_path=db_path, system=_ROUTE_SYSTEM, user=user,
-        parser=_parse_option_list(ChapterRoutePayload), max_tokens=7000,
+        parser=_parse_option_list(ChapterRoutePayload), max_tokens=10_000,
     )
     meta = {
         **meta,
@@ -531,10 +526,21 @@ def _fallback_routes(volume: dict[str, Any], start: int, horizon: int) -> list[C
                 "chapter": chapter,
                 "title": f"第{phase}步·{title}",
                 "goal": goal,
+                "arc_targets": [],
+                "volume_kr_targets": [],
+                "milestone_targets": [],
+                "must_advance": [f"完成当前卷核心冲突的第{phase}步"],
+                "must_resolve": [],
+                "must_include_entities": [],
+                "must_not_reveal": ["终局真相与最终幕后身份"],
+                "must_not_resolve": ["当前卷终局冲突"],
+                "forbidden_state_changes": [],
+                "target_state": {"route_step": phase, "momentum": "advanced"},
+                "success_criteria": ["至少完成一项 must_advance", "章末形成下一步行动动力"],
                 "hook_text": hook,
                 "target_emotion": emotion,
-                "opening_hook_type": "conflict" if variant_index == 1 else "mystery",
-                "hook_type": "cliffhanger" if variant_index != 0 else "new_goal",
+                "opening_hook_type": "conflict" if variant_index == 1 else "suspense",
+                "hook_type": "cliffhanger" if variant_index != 0 else "promise",
                 "expectation_score": min(5, 3 + (offset % 3)),
                 "beats": [
                     {"seq": 1, "beat_type": "setup", "summary": "承接上章局势并明确本章短期目标",

@@ -350,7 +350,7 @@ class AutopilotManager:
     def _run_loop(self, session: AutopilotSession, req, registry, api_key: Optional[str]):
         from ..config import NovelForgeConfig
         from ..control_plane.budget import BudgetLedger, CircuitTripped
-        from ..control_plane.llm.factory import build_gateway
+        from ..control_plane.llm.runtime import build_configured_gateway
         from ..control_plane.orchestrator import Orchestrator
         from ..control_plane.skill_registry import SkillRegistry
         from ..skills import register_default_skills
@@ -416,7 +416,7 @@ class AutopilotManager:
                 apply_project_memory_settings(cfg, conn)
                 apply_runtime_env(cfg)   # env 覆盖项目记忆设置（运维优先级最高）
 
-                gw = build_gateway(cfg)
+                gw = build_configured_gateway(cfg)
                 reg = SkillRegistry()
                 register_default_skills(reg)
                 orch = Orchestrator(gw, reg, cfg)

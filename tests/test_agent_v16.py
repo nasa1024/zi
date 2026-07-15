@@ -612,6 +612,20 @@ class TestAgentChapterFlow:
         assert session["decision"] is None
         assert session["state"]["chapters_generated"] == 1
 
+    def test_autonomous_mode_pauses_for_severe_divergence_before_limit(
+        self, client, project,
+    ):
+        session = _start(
+            client,
+            project,
+            interaction_mode="autonomous",
+            auto_chapters=2,
+        )
+        assert session["status"] == "awaiting_choice"
+        assert session["stage"] == "post_chapter"
+        assert session["state"]["recommended_plan_action"] == "pause"
+        assert session["decision"]["status"] == "awaiting_choice"
+
     def test_alternate_draft_with_premature_reveal_is_rejected_before_resolution(
         self, client, project,
     ):
@@ -715,7 +729,7 @@ class TestMigrationV17:
 
         conn = init_db(tmp_path / "agent-v16.db")
         try:
-            assert SCHEMA_VERSION == "19"
+            assert SCHEMA_VERSION == "20"
             for table in (
                 "story_plans",
                 "story_arcs",

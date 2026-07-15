@@ -286,7 +286,7 @@ class TestMigrations:
         old, new = migrate(conn)
 
         assert (old, new) == ("18", SCHEMA_VERSION)
-        assert SCHEMA_VERSION == "19"
+        assert SCHEMA_VERSION == "20"
         for table in ("l2_scenes", "scene_vec", "drafts_fts"):
             assert table_exists(conn, table), f"v19 未修复 v18 缺表 {table}"
         assert column_exists(conn, "fact_candidates", "source_draft_id")

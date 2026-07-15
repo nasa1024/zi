@@ -1,13 +1,15 @@
 """CandidateJudge：章节多候选择优（M3-①）。
 
-三级漏斗控成本：
-  1. 确定性预筛（零成本）：字数 ≥1000 且 proposals 非空；全军覆没时取最长稿兜底
-  2. 硬校验否决（零 LLM 成本）：对过筛候选跑确定性 validator，block 数少者优先
-  3. LLM 评委（≤1 次调用）：仅当最优组仍有 ≥2 个候选时触发，pairwise 选优
+五级漏斗控成本：
+  1. 确定性预筛（零成本）：字数 ≥1000；空 proposals 是合法结果
+  2. 世界状态硬校验（零 LLM 成本）
+  3. 未来计划硬冲突（零 LLM 成本）
+  4. 章节契约与情节弧推进度（零 LLM 成本）
+  5. LLM 文学质量评委（≤1 次调用）
      （EvolvR 实证 pairwise 优于 pointwise）
 
-select_best() 返回报告 dict：
-  {winner, scores, hard_blocks, eligible, judge_used, reason}
+select_best() 保留旧报告字段，并增加每个候选的 continuity_blocks、
+plan_blocks、contract_score、arc_progress_score、plan_fidelity、quality_score。
 """
 from __future__ import annotations
 
@@ -20,9 +22,10 @@ from ..control_plane.llm.tiers import ModelTier
 _MIN_DRAFT_CHARS = 1000
 
 _JUDGE_SYSTEM = """\
-你是网文主编。对比以下同一章的多个候选稿，从四个维度评估并选出最优：
+你是网文主编。对比以下同一章的多个候选稿，从五个维度评估并选出最优：
 ① 钩子力度（章末悬念是否抓人；若本章目标含细纲契约承诺的钩子类型，以是否兑现承诺为准）② 节奏（张弛是否得当）
 ③ 人物声音（对话/行为是否符合人设）④ 与本章目标的契合度
+⑤ plan_fidelity（是否完成本章契约，并继续推动本卷和主线目标）
 
 输出 JSON 对象（不要其他说明）：
 {"winner": 候选编号(从0起), "scores": [各候选0-10总分], "reason": "30字内理由"}
@@ -34,15 +37,33 @@ def select_best(
     *,
     world=None,
     chapter_goal: str = "",
+    chapter_contract: Optional[dict] = None,
+    plan_context=None,
     gateway=None,
     judge_tier: str = "mid",
 ) -> dict:
     """从候选列表选出最优。candidates 元素：{draft_text, proposals}。"""
     n = len(candidates)
+    contract_scores = [1.0] * n
+    arc_progress_scores = [1.0] * n
+    plan_fidelity_scores = [1.0] * n
+    quality_scores = [None] * n
     report = {
         "winner": 0,
         "scores": [None] * n,
         "hard_blocks": [0] * n,
+        "continuity_blocks": [0] * n,
+        "plan_blocks": [0] * n,
+        "plan_block_details": [[] for _ in range(n)],
+        "contract_scores": contract_scores,
+        "arc_progress_scores": arc_progress_scores,
+        "plan_fidelity_scores": plan_fidelity_scores,
+        "quality_scores": quality_scores,
+        # Singular aliases keep already-stored/development reports readable.
+        "contract_score": contract_scores,
+        "arc_progress_score": arc_progress_scores,
+        "plan_fidelity": plan_fidelity_scores,
+        "quality_score": quality_scores,
         "eligible": [],
         "judge_used": False,
         "reason": "",
@@ -50,7 +71,25 @@ def select_best(
     if n == 0:
         report["reason"] = "no_candidates"
         return report
+    from ..planning.scoring import evaluate_candidate_against_plan
+
+    for i, candidate in enumerate(candidates):
+        evaluation = evaluate_candidate_against_plan(
+            candidate.get("draft_text", ""),
+            chapter_contract=chapter_contract,
+            plan_context=plan_context,
+        )
+        report["plan_blocks"][i] = len(evaluation["plan_blocks"])
+        report["plan_block_details"][i] = evaluation["plan_blocks"]
+        report["contract_scores"][i] = evaluation["contract_score"]
+        report["arc_progress_scores"][i] = evaluation["arc_progress_score"]
+        report["plan_fidelity_scores"][i] = evaluation["plan_fidelity"]
+
     if n == 1:
+        report["continuity_blocks"][0] = _count_hard_blocks(
+            candidates[0].get("draft_text", ""), world
+        )
+        report["hard_blocks"] = list(report["continuity_blocks"])
         report["eligible"] = [0]
         report["reason"] = "single_candidate"
         return report
@@ -58,7 +97,7 @@ def select_best(
     # ── 1. 确定性预筛 ─────────────────────────────────────────────────────────
     eligible = [
         i for i, c in enumerate(candidates)
-        if len(c.get("draft_text", "")) >= _MIN_DRAFT_CHARS and c.get("proposals")
+        if len(c.get("draft_text", "")) >= _MIN_DRAFT_CHARS
     ]
     if not eligible:
         # 兜底：保证总有产出，取最长稿
@@ -73,18 +112,46 @@ def select_best(
 
     # ── 2. 硬校验否决（确定性，零 LLM 成本）──────────────────────────────────
     for i in eligible:
-        report["hard_blocks"][i] = _count_hard_blocks(candidates[i]["draft_text"], world)
-    min_blocks = min(report["hard_blocks"][i] for i in eligible)
-    finalists = [i for i in eligible if report["hard_blocks"][i] == min_blocks]
+        report["continuity_blocks"][i] = _count_hard_blocks(
+            candidates[i]["draft_text"], world
+        )
+    report["hard_blocks"] = list(report["continuity_blocks"])
+    min_blocks = min(report["continuity_blocks"][i] for i in eligible)
+    finalists = [i for i in eligible if report["continuity_blocks"][i] == min_blocks]
     if len(finalists) == 1:
         report["winner"] = finalists[0]
         report["reason"] = "hard_block_veto"
         return report
 
-    # ── 3. LLM 评委（单次调用）───────────────────────────────────────────────
+    # ── 3. 未来计划硬冲突 ──────────────────────────────────────────────────
+    min_plan_blocks = min(report["plan_blocks"][i] for i in finalists)
+    finalists = [i for i in finalists if report["plan_blocks"][i] == min_plan_blocks]
+    if len(finalists) == 1:
+        report["winner"] = finalists[0]
+        report["reason"] = "plan_block_veto"
+        return report
+
+    # ── 4. 完成章节契约并推进长期路线 ──────────────────────────────────────
+    best_fidelity = max(report["plan_fidelity_scores"][i] for i in finalists)
+    finalists = [
+        i for i in finalists
+        if abs(report["plan_fidelity_scores"][i] - best_fidelity) <= 1e-6
+    ]
+    if len(finalists) == 1:
+        report["winner"] = finalists[0]
+        report["reason"] = "plan_fidelity_veto"
+        return report
+
+    # ── 5. LLM 文学质量评委（单次调用）─────────────────────────────────────
     if gateway is not None:
-        verdict = _llm_judge(gateway, judge_tier, chapter_goal,
-                             [(i, candidates[i]["draft_text"]) for i in finalists])
+        verdict = _llm_judge(
+            gateway,
+            judge_tier,
+            chapter_goal,
+            [(i, candidates[i]["draft_text"]) for i in finalists],
+            chapter_contract=chapter_contract,
+            plan_context=plan_context,
+        )
         if verdict is not None:
             winner_pos, scores, reason = verdict
             if 0 <= winner_pos < len(finalists):
@@ -92,6 +159,7 @@ def select_best(
                 for pos, i in enumerate(finalists):
                     if pos < len(scores):
                         report["scores"][i] = scores[pos]
+                        report["quality_scores"][i] = scores[pos]
                 report["judge_used"] = True
                 report["reason"] = reason or "llm_judge"
                 return report
@@ -145,6 +213,9 @@ def _count_hard_blocks(draft_text: str, world) -> int:
 def _llm_judge(
     gateway, judge_tier: str, chapter_goal: str,
     finalists: list[tuple[int, str]],
+    *,
+    chapter_contract: Optional[dict] = None,
+    plan_context=None,
 ) -> Optional[tuple[int, list, str]]:
     """单次 LLM 调用对终选候选打分选优。返回 (finalists内序号, scores, reason)。"""
     try:
@@ -155,7 +226,14 @@ def _llm_judge(
         except ValueError:
             tier = ModelTier.MID
 
+        contract_text = ""
+        if plan_context is not None and hasattr(plan_context, "render_contract_for_draft"):
+            contract_text = plan_context.render_contract_for_draft()
+        elif chapter_contract:
+            contract_text = json.dumps(chapter_contract, ensure_ascii=False)
         parts = [f"本章目标：{chapter_goal or '（未指定）'}\n"]
+        if contract_text:
+            parts.append(f"## 计划契约\n{contract_text[:5000]}\n")
         for pos, (_, text) in enumerate(finalists):
             parts.append(f"### 候选 {pos}\n{text[:2500]}\n")
         resp = gateway.generate(

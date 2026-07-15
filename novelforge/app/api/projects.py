@@ -106,7 +106,7 @@ def suggest_setting(req: SettingSuggestRequest):
 
     from ...config import NovelForgeConfig
     from ...control_plane.budget import BudgetLedger, CircuitTripped
-    from ...control_plane.llm.factory import build_gateway
+    from ...control_plane.llm.runtime import build_configured_gateway
     from ...control_plane.skill_base import SkillContext
     from ...skills.setting_gen_skill import SettingGenSkill
 
@@ -122,7 +122,7 @@ def suggest_setting(req: SettingSuggestRequest):
 
     # 独立小预算：建项目前的探索操作，不共享章节预算
     ledger = BudgetLedger(max_tokens=20_000, max_usd=0.20)
-    gw = build_gateway(cfg, ledger=ledger)
+    gw = build_configured_gateway(cfg, ledger=ledger)
 
     # 占位 conn 满足 SkillContext.conn 非 Optional 契约；SettingGenSkill 自律不读它
     placeholder_conn = sqlite3.connect(":memory:")
