@@ -1,4 +1,4 @@
-// NovelForge API client.
+// zi API client.
 // Single source of truth for HTTP access; all methods are async and throw
 // ApiError on non-2xx responses. See SHARED CONTRACT.
 

@@ -14,7 +14,7 @@ function StudioNav(): JSX.Element {
     <nav className="studio-nav">
       <div className="wrap sn-inner">
         <Link to="/" className="sn-back"><span className="sn-back-arrow">←</span><span>主页</span></Link>
-        <div className="sn-brand"><span className="spark">✦</span>NovelForge<span className="sn-label">STUDIO</span></div>
+        <div className="sn-brand"><span className="spark">✦</span>zi<span className="sn-label">STUDIO</span></div>
         <div className="sn-health"><span className={`picker-health-dot${online ? ' online' : ''}`} />{label}</div>
       </div>
     </nav>

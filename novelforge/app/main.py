@@ -1,4 +1,4 @@
-"""NovelForge FastAPI app 装配（§8.1）。
+"""zi FastAPI app 装配（§8.1）。
 
 基址：http://127.0.0.1:8787
 前缀：/v1
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="NovelForge",
+    title="zi",
     version="0.3.0",
     description="AI 网文写作引擎 REST API（MVP3）",
     lifespan=lifespan,

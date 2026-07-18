@@ -47,9 +47,9 @@ export default function WorkspaceShell(): JSX.Element {
   return (
     <div className="workspace-shell">
       <header className="workspace-topbar">
-        <Link to="/" className="workspace-brand" aria-label="NovelForge 主页">
+        <Link to="/" className="workspace-brand" aria-label="zi 主页">
           <span className="workspace-spark" aria-hidden="true">✦</span>
-          <span>NovelForge</span>
+          <span>zi</span>
           <small>WRITING DESK</small>
         </Link>
 

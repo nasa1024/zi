@@ -5,7 +5,7 @@ This file is ready to adapt into the OpenAI Build Week submission form. Replace 
 ## Manual steps before submission
 
 - [ ] Join the challenge with the same identity used for the submission.
-- [ ] Open the Codex task titled **Implement NovelForge outline transformation** / **实现 NovelForge 大纲改造**, run `/feedback`, and confirm the returned Session ID is `019f664f-c328-7453-8550-f664e6eead64`.
+- [ ] Open the historical Codex task titled **实现 NovelForge 大纲改造** (created before the final `zi` branding), run `/feedback`, and confirm the returned Session ID is `019f664f-c328-7453-8550-f664e6eead64`.
 - [ ] Record the product using [DEMO_SCRIPT.md](DEMO_SCRIPT.md), upload it publicly to YouTube, and replace the placeholder below.
 - [ ] Paste the English copy from this file into Devpost and select **Apps for Your Life**.
 - [ ] Use [JUDGE_TESTING.md](JUDGE_TESTING.md) as the testing instructions.
@@ -14,7 +14,7 @@ This file is ready to adapt into the OpenAI Build Week submission form. Replace 
 
 ## Project name
 
-NovelForge
+zi
 
 ## Tagline
 
@@ -38,17 +38,17 @@ Apps for Your Life
 
 ## Short description
 
-NovelForge is local-first infrastructure for long-form fiction. It combines hierarchical memory, deterministic continuity, narrative craft, and an outline-to-actuals feedback loop so an AI can write many chapters without quietly forgetting the world, breaking character state, or drifting away from the author's intended story.
+zi is local-first infrastructure for long-form fiction. It combines hierarchical memory, deterministic continuity, narrative craft, and an outline-to-actuals feedback loop so an AI can write many chapters without quietly forgetting the world, breaking character state, or drifting away from the author's intended story.
 
 ## Inspiration
 
 Most AI writing products are optimized for a good next paragraph. A novelist needs something harder: a system that can remember decisions across a book, distinguish hard facts from soft context, preserve future intent without pretending the future already happened, and explain why a generated chapter has drifted.
 
-The central insight behind NovelForge is that long-form writing is not one prompt. It is a state-management and feedback-control problem wrapped in a creative experience.
+The central insight behind zi is that long-form writing is not one prompt. It is a state-management and feedback-control problem wrapped in a creative experience.
 
 ## What it does
 
-NovelForge gives an author a complete writing loop:
+zi gives an author a complete writing loop:
 
 1. Choose or generate a future story route.
 2. Turn the next chapter into an explicit contract.
@@ -63,7 +63,7 @@ The Studio exposes the contract, candidates, evidence, plan versions, world stat
 
 ## How we built it
 
-NovelForge uses Python 3.13, FastAPI, SQLite, React, TypeScript, and Vite. Hard story state lives in relational tables and is replayed at a chapter boundary. Soft context uses layered memory and hybrid retrieval. Models can propose changes, but only a single governance gate can promote them into Canon.
+zi uses Python 3.13, FastAPI, SQLite, React, TypeScript, and Vite. Hard story state lives in relational tables and is replayed at a chapter boundary. Soft context uses layered memory and hybrid retrieval. Models can propose changes, but only a single governance gate can promote them into Canon.
 
 The Build Week extension used Codex with GPT-5.6 to close the outline-driven loop across 70 files. It added a unified planning service, versioned chapter contracts, evidence-backed actuals, weighted drift scoring, transactional future replanning, runtime capability negotiation, a complete writing workspace, and focused backend/frontend tests.
 
@@ -73,7 +73,7 @@ I supplied the product requirements and architectural invariants: Canon must be 
 
 Codex used GPT-5.6 to map the existing repository, plan the cross-layer change, implement the database/API/runtime/UI work, add tests, diagnose failures, and iterate until the complete suite passed. The primary build session is `019f664f-c328-7453-8550-f664e6eead64`.
 
-Because NovelForge existed before Build Week, the repository includes a transparent boundary document. The evaluated extension is commit `f8761e6`, created during the submission period, with 11,669 additions and 765 deletions. Pre-existing components are explicitly excluded from the claimed Build Week work.
+Because zi existed before Build Week, the repository includes a transparent boundary document. The evaluated extension is commit `f8761e6`, created during the submission period, with 11,669 additions and 765 deletions. Pre-existing components are explicitly excluded from the claimed Build Week work.
 
 ## Challenges
 

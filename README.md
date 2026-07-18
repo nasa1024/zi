@@ -1,6 +1,6 @@
 <div align="center">
 
-# NovelForge
+# zi
 
 ### An AI writing engine that remembers every choice—and turns it into a better next chapter
 
@@ -16,7 +16,7 @@ Local-first infrastructure for long-form fiction, combining **hierarchical memor
 
 [中文](README.zh-CN.md) · [Build Week evidence](BUILD_WEEK.md) · [Quick start](#quick-start) · [Architecture](#architecture) · [Judge testing guide](docs/submission/JUDGE_TESTING.md)
 
-![NovelForge product home](docs/assets/novelforge-home.png)
+![zi product home](docs/assets/zi-home.png)
 
 </div>
 
@@ -24,9 +24,9 @@ Local-first infrastructure for long-form fiction, combining **hierarchical memor
 
 Most AI writing tools optimize a single prompt. Long-form fiction is a different systems problem: after dozens of chapters, the model must remember what happened, respect hard world rules, preserve future plans, and still produce a chapter readers want to continue.
 
-NovelForge separates those responsibilities instead of asking one opaque model call to solve everything:
+zi separates those responsibilities instead of asking one opaque model call to solve everything:
 
-| Long-form failure | NovelForge's response |
+| Long-form failure | zi's response |
 |---|---|
 | Character powers, possessions, or knowledge drift | Append-only Canon ledger, chapter-time world-state projection, deterministic validators |
 | Important events disappear from context | L0 evidence, L1 fact atoms, L2 scenes, entity-first hybrid recall |
@@ -36,9 +36,11 @@ NovelForge separates those responsibilities instead of asking one opaque model c
 
 The result is an **outline → draft → verify → observe → realign** loop in which every important decision remains inspectable and reversible.
 
+> **Naming note:** the project and submission name is **zi**. The existing Python import path `novelforge`, `NOVELFORGE_*` environment variables, and historical architecture directory are retained for backward compatibility.
+
 ## OpenAI Build Week 2026
 
-NovelForge entered Build Week as an existing project and was meaningfully extended during the submission period with Codex and GPT-5.6. The Build Week release closes the outline-driven writing loop across the backend, database, tests, and product UI.
+zi entered Build Week as an existing project and was meaningfully extended during the submission period with Codex and GPT-5.6. The Build Week release closes the outline-driven writing loop across the backend, database, tests, and product UI.
 
 ### What was added during Build Week
 
@@ -180,7 +182,7 @@ DEEPSEEK_API_KEY=your-key-here
 
 Anthropic and OpenAI-compatible endpoints are also supported. Vector recall uses the offline `HashEmbedder` by default; external embeddings are opt-in through `NOVELFORGE_EMBEDDING_*`. See [.env.example](.env.example) for every setting.
 
-> `NOVELFORGE_API_KEY` protects NovelForge's own REST API. It is not an LLM credential. Never place a real key in source, examples, fixtures, logs, screenshots, or commit messages.
+> `NOVELFORGE_API_KEY` is the compatibility name for the variable that protects zi's own REST API. It is not an LLM credential. Never place a real key in source, examples, fixtures, logs, screenshots, or commit messages.
 
 ## Core API
 
@@ -219,7 +221,7 @@ The suite covers migrations, atomic writes, branch isolation, state replay, plan
 ## Repository map
 
 ```text
-novelforge/
+novelforge/           # Internal Python package name retained for compatibility
 ├── app/             # FastAPI, REST routes, agent runtime
 ├── control_plane/   # Orchestrator, budgets, LLM providers
 ├── planning/        # Routes, contracts, actuals, drift, replan
@@ -243,7 +245,7 @@ Start with [docs/NovelForge/00-总览与阅读指南.md](docs/NovelForge/00-总�
 
 ## Security and license
 
-Local `.env` files, databases, drafts, vector indexes, and backups are ignored by Git. Report vulnerabilities according to [SECURITY.md](SECURITY.md). NovelForge is released under the [MIT License](LICENSE).
+Local `.env` files, databases, drafts, vector indexes, and backups are ignored by Git. Report vulnerabilities according to [SECURITY.md](SECURITY.md). zi is released under the [MIT License](LICENSE).
 
 ---
 

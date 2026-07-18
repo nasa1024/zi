@@ -1,12 +1,12 @@
 # OpenAI Build Week 2026 — Build Record
 
-This document distinguishes NovelForge's pre-existing foundation from the work completed during the OpenAI Build Week submission period. It also records the Codex/GPT-5.6 evidence behind the submitted release.
+This document distinguishes zi's pre-existing foundation from the work completed during the OpenAI Build Week submission period. It also records the Codex/GPT-5.6 evidence behind the submitted release.
 
 ## Submission identity
 
 | Field | Value |
 |---|---|
-| Project | NovelForge |
+| Project | zi |
 | Track | Apps for Your Life |
 | Repository | <https://github.com/nasa1024/zi> |
 | Entrant | lihang |
@@ -18,7 +18,7 @@ This document distinguishes NovelForge's pre-existing foundation from the work c
 
 ## Pre-existing foundation
 
-Before the submission period, NovelForge already included:
+Before the submission period, zi already included:
 
 - an append-only Canon fact ledger and proposal-based governance;
 - deterministic world-state replay and continuity validators;

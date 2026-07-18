@@ -1,4 +1,4 @@
-// React hooks over the NovelForge API client. See SHARED CONTRACT.
+// React hooks over the zi API client. See SHARED CONTRACT.
 
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from './client';

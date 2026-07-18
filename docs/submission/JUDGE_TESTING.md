@@ -1,6 +1,6 @@
 # Judge Testing Guide
 
-NovelForge is a local-first web application. The deterministic product core can be evaluated without an external model account or API key.
+zi is a local-first web application. The deterministic product core can be evaluated without an external model account or API key.
 
 ## Supported environment
 
@@ -61,7 +61,7 @@ NOVELFORGE_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your-key-here
 ```
 
-Do not put provider credentials in `NOVELFORGE_API_KEY`; that variable protects NovelForge's own REST API.
+Do not put provider credentials in `NOVELFORGE_API_KEY`; that compatibility variable protects zi's own REST API.
 
 ## API-only smoke path
 

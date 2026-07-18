@@ -16,7 +16,7 @@ export default function Footer() {
                   />
                 </svg>
               </span>
-              NovelForge
+              zi
             </a>
             <p>
               面向网文 / 长篇连载的 AI 写作「记忆 + 一致性 + 工艺」引擎。本地优先，单一 SQLite，单人可维护。
@@ -47,7 +47,7 @@ export default function Footer() {
           </div>
         </div>
         <div className="foot-bottom">
-          <span>© 2026 NovelForge · 让冷引擎写出滚烫的故事</span>
+          <span>© 2026 zi · 让冷引擎写出滚烫的故事</span>
           <span>MVP v0.3 · 726 tests green · made with ⚡ &amp; dopamine</span>
         </div>
       </div>

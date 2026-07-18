@@ -55,7 +55,7 @@ export default function Saga() {
                 <span className="saga-act a2">ACT 03 · 和谐 / HARMONY</span>
                 <h3 className="cn">读者一口气，<br />追到大结局。</h3>
                 <p>前后自洽、伏笔回收、节奏带爽点。读者不再被低级错误劝退，而是沉浸在你的世界里疯狂追更。</p>
-                <p>一致性是<b>不扣分项</b>，追更力是<b>得分项</b>——NovelForge 两手都抓。</p>
+                <p>一致性是<b>不扣分项</b>，追更力是<b>得分项</b>——zi 两手都抓。</p>
                 <div className="micro">🔥 完读率 ↑ · 追更留存 ↑ · 弃书率 ↓</div>
               </div>
             </div>

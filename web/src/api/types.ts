@@ -1,4 +1,4 @@
-// NovelForge API types — mirror of backend Pydantic models.
+// zi API types — mirror of backend Pydantic models.
 // Keep field names/shapes in sync with the backend; see SHARED CONTRACT.
 
 export interface HealthResponse {

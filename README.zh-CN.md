@@ -1,10 +1,12 @@
-# NovelForge 中文说明
+# zi 中文说明
 
 [English README](README.md) · [Build Week 证据](BUILD_WEEK.md) · [评委测试指南](docs/submission/JUDGE_TESTING.md)
 
-NovelForge 是面向网文与长篇连载的本地优先 AI 创作引擎，把**分层记忆、确定性一致性、叙事工艺**放进同一条可审计的写作流水线。
+zi 是面向网文与长篇连载的本地优先 AI 创作引擎，把**分层记忆、确定性一致性、叙事工艺**放进同一条可审计的写作流水线。
 
-![NovelForge 产品首页](docs/assets/novelforge-home.png)
+> 项目和参赛名称统一为 **zi**。现有 Python 包名 `novelforge`、`NOVELFORGE_*` 环境变量和历史架构文档目录仅为兼容性保留。
+
+![zi 产品首页](docs/assets/zi-home.png)
 
 ## 核心思路
 

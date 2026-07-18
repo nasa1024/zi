@@ -36,7 +36,7 @@ export default function Nav({ onStart }: NavProps) {
               />
             </svg>
           </span>
-          NovelForge
+          zi
         </a>
         <div className="nav-links">
           <a href="#saga">情绪滑梯</a>

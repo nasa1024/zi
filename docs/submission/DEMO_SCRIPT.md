@@ -24,11 +24,11 @@ Build Week commit: f8761e6
 
 ### 0:00–0:15 — Hook
 
-**Screen:** NovelForge landing hero, then cut to the writing workspace.
+**Screen:** zi landing hero, then cut to the writing workspace.
 
 **Voiceover:**
 
-> AI can write a convincing paragraph. A novel is harder. Fifty chapters later, it must remember who knows what, which promises are still open, and whether the story is still going where the author intended. This is NovelForge.
+> AI can write a convincing paragraph. A novel is harder. Fifty chapters later, it must remember who knows what, which promises are still open, and whether the story is still going where the author intended. This is zi.
 
 ### 0:15–0:38 — The product idea
 
@@ -36,7 +36,7 @@ Build Week commit: f8761e6
 
 **Voiceover:**
 
-> NovelForge separates long-form writing into three systems: memory for what matters, deterministic continuity for what cannot be wrong, and narrative craft for what makes readers continue. Hard state is replayed from an append-only Canon. The model can propose a change, but it can never silently rewrite the world.
+> zi separates long-form writing into three systems: memory for what matters, deterministic continuity for what cannot be wrong, and narrative craft for what makes readers continue. Hard state is replayed from an append-only Canon. The model can propose a change, but it can never silently rewrite the world.
 
 ### 0:38–1:05 — Planning and chapter contract
 
@@ -52,7 +52,7 @@ Build Week commit: f8761e6
 
 **Voiceover:**
 
-> NovelForge can generate multiple candidates, compare contract adherence, arc progress, prose quality, and cost, then block hard continuity failures with deterministic Python validators. Soft problems can be patched locally or escalated to a stronger model.
+> zi can generate multiple candidates, compare contract adherence, arc progress, prose quality, and cost, then block hard continuity failures with deterministic Python validators. Soft problems can be patched locally or escalated to a stronger model.
 
 ### 1:28–1:55 — Actuals, evidence, and replan
 
@@ -76,7 +76,7 @@ Build Week commit: f8761e6
 
 **Voiceover:**
 
-> NovelForge is for serious long-form creators who need more than autocomplete. It runs locally, works across model providers, preserves evidence, and keeps the author in control of every irreversible story decision.
+> zi is for serious long-form creators who need more than autocomplete. It runs locally, works across model providers, preserves evidence, and keeps the author in control of every irreversible story decision.
 
 ### 2:43–2:52 — Close
 
@@ -84,7 +84,7 @@ Build Week commit: f8761e6
 
 **Voiceover:**
 
-> Consistency prevents disappointment. Narrative momentum earns the next chapter. NovelForge helps an AI do both.
+> Consistency prevents disappointment. Narrative momentum earns the next chapter. zi helps an AI do both.
 
 ## Final upload checklist
 
