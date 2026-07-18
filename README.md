@@ -1,221 +1,244 @@
+<div align="center">
+
 # NovelForge
 
-面向**网文 / 长篇连载**的 AI 写作 **记忆 + 一致性 + 工艺** 引擎。Python 3.13 + FastAPI、本地优先、单一 SQLite（`novel.db`）、单人可开发可维护。
+### 让 AI 记住长篇故事的每一次选择，并把它写成更好的下一章
 
-> 起点是 [`require.md`](require.md)（借鉴 TencentDB-Agent-Memory 分层记忆的草案）。经多轮多智能体评审后**重新设计**，纠正了三处地基级问题：
-> 1. **canon 是只追加的结构化账本**（`facts`/`fact_revisions` + 只读渲染视图），不是 LLM 重写的 markdown；
-> 2. **硬一致性靠 World State Store + 确定性 Python validator + as-of 投影**，不是纯检索 + LLM；
-> 3. **双模式（人审 / 全自动）是同一条管线在唯一晋升闸门处分叉**，靠一行 config 切换。
->
-> 并新增与一致性正交的**网文工艺层**（爽点 / 钩子 / 节奏 / value_shift）——一致性是不扣分项、追更力是得分项。
+面向网文与长篇连载的本地优先 AI 创作引擎：把**分层记忆、确定性一致性、叙事工艺**放进同一条可审计的写作流水线。
 
-## 设计哲学（5 条）
+[![CI](https://github.com/nasa1024/zi/actions/workflows/ci.yml/badge.svg)](https://github.com/nasa1024/zi/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.136+-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111)
+![Tests](https://img.shields.io/badge/tests-726%20passed-C6F500)
 
-- 软记忆走 RAG，**硬状态走关系表 + 确定性 validator**。
-- canon **只追加**，LLM 只产 `BibleChangeProposal`，永不直写 canon。
-- 一致性 = **写时约束（as-of 注入）+ 事后兜底**。
-- 检索**以实体 / 关系为主**、语义为辅。
-- 成本 / 缓存是连写形态的生死线（稳定前缀走 prompt cache、断路器）。
+[为什么是 NovelForge](#为什么是-novelforge) · [快速开始](#快速开始) · [系统架构](#系统架构) · [API](#核心-api) · [设计文档](#设计文档)
+
+![NovelForge 产品首页](docs/assets/novelforge-home.png)
+
+</div>
+
+## 为什么是 NovelForge
+
+短文本生成只需要“写得像”，长篇连载还必须解决三个彼此独立的问题：**记得住、不能错、还要好看**。NovelForge 不把它们全部交给一次不可解释的模型调用。
+
+| 长篇写作难题 | NovelForge 的处理方式 |
+|---|---|
+| 角色境界、物品归属、知情关系会漂移 | Canon 只追加账本 + as-of 世界状态投影 + 确定性 Python validators |
+| 数十章后的信息无法有效召回 | L0 原文证据、L1 事实原子、L2 场景摘要与实体优先 hybrid recall |
+| 模型“没写错”，但章节不好看 | 爽点、钩子、节奏、伏笔回收、value shift 独立评分与修订 |
+| 自动写作不可控、失败难恢复 | 可持久化 Agent checkpoint、候选多选一、预算断路器、人工/自动双模式治理 |
+| 设定被模型悄悄改写 | LLM 只能提交 `BibleChangeProposal`，唯一晋升闸门决定是否进入 Canon |
+
+### 核心亮点
+
+- **确定性一致性，而非“再问一次 LLM”**：硬状态落入关系表，按章节时点重放；越级、物品冲突、越权知情等问题由可测试规则拦截。
+- **可追溯记忆**：从最终事实可以回到候选稿、L0 原文和证据行，支持重建、审计与回滚。
+- **写作闭环**：未来章节候选 → 人工或 AI 选择 → 章节契约 → 多候选起草 → 校验与修订 → actuals 提取 → 偏航检测 → 后续重规划。
+- **本地优先**：单一 SQLite 加文件系统即可运行；确定性核心和完整界面不依赖外部 API key。
+- **供应商可替换**：正文生成支持 DeepSeek、Anthropic 与 OpenAI-compatible 接口，离线开发可使用 Fake provider 和 hash embedding。
+- **工程化可恢复**：append-only 计划版本、CAS 正文修订、原子文件写入、热备份、SSE 断线续传与冷启动批处理均已落地。
 
 ## 快速开始
 
+### 环境要求
+
+- Python 3.13
+- Node.js 20+
+- Git
+
+### 1. 启动后端
+
 ```bash
+git clone https://github.com/nasa1024/zi.git
+cd zi
+
+python3.13 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# 启动 API 服务（开发模式，无需 API key）
 uvicorn novelforge.app.main:app --host 127.0.0.1 --port 8787 --reload
-
-# 零输入新建项目（后端生成工作名）
-curl -s -X POST http://localhost:8787/v1/projects \
-  -H "Content-Type: application/json" \
-  -d '{}' | python -m json.tool
-
-# 全量测试
-.venv/bin/python -m pytest -q
 ```
 
-## 前端（`web/`，Vite + React + TypeScript）
-
-营销官网 + URL 驱动的创作工作台 Studio（真实接入后端 REST API）。写作页采用三栏“编辑部作战台”：左侧卷/章节树、中间正文编辑器、右侧章节契约与偏航证据。
+打开 [http://127.0.0.1:8787/docs](http://127.0.0.1:8787/docs) 查看交互式 API 文档。健康检查：
 
 ```bash
-# 1) 先起后端（同上，:8787）
-uvicorn novelforge.app.main:app --port 8787
-
-# 2) 再起前端（:5173，经 Vite proxy 调 API，无跨域）
-cd web && npm install && npm run dev
+curl http://127.0.0.1:8787/health
 ```
 
-打开 http://localhost:5173；项目工作区支持可复制、可刷新的深链：
+### 2. 启动 Web Studio
 
-```text
-/studio/:projectId/write/:chapter
-/studio/:projectId/plan
-/studio/:projectId/world
-/studio/:projectId/review
-/studio/:projectId/settings
+```bash
+cd web
+npm ci
+npm run dev
 ```
 
-工作台真实驱动确定性核心（无需 LLM）：
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 会将 `/v1` 请求代理到本地后端，无需额外配置 CORS。
 
-- **创作 Agent** → 生成全书/卷/未来章节候选，作者选择或让 AI 决定；支持 checkpoint 恢复
-- **建项目** → `POST /v1/projects`（乐观更新，新书即时可用）
-- **录入设定 / 填充示例** → `POST /v1/{id}/seed`（三元组写入 canon 账本）
-- **世界圣经** → `GET /v1/{id}/bible`（由 canon 确定性渲染 Markdown）
-- **世界状态** → `POST /v1/{id}/state`（as-of 时点投影角色境界）
-- **设定检索** → `GET /v1/{id}/search/facts`（FTS5 + BM25）
-- **审核队列** → `GET /v1/{id}/reviews` + `/staging`，逐条 approve/reject
-- **生成章节** → `POST /v1/{id}/pipeline/run`（需配置 LLM provider key）
+### 3. 不用模型也能体验核心能力
 
-实时引擎健康徽章读 `GET /health`。详见 [`web/README.md`](web/README.md)。
-后端已配 CORS（允许 `:5173/:4173`）；生产可经 `NOVELFORGE_CORS_ORIGINS` 覆盖、`VITE_API_BASE` 指定 API 地址。
+```bash
+# 新建项目
+curl -s -X POST http://127.0.0.1:8787/v1/projects \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 
-## 配置 LLM Provider Key（生成章节用）
+# 然后在 Studio 中录入设定、查看世界圣经、状态投影、检索和审核队列
+```
 
-确定性核心（seed / bible / state / search / 审核）**无需 LLM**。只有「生成章节」
-（`pipeline/run`）需要 LLM provider key，否则后端默认回退到 `anthropic` 且无 key，
-会报 *"Could not resolve authentication method"*。
+只有生成正文时才需要外部 LLM；项目管理、Canon、状态投影、检索、审核和记忆健康检查都可离线运行。
 
-在项目根建 `.env`（已被 `.gitignore` 忽略，密钥不入库）：
+## 系统架构
+
+```mermaid
+flowchart LR
+    UI["Web Studio / REST / SSE"] --> API["FastAPI"]
+    API --> Agent["可持久化 Agent / Orchestrator"]
+    Agent --> Plan["未来路线与章节契约"]
+    Agent --> Recall["L0 / L1 / L2 Hybrid Recall"]
+    Agent --> Draft["多候选生成与评分"]
+    Draft --> Check["确定性 Validators + 工艺检查"]
+    Check --> Gate{"唯一晋升闸门"}
+    Gate -->|auto / hybrid| Canon["Append-only Canon"]
+    Gate -->|human gate| Review["人工审核队列"]
+    Canon --> State["as-of World State"]
+    State --> Recall
+    Plan --> Actuals["Actuals / 偏航 / 重规划"]
+    Actuals --> Plan
+    Canon --> DB[("SQLite")]
+    Recall --> DB
+    Plan --> DB
+```
+
+### 一条章节如何生成
+
+1. 从当前章节契约、Canon 世界状态和分层记忆组装稳定上下文。
+2. 并行生成多个候选稿，并按契约、情节弧、文气和成本评分。
+3. 硬一致性问题直接阻断；软问题进入局部修订，失败时按模型层级升级。
+4. 选中稿原子落盘，事实提案进入治理闸门，不允许直接改写 Canon。
+5. 从成稿提取 actuals，计算与计划的偏航并按需重规划后续章节。
+
+## 配置 LLM
+
+示例配置文件默认会被 Git 安全保留，真实 `.env` 会被忽略：
+
+```bash
+cp .env.example .env
+```
+
+DeepSeek 示例：
 
 ```ini
-# DeepSeek（推荐，OpenAI 兼容）
-DEEPSEEK_API_KEY=sk-你的key
 NOVELFORGE_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-key-here
 ```
 
-然后用启动脚本（自动读 `.env`）拉起后端：
+也可使用：
 
-```powershell
-.\run-backend.ps1          # Windows PowerShell
+```ini
+NOVELFORGE_PROVIDER=anthropic
+ANTHROPIC_API_KEY=your-key-here
 ```
+
+或通过 `openai_compat` 接入兼容服务。向量召回默认使用离线 HashEmbedder；需要外部 embedding 时再设置 `NOVELFORGE_EMBEDDING_*`。完整配置见 [.env.example](.env.example)。
+
+> `NOVELFORGE_API_KEY` 仅用于保护 NovelForge 自身的 REST API，不是 LLM key。不要把任何真实密钥写进源码、示例、测试或提交信息。
+
+## 已实现能力
+
+| 领域 | 能力 |
+|---|---|
+| 规划 | 全书/卷/章节路线候选、完整章节契约、append-only 版本、偏航评分与重规划 |
+| 生成 | 多候选生成、三级漏斗择优、模型升级、质量门控、局部补丁修订 |
+| 一致性 | power / knowledge / item / numeric / presence 等确定性 validators，分支隔离与 as-of 重放 |
+| 记忆 | L0 原文、L1 原子证据、L2 场景、章/卷/全书摘要、FTS5 + BM25 + 向量 RRF |
+| 治理 | auto / human / hybrid 晋升模式、review queue、冲突检测、revert、审计血缘 |
+| 长任务 | Autopilot 挂机连写、SSE 实时进度、取消/恢复、checkpoint 与失败降级 |
+| 运维 | Schema v20 增量迁移、热备份、FTS/记忆重建、孤儿与 crashed run 扫描 |
+| 交互 | 营销首页、创作 Studio、世界观、规划、审核、设置工作区与 REST API |
+
+## 核心 API
+
+所有业务路由使用 `/v1` 前缀。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `POST` | `/projects` | 新建项目 |
+| `POST` | `/{pid}/agent/start` | 启动选择式创作 Agent |
+| `POST` | `/{pid}/planning/windows/generate` | 生成未来章节路线候选 |
+| `POST` | `/{pid}/pipeline/run` | 执行一章完整生成流水线 |
+| `GET` | `/{pid}/chapters/{chapter}/alignment` | 查看 actuals、证据和偏航 |
+| `POST` | `/{pid}/chapters/{chapter}/replan` | 预览或应用后续重规划 |
+| `GET` | `/{pid}/bible` | 确定性渲染世界圣经 |
+| `POST` | `/{pid}/state` | 查询指定章节的世界状态 |
+| `POST` | `/{pid}/governance/review` | 审批事实提案 |
+| `GET` | `/{pid}/memory/health` | 查看记忆覆盖和告警 |
+| `POST` | `/{pid}/memory/rebuild` | 重建 FTS、L1、L2 与向量 |
+| `POST` | `/{pid}/admin/backup` | 在线热备份 |
+
+完整接口以运行时的 `/docs` 为准。
+
+## 工程质量
 
 ```bash
-set -a; . ./.env; set +a; uvicorn novelforge.app.main:app --port 8787   # bash
+# 后端
+.venv/bin/python -m pytest -q
+# 726 passed
+
+# 前端：类型、Lint、单测、生产构建
+cd web && npm run check
 ```
 
-> ⚠️ **不要**把 LLM key 放进 `NOVELFORGE_API_KEY`——那个变量是 **REST 鉴权** 用的，
-> 一旦设置，所有 `/v1/*` 请求都会要求 Bearer token，前端会收到 401。
-> LLM key 用 `DEEPSEEK_API_KEY`（或 `ANTHROPIC_API_KEY` + `NOVELFORGE_PROVIDER=anthropic`）。
+后端测试覆盖 Schema 迁移、原子写入、分支隔离、状态重放、规划事务、Agent checkpoint、记忆重建、治理、认证、SSE、Autopilot 和端到端 MVP 流水线。CI 在每次 push 和 pull request 上运行同一套检查。
 
-## 代码结构（`novelforge/`，MVP 已全量实现）
+## 项目结构
 
-| 模块 | 说明 |
-|---|---|
-| `db/schema.sql` | §02 全量 DDL（SCHEMA_VERSION=20）：canon / World State / L0-L2 记忆 / 可版本化未来计划 / actuals 与偏航报告 / Agent 决策 / sessions |
-| `db/connection.py` | 建库 / PRAGMA / facts + L0 drafts FTS 重建 / 启动期孤儿扫描 |
-| `db/migrations/` | 增量迁移器；v16 选择式规划，v17 durable replay，v18 记忆状态与证据链，v19 candidate→draft 来源追溯，v20 章节契约版本 / actuals / alignment |
-| `db/l0.py` | L0 原子写入 + 项目隔离路径解析 + orphan/crashed_runs sweep |
-| `db/write.py` | 写入辅助函数 |
-| `world/replay.py` | as-of 投影（replay_power/knowledge/items/numeric/gimmick/timeline），支持 branch_id |
-| `world/branch.py` | 分支祖先链 SQL 过滤器（§9.4 分支隔离） |
-| `world/projection.py` | World State Store 投影 |
-| `validators/` | 确定性 Python 验证器（power / knowledge / timeline / numeric / gimmick） |
-| `governance/` | Promote / Revert / Gate / Conflict 治理层 |
-| `control_plane/orchestrator.py` | 主循环：plan→recall→draft→check→gate，pipeline_run 状态机 |
-| `planning/` | 统一规划服务、完整章节契约、append-only 计划版本、actuals 提取、加权偏航评分与重规划 |
-| `app/agent_runtime.py` | LangGraph 选择式创作状态图、interrupt/resume、同步 durability 与 SQLite checkpoint |
-| `control_plane/llm/` | 多供应商 LLM 接入层（DeepSeek / OpenAI-compat / Anthropic / Fake） |
-| `control_plane/budget.py` | Token/USD 预算 + 断路器 |
-| `skills/` | 5 个核心 Skill：planner / chapter_draft / continuity_check / craft_check / cold_extract |
-| `dedup/` | DeduplicationEngine（BM25 + 可选 LLM 裁判） |
-| `memory/l1_atoms.py` | L1 提案原子、L0 证据行、candidate 血缘与重放 |
-| `memory/l2_aggregate.py` | L2 场景切分、摘要、向量索引与全量回填 |
-| `memory/maintenance.py` | L0/L1/L2 健康检查与一键重建 |
-| `memory/recall.py` | 实体/摘要/L0 FTS/L2 hybrid recall |
-| `memory/bible_render.py` | World Bible Markdown 渲染 |
-| `craft/` | Pacing Controller + PayoffBinding + VoiceProfile |
-| `app/main.py` | FastAPI 应用装配（API-key 认证中间件） |
-| `app/api/` | REST 路由：projects / memory / governance / orchestrator / autopilot / volumes / sessions / admin |
-| `app/security.py` | Bearer/X-API-Key 认证 + Prompt Injection 净化（11 条正则） |
-| `ids.py` | 前缀化 ID 生成 |
-| `tokenizer.py` | FTS5 应用层预分词（jieba 可选，缺失回退 bigram） |
+```text
+novelforge/
+├── app/             # FastAPI、REST 路由、Agent runtime
+├── control_plane/   # Orchestrator、预算、LLM providers
+├── planning/        # 路线、章节契约、actuals、偏航与重规划
+├── memory/          # L1/L2、摘要、召回、embedding、维护
+├── world/           # 分支、投影、as-of replay
+├── validators/      # 确定性一致性规则
+├── governance/      # Gate、conflict、commit、revert
+├── craft/           # 节奏、钩子、伏笔、文风与候选择优
+├── db/              # SQLite schema、迁移与写入
+└── skills/          # 规划、起草、检查、抽取 Skill
 
-## API 一览（`/v1` 前缀）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/projects` | 新建项目 |
-| GET | `/projects` | 列出所有项目 |
-| POST | `/{pid}/agent/start` | 启动选择式创作 Agent |
-| GET | `/{pid}/agent/sessions` | 列出可恢复 Agent 会话 |
-| POST | `/{pid}/agent/{sid}/choose` | 选择方案、AI 代选或 reroll |
-| GET | `/{pid}/story-map` | 查看全书路线、情节弧与未来章节地图 |
-| POST | `/{pid}/seed` | 批量播种 canon facts（冷启动） |
-| POST | `/{pid}/pipeline/run` | 生成一章（完整 plan→draft→check→gate 流水线） |
-| POST | `/{pid}/planning/windows/generate` | 生成未来章节路线候选（不直接覆盖计划） |
-| POST | `/{pid}/planning/windows/{decision_id}/approve` | 批准并以整窗事务应用路线 |
-| GET | `/{pid}/chapters/{chapter}/contract` | 查看当前章节完整契约 |
-| GET | `/{pid}/chapters/{chapter}/alignment` | 查看 actuals、证据与偏航报告 |
-| POST | `/{pid}/chapters/{chapter}/replan` | 预览或应用后续章节重规划 |
-| GET | `/{pid}/chapters/{chapter}/plan-versions` | 查看 append-only 计划版本时间线 |
-| GET/PATCH | `/{pid}/chapters/{chapter}/draft` | 读取正文或按 revision CAS 保存新修订 |
-| GET | `/{pid}/facts` | 查询 facts（支持 FTS 关键词） |
-| POST | `/{pid}/governance/review` | 人工审批 review queue 条目 |
-| POST | `/{pid}/governance/revert` | 回滚 fact 到指定版本 |
-| POST/GET | `/{pid}/volumes` | 卷管理 |
-| POST/GET | `/{pid}/branches` | 分支管理 |
-| POST | `/{pid}/sessions` | 创建会话（CLI/Web/Chat/API） |
-| POST | `/{pid}/sessions/{sid}/turns` | 创建 turn（同步或 SSE 流式） |
-| GET | `/{pid}/sessions/{sid}/turns/{tid}/stream` | SSE 断线续传 |
-| POST | `/{pid}/admin/backup` | 热备份（novel.db + l0/） |
-| POST | `/{pid}/admin/rebuild_fts` | 全量重建 FTS5 索引 |
-| GET/PATCH | `/{pid}/memory/settings` | 项目级 L2/向量/摘要设置 |
-| GET | `/{pid}/memory/health` | L0/L1/L2/摘要覆盖与告警 |
-| POST | `/{pid}/memory/rebuild` | 从 L0/候选表重建 FTS、L1、L2 与向量 |
-| POST | `/{pid}/admin/add_terms` | 增量追加 jieba 词典 |
-| GET | `/health` | 健康检查（无需认证） |
-
-## 关键设计决策
-
-### 确定性一致性
-- `character_power_log` / `knowledge_edges` / `item_log` / `numeric_facts` / `gimmick_rules` 均以 `source_fact_id` 锚定 canon 来源
-- as-of 投影 = LEFT JOIN facts ON source_fact_id，筛 `status='canon' AND valid_from_chapter<=N`
-- 硬冲突由 Python validator 拦截，软冲突走 LLM 二次判断
-
-### L0 原子写入（F7）
-- 草稿落盘：`tmp = write + fsync → os.replace(final)`，同目录保证同文件系统
-- `draft_index.file_path` 永远相对项目 `novel.db` 解析，杜绝跨项目同名章节串读
-- 同章并发先以 `BEGIN IMMEDIATE` 串行分配 revision；draft/file/FTS 始终使用同一 ID
-- 同一事务写入 `draft_index` 与最新修订 `drafts_fts`，可通过维护 API完整重建
-- `pipeline_run` 状态机：启动时写 `'running'`，完成时更新 `'completed'`；下次启动扫描残留 `'running'` → `'crashed'`
-
-### L1/L2 记忆职责
-- L1 保留为**证据与审计层**：复用选中正文已有 proposals，记录来源 draft、L0 行号、candidate_id 和处理状态；旧 revision 标记 superseded，不直接当 canon 注入模型，零新增 LLM 调用
-- L2 是**情节场景层**：按场景切块、摘要并 hybrid recall，项目运行时默认开启离线 hash 向量；L3 canon 安全网仍默认关闭
-- 章/卷/全书摘要是独立的叙事压缩层，不再称为 L1/L2/L3，避免和原子/场景/事件管线混淆
-
-### 分支隔离（§9.4）
-- `facts.branch_id = NULL` 为主线，非 NULL 为分支专属
-- `replay_*(conn, N, branch_id=X)` 自动遍历祖先链，按 fork_chapter 截断每级可见范围
-- 向后兼容：`branch_id=None` 不施加额外过滤
-
-### 双模式治理
-- `auto_promote`：低风险 fact 直接晋升 canon
-- `human_gate`：所有 fact 入 review queue 等人工批准
-- `hybrid`：低/中风险自动，高风险入队
-
-## 文档
-
-设计文档在 [`docs/NovelForge/`](docs/NovelForge/)（从 `00-总览与阅读指南.md` 入）：
-
-| 节 | 主题 |
-|---|---|
-| 01–02 | 总体架构 · 存储与数据模型（完整 SQLite DDL） |
-| 03–04 | Canon 治理与双模式 · 一致性引擎（确定性 validators） |
-| 05–06 | 网文工艺层 · 记忆管线与召回 |
-| 07–08 | Skill 体系与主循环 · API/配置/工程落地 |
-| 09 | MVP 路线图与验收 |
-| 10–11 | 数据契约与命名权威 · 核心算法补全 |
-| 12–14 | Agent 循环与工具调用 · 交互模型（CLI/REST/Web/对话式）· LLM 多供应商接入层 |
-| 21 | 选择式创作 Agent、LangGraph vs Deep Agents、未来计划与 canon 边界 |
-
-实现级规格（可直接照着写代码）在 [`docs/NovelForge/impl/`](docs/NovelForge/impl/)。
-
-## 测试
-
-```
-726 passed
+web/                 # React + TypeScript + Vite Studio
+tests/               # 后端自动化测试
+docs/NovelForge/     # 架构、数据契约与实现规格
 ```
 
-覆盖范围：schema 迁移、统一规划多入口一致性、整窗事务回滚、append-only 计划版本、完整章节契约、final-only proposals、actuals/alignment/replan 闭环、候选人工换稿、正文 revision CAS、L0 原子写入、pipeline_run 状态机、会话/turn/SSE、API-key 认证、热备份、FTS 重建、分支隔离 World State、工艺层、自动驾驶和端到端 MVP 流水线。
+## 设计文档
+
+从 [docs/NovelForge/00-总览与阅读指南.md](docs/NovelForge/00-总览与阅读指南.md) 开始。推荐阅读顺序：
+
+- [总体架构](docs/NovelForge/01-总体架构.md)
+- [存储与数据模型](docs/NovelForge/02-存储与数据模型.md)
+- [Canon 治理与双模式](docs/NovelForge/03-Canon治理与双模式.md)
+- [网文工艺层](docs/NovelForge/05-网文工艺层.md)
+- [记忆管线与召回](docs/NovelForge/06-记忆管线与召回.md)
+- [Agent 循环与工具调用](docs/NovelForge/12-Agent循环与工具调用.md)
+- [选择式创作 Agent 与框架选型](docs/NovelForge/21-选择式创作Agent与框架选型.md)
+
+## 安全
+
+- `.env`、本地数据库、L0 草稿、向量索引和备份默认不入库。
+- 不要在 issue、日志、截图、测试 fixture 或 commit message 中提交真实凭据。
+- 如果密钥曾进入 Git，即使后来删除，也应立即撤销并从完整历史中清除。
+- 安全问题请遵循 [SECURITY.md](SECURITY.md)，优先使用 GitHub 的私密漏洞报告渠道。
+
+## 参与贡献
+
+欢迎通过 Issue 描述问题与预期行为，并通过 Pull Request 提交小而可验证的改动。提交前请运行后端测试和 `npm run check`；架构级变更建议同步更新 `docs/NovelForge/` 中的设计文档。
+
+---
+
+<div align="center">
+
+**一致性是不扣分项，追更力才是得分项。**
+
+</div>

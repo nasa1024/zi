@@ -46,7 +46,7 @@ export default function Stats() {
       <div className="wrap">
         <div className="stats-grid reveal" ref={gridRef}>
           <div className="stat-cell">
-            <b data-count="262">0</b>
+            <b data-count="726">0</b>
             <span>测试用例全绿</span>
           </div>
           <div className="stat-cell">

@@ -48,7 +48,7 @@ export default function Footer() {
         </div>
         <div className="foot-bottom">
           <span>© 2026 NovelForge · 让冷引擎写出滚烫的故事</span>
-          <span>MVP v0.3 · 262 tests green · made with ⚡ &amp; dopamine</span>
+          <span>MVP v0.3 · 726 tests green · made with ⚡ &amp; dopamine</span>
         </div>
       </div>
     </footer>

@@ -25,6 +25,7 @@ ENV/
 # ---- Env / secrets ----
 .env
 .env.*
+!.env.example
 *.local
 
 # ---- NovelForge runtime data (本地优先：库与索引可重建，不入库) ----

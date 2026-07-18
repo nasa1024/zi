@@ -56,7 +56,7 @@ export default function Hero({ onStart }: HeroProps) {
           </div>
           <div className="hero-foot">
             <div className="stat">
-              <b>262</b>
+              <b>726</b>
               <span>测试全绿</span>
             </div>
             <div className="stat">
