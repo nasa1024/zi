@@ -123,6 +123,36 @@ class TestParseCandidates:
         out = _parse_candidates(text, n=1, field="power_system", locked=locked, avoid=["旧体系"])
         assert out is None or out == []
 
+    def test_english_field_reroll_rejects_cross_language_value(self):
+        locked = {
+            "genre": "fantasy",
+            "premise": "A courier climbs a living tower.",
+            "protagonist": "Mara is a careful courier.",
+            "main_conflict": "Each victory costs her a memory.",
+            "power_system": "Memory Oaths",
+        }
+        text = '```settings\n[{"power_system":"全新剑道体系"}]\n```'
+
+        assert _parse_candidates(
+            text,
+            n=1,
+            field="power_system",
+            locked=locked,
+            content_language="en-US",
+        ) is None
+
+    def test_english_candidate_rejects_any_cross_language_visible_field(self):
+        text = """```settings
+[{"genre":"fantasy","premise":"A courier climbs a living tower.",
+"world_setting":"九州大陆","power_system":"Memory Oaths",
+"protagonist":"Mara is a careful courier.",
+"main_conflict":"Each victory costs her a memory."}]
+```"""
+
+        assert _parse_candidates(
+            text, n=1, content_language="en-US",
+        ) is None
+
 
 # ── _fallback_candidate ──────────────────────────────────────────────────────
 

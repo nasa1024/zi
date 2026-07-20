@@ -5,6 +5,7 @@ F5: jieba 词典变更后触发增量 add_word + 可按需全量重建 FTS5
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from datetime import datetime, UTC
@@ -107,13 +108,16 @@ def rebuild_fts(
 
     conn = registry.open_conn(project_id)
     try:
-        from ...db.connection import rebuild_drafts_fts, rebuild_facts_fts
-        from ...tokenizer import tokenizer_version
-        from ...db.connection import set_meta
+        from ...db.connection import (
+            project_tokenizer_version,
+            rebuild_drafts_fts,
+            rebuild_facts_fts,
+            set_meta,
+        )
 
         n = rebuild_facts_fts(conn)
         draft_stats = rebuild_drafts_fts(conn)
-        tv = tokenizer_version()
+        tv = project_tokenizer_version(conn)
         set_meta(conn, "tokenizer_version", tv)
         conn.commit()
         return RebuildFtsResponse(
@@ -151,7 +155,38 @@ def add_user_terms(
     if registry.get(project_id) is None:
         raise HTTPException(404, f"项目不存在: {project_id}")
 
-    from ...tokenizer import add_user_terms as _add, tokenizer_version
+    conn = registry.open_conn(project_id)
+    try:
+        from ...db.connection import (
+            get_meta,
+            project_content_language,
+            project_tokenizer_version,
+            set_meta,
+        )
+        from ...tokenizer import add_user_terms as _add
 
-    _add(req.terms)
-    return AddTermsResponse(added=len(req.terms), tokenizer_version=tokenizer_version())
+        try:
+            existing = json.loads(get_meta(conn, "tokenizer_user_terms_json") or "[]")
+        except json.JSONDecodeError:
+            existing = []
+        if not isinstance(existing, list):
+            existing = []
+        merged = list(dict.fromkeys(
+            str(term).strip() for term in [*existing, *req.terms]
+            if str(term).strip()
+        ))
+        set_meta(
+            conn, "tokenizer_user_terms_json",
+            json.dumps(merged, ensure_ascii=False),
+        )
+        language = project_content_language(conn)
+        _add(merged, language)
+        desired_version = project_tokenizer_version(conn)
+        conn.commit()
+        # The stored tokenizer_version continues to describe the current FTS
+        # index; this response reports the desired version until rebuild_fts.
+        return AddTermsResponse(
+            added=len(req.terms), tokenizer_version=desired_version,
+        )
+    finally:
+        conn.close()

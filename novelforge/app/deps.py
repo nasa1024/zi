@@ -58,7 +58,13 @@ class ProjectRegistry:
     def create(
         self, name: str, genre: str = "xuanhuan",
         setting: Optional[dict] = None,
+        writing_config: Optional[dict] = None,
     ) -> ProjectMeta:
+        # Validate before creating a directory so a bad profile selection can
+        # never leave an orphan project on disk.
+        from ..writing_profiles import normalize_writing_selection
+        resolved_writing = normalize_writing_selection(writing_config)
+
         pid = new_id("prj")
         db_dir = _DATA_ROOT / pid
         db_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +76,8 @@ class ProjectRegistry:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         init_db_from_conn(conn)
+        from ..writing_profiles import initialize_project_writing_profile
+        initialize_project_writing_profile(conn, resolved_writing)
         if setting:
             self._write_setting(conn, setting)   # 必须在 close 之前
         conn.close()

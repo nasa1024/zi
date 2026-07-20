@@ -533,6 +533,7 @@ def select_candidate(
     from ...planning.service import _planning_entity_ids
     from ...skills import register_default_skills
     from ...world.replay import get_world_state
+    from ...writing_profiles import get_project_writing_profile
 
     conn = registry.open_conn(project_id)
     try:
@@ -602,7 +603,9 @@ def select_candidate(
             summary_window=cfg.recall.summary_window_chapters,
             enable_summaries=cfg.recall.enable_summaries,
         )
-        stable = recall_pack.to_stable_context_str()
+        writing_profile = get_project_writing_profile(conn, chapter=chapter)
+        content_language = writing_profile["content_language"]
+        stable = recall_pack.to_stable_context_str(content_language)
         validation_beats = list(
             detail.get("beats") or plan_context.selected_beats or []
         )
@@ -614,10 +617,16 @@ def select_candidate(
             "plan_context": plan_context,
             "world_state": get_world_state(chapter - 1, conn),
             "recall_pack": recall_pack,
-            "stable_context": f"## 世界设定（稳定）\n{stable}" if stable else "",
-            "dynamic_context": recall_pack.to_dynamic_context_str(),
+            "stable_context": (
+                (f"## Stable world context\n{stable}"
+                 if content_language.startswith("en")
+                 else f"## 世界设定（稳定）\n{stable}")
+                if stable else ""
+            ),
+            "dynamic_context": recall_pack.to_dynamic_context_str(content_language),
             "pacing_state": PacingController().get_state(conn),
             "proposals": list(chosen.get("proposals") or []),
+            "writing_profile": writing_profile,
         }
         skill_registry = SkillRegistry()
         register_default_skills(skill_registry)
@@ -630,6 +639,7 @@ def select_candidate(
             llm=gateway,
             conn=conn,
             workspace=validation_workspace,
+            extra={"writing_profile": writing_profile},
         )
 
         # New candidates are pure prose.  Extract state-change proposals once,
@@ -852,6 +862,7 @@ def select_candidate(
                     tier=cfg.memory.l2_tier,
                     embedder=embedder,
                     preserve_existing_summaries=False,
+                    writing_profile=writing_profile,
                 )
         except Exception:
             pass

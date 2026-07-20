@@ -12,6 +12,37 @@ CREATE TABLE IF NOT EXISTS meta_kv (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- v21: project-scoped, append-only writing profile history.  meta_kv keeps the
+-- current projection; this table preserves the exact profile used over time.
+CREATE TABLE IF NOT EXISTS writing_profile_versions (
+    id                     TEXT PRIMARY KEY,
+    revision               INTEGER NOT NULL UNIQUE CHECK(revision >= 1),
+    profile_id             TEXT NOT NULL,
+    catalog_version        TEXT NOT NULL,
+    content_language       TEXT NOT NULL,
+    target_market          TEXT NOT NULL,
+    publication_format     TEXT NOT NULL,
+    primary_genre          TEXT,
+    story_tags_json        TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(story_tags_json)),
+    audience_rating        TEXT NOT NULL DEFAULT 'general',
+    content_warnings_json  TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(content_warnings_json)),
+    overrides_json         TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(overrides_json)),
+    snapshot_json          TEXT NOT NULL CHECK(json_valid(snapshot_json)),
+    effective_from_chapter INTEGER NOT NULL CHECK(effective_from_chapter >= 1),
+    prompt_version         TEXT NOT NULL,
+    changed_by             TEXT NOT NULL DEFAULT 'user',
+    change_reason          TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_writing_profile_versions_effective
+    ON writing_profile_versions(effective_from_chapter, revision DESC);
+CREATE TRIGGER IF NOT EXISTS trg_writing_profile_versions_no_update
+    BEFORE UPDATE ON writing_profile_versions
+    BEGIN SELECT RAISE(ABORT, 'writing_profile_versions is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_writing_profile_versions_no_delete
+    BEFORE DELETE ON writing_profile_versions
+    BEGIN SELECT RAISE(ABORT, 'writing_profile_versions is append-only'); END;
+
 -- 2) entities + aliases -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS entities (
     id              TEXT PRIMARY KEY,
@@ -411,14 +442,21 @@ CREATE TABLE IF NOT EXISTS chapter_cards (
 
 -- v13: 文风锚点（P1#9——手动录入范文段，按情绪做 few-shot）
 CREATE TABLE IF NOT EXISTS style_anchors (
-    id          TEXT PRIMARY KEY,
-    emotion     TEXT NOT NULL,
-    title       TEXT,
-    content     TEXT NOT NULL,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    id               TEXT PRIMARY KEY,
+    emotion          TEXT NOT NULL,
+    title            TEXT,
+    content          TEXT NOT NULL,
+    language         TEXT NOT NULL DEFAULT 'zh-CN',
+    source_type      TEXT NOT NULL DEFAULT 'legacy',
+    source_note      TEXT,
+    rights_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(rights_confirmed IN (0,1)),
+    profile_tags     TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(profile_tags)),
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_style_anchors_emotion ON style_anchors(emotion);
+CREATE INDEX IF NOT EXISTS idx_style_anchors_language_emotion
+    ON style_anchors(language, emotion);
 
 CREATE TABLE IF NOT EXISTS character_cards (
     id              TEXT PRIMARY KEY,
@@ -475,6 +513,10 @@ CREATE TABLE IF NOT EXISTS draft_index (
     file_path       TEXT NOT NULL,
     sha256          TEXT NOT NULL,
     word_count      INTEGER,
+    content_language TEXT,
+    writing_profile_id TEXT,
+    writing_profile_version INTEGER,
+    prompt_version  TEXT,
     status          TEXT NOT NULL DEFAULT 'draft'
                         CHECK(status IN ('draft','checked','revised','committed','archived')),
     volume_no       INTEGER,                        -- §9.4 归属卷号
@@ -735,6 +777,11 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     quality_score   REAL,   -- M5-⑦: 章节质量分 0-10（LLM 评委）
     tokens_spent    INTEGER, -- v11: 逐章成本（账本净增量）
     usd_spent       REAL,    -- v11: 逐章成本（估算 USD）
+    content_language TEXT,   -- v21: immutable generation context
+    writing_profile_id TEXT,
+    writing_profile_version INTEGER,
+    prompt_version  TEXT,
+    model_id        TEXT,
     started_at      TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at     TEXT
 );

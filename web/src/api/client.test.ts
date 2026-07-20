@@ -2,10 +2,85 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeAlignmentReport,
   normalizeChapterContract,
+  normalizeProjectWritingProfile,
   normalizePlanningWindow,
+  normalizeWritingProfileCatalog,
 } from './client';
 
 describe('API response normalizers', () => {
+  it('normalizes the versioned writing-profile catalog envelope', () => {
+    const profiles = normalizeWritingProfileCatalog({
+      catalog_version: '2026-07-21',
+      items: [{
+        id: 'en_progression_serial_v1',
+        version: '1.0.0',
+        display_name: 'Progression Fantasy Serial',
+        description: 'Visible progress with forward-driving chapter endings.',
+        language: 'en-US',
+        market: 'global_english',
+        publication_format: 'web_serial',
+        compatible_genres: ['fantasy'],
+        default_story_tags: ['progression_fantasy'],
+        defaults: {
+          pov: 'third_person_limited',
+          tense: 'past',
+          pace: 'fast',
+          chapter_word_range: [1500, 2500],
+        },
+      }],
+    });
+
+    expect(profiles[0]).toMatchObject({
+      id: 'en_progression_serial_v1',
+      name: 'Progression Fantasy Serial',
+      format: 'web_serial',
+      default_story_tags: ['progression_fantasy'],
+      prompt_rules: { pov: 'third_person_limited', tense: 'past', pace: 'fast' },
+      quality_rules: { chapter_word_range: [1500, 2500] },
+    });
+  });
+
+  it('unwraps current writing profile and preserves its version history', () => {
+    const profile = normalizeProjectWritingProfile({
+      current: {
+        content_language: 'en-US',
+        target_market: 'global_english',
+        publication_format: 'web_serial',
+        primary_genre: 'fantasy',
+        story_tags: ['progression_fantasy'],
+        audience_rating: 'general',
+        content_warnings: [],
+        writing_profile_id: 'en_progression_serial_v1',
+        writing_profile_version: 2,
+        writing_profile_catalog_version: '1.1.0',
+        writing_profile_overrides: { pace: 'balanced' },
+        effective_from_chapter: 8,
+        display_name: 'Progression Fantasy Serial',
+        description: 'Visible progress and forward-driving endings.',
+        prompt_rules: { pace: 'balanced' },
+        quality_rules: { chapter_word_range: [1500, 2500] },
+      },
+      history: [{
+        content_language: 'en-US',
+        target_market: 'global_english',
+        publication_format: 'web_serial',
+        revision: 1,
+        profile_id: 'en_progression_serial_v1',
+        overrides: {},
+        effective_from_chapter: 1,
+      }],
+    });
+
+    expect(profile).toMatchObject({
+      writing_profile_id: 'en_progression_serial_v1',
+      writing_profile_version: 2,
+      writing_profile_effective_from_chapter: 8,
+      profile: { name: 'Progression Fantasy Serial' },
+    });
+    expect(profile.history).toHaveLength(1);
+    expect(profile.history[0].writing_profile_effective_from_chapter).toBe(1);
+  });
+
   it('uses durable decision options when normalizing a planning window', () => {
     const normalized = normalizePlanningWindow({
       start_chapter: 4,

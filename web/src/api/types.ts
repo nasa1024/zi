@@ -6,6 +6,102 @@ export interface HealthResponse {
   version: string;
 }
 
+export type ContentLanguage = 'zh-CN' | 'en-US' | 'en-GB';
+export type TargetMarket = 'cn_web' | 'global_english' | 'us' | 'uk';
+export type PublicationFormat = 'web_serial' | 'novel';
+
+export interface GenreCatalogItem {
+  id: string;
+  label: string;
+  description?: string | null;
+  language?: string | null;
+  market?: string | null;
+  story_tags?: string[];
+}
+
+export interface WritingProfilePromptRules {
+  pov?: string;
+  tense?: string;
+  pace?: string;
+  prose_density?: string;
+  dialogue_density?: string;
+  [key: string]: unknown;
+}
+
+export interface WritingProfileQualityRules {
+  chapter_word_range?: [number, number] | number[];
+  [key: string]: unknown;
+}
+
+export interface WritingProfileCatalogItem {
+  id: string;
+  version: string;
+  name: string;
+  description?: string | null;
+  preview?: string | null;
+  language: string;
+  market: string;
+  format: string;
+  primary_genre?: string | null;
+  compatible_genres?: string[];
+  story_tags?: string[];
+  default_story_tags?: string[];
+  audience_rating?: string | null;
+  prompt_rules: WritingProfilePromptRules;
+  quality_rules: WritingProfileQualityRules;
+  prompt_version?: string | null;
+}
+
+export interface WritingProfileSummary {
+  id?: string;
+  display_name?: string;
+  version?: number;
+  content_language?: string;
+}
+
+export interface WritingProfileSelection {
+  content_language: ContentLanguage | string;
+  target_market: TargetMarket | string;
+  publication_format: PublicationFormat | string;
+  primary_genre?: string | null;
+  story_tags: string[];
+  audience_rating?: string | null;
+  content_warnings: string[];
+  writing_profile_id: string;
+  writing_profile_version: number;
+  writing_profile_overrides: Record<string, unknown>;
+  writing_profile_effective_from_chapter?: number | null;
+}
+
+export interface WritingProfileVersion extends WritingProfileSelection {
+  created_at?: string | null;
+  changed_by?: string | null;
+  change_reason?: string | null;
+  prompt_version?: string | null;
+}
+
+export interface ProjectWritingProfileResponse extends WritingProfileSelection {
+  project_id?: string;
+  profile?: WritingProfileCatalogItem | null;
+  history: WritingProfileVersion[];
+}
+
+export interface ProjectWritingProfilePatch {
+  content_language?: ContentLanguage | string;
+  target_market?: TargetMarket | string;
+  publication_format?: PublicationFormat | string;
+  primary_genre?: string | null;
+  story_tags?: string[];
+  audience_rating?: string | null;
+  content_warnings?: string[];
+  writing_profile_id?: string;
+  writing_profile_overrides?: Record<string, unknown>;
+  effective_from_chapter?: number | null;
+  confirm_high_risk?: boolean;
+  change_reason?: string | null;
+  changed_by?: string;
+}
+
 // 情节设定（手填或生成的候选）；与后端 PlotSetting 逐字段镜像。
 export interface PlotSetting {
   genre: string;
@@ -29,6 +125,15 @@ export interface SettingSuggestRequest {
   locked_fields?: string[];
   field?: string | null;
   avoid?: string[];
+  content_language?: ContentLanguage | string;
+  target_market?: TargetMarket | string;
+  publication_format?: PublicationFormat | string;
+  primary_genre?: string | null;
+  story_tags?: string[];
+  audience_rating?: string | null;
+  content_warnings?: string[];
+  writing_profile_id?: string | null;
+  writing_profile_overrides?: Record<string, unknown> | null;
 }
 
 export interface SettingSuggestResponse {
@@ -43,6 +148,15 @@ export interface ProjectCreateRequest {
   power_system?: string | null;
   config_overrides?: Record<string, unknown> | null;
   setting?: PlotSetting | null;
+  content_language?: ContentLanguage | string;
+  target_market?: TargetMarket | string;
+  publication_format?: PublicationFormat | string;
+  primary_genre?: string | null;
+  story_tags?: string[];
+  audience_rating?: string | null;
+  content_warnings?: string[];
+  writing_profile_id?: string | null;
+  writing_profile_overrides?: Record<string, unknown> | null;
 }
 
 export interface ProjectResponse {
@@ -56,6 +170,18 @@ export interface ProjectResponse {
   archived: boolean;
   power_system?: string | null;
   premise?: string | null;
+  content_language?: ContentLanguage | string;
+  target_market?: TargetMarket | string;
+  publication_format?: PublicationFormat | string;
+  primary_genre?: string | null;
+  story_tags?: string[];
+  audience_rating?: string | null;
+  content_warnings?: string[];
+  writing_profile_id?: string | null;
+  writing_profile_version?: number | null;
+  writing_profile_effective_from_chapter?: number | null;
+  writing_profile_name?: string | null;
+  writing_profile_summary?: WritingProfileSummary | string | null;
 }
 
 export interface SeedProposal {

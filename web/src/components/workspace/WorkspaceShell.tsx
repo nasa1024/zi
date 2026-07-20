@@ -19,6 +19,17 @@ const WORKSPACE_LINKS = [
   { suffix: 'settings', label: '设置', short: 'ST' },
 ];
 
+function projectProfileLabel(project: ProjectResponse): string {
+  if (
+    project.writing_profile_summary
+    && typeof project.writing_profile_summary === 'object'
+    && project.writing_profile_summary.display_name
+  ) {
+    return project.writing_profile_summary.display_name;
+  }
+  return project.writing_profile_name ?? project.writing_profile_id ?? 'cn_web_novel_v1';
+}
+
 export default function WorkspaceShell(): JSX.Element {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -55,7 +66,9 @@ export default function WorkspaceShell(): JSX.Element {
 
         <Link className="workspace-project-switcher" to="/studio" aria-label="返回书架切换项目">
           <span className="workspace-project-name">{project.name}</span>
-          <span className="workspace-project-meta">{project.genre} · 书架 ↗</span>
+          <span className="workspace-project-meta">
+            {project.content_language ?? 'zh-CN'} · {projectProfileLabel(project)} · 书架 ↗
+          </span>
         </Link>
 
         <nav className="workspace-primary-nav" aria-label="工作区主导航">

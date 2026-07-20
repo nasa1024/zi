@@ -26,6 +26,11 @@ from ..control_plane.skill_base import DoDOutcome, SkillContext, SkillResult
 from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
+from ..writing_profiles import (
+    compile_system_prompt,
+    normalize_writing_selection,
+    profile_prompt_block,
+)
 
 # PlotSetting 文本字段（power_ranks 单独处理为有序列表）
 _TEXT_FIELDS = (
@@ -89,6 +94,24 @@ _SYSTEM = """\
 只输出 settings 代码块，不要任何额外说明。
 """ % "/".join(GENRE_GENERATABLE)
 
+_SYSTEM_EN = """\
+You are zi's story-development editor. Generate distinct plot-setting options
+that fit the locked writing profile and target English-language market.
+
+Return only one JSON code block named `settings`. Each item must use these
+stable keys: genre, premise, world_setting, power_system, power_ranks,
+protagonist, main_conflict, opening_hook, target_audience, tone.
+
+Rules:
+- All field values must be natural American English; keep the JSON keys above unchanged.
+- premise, protagonist, and main_conflict are required.
+- genre must match the genre supplied by the user.
+- Multiple options must differ materially in their central conflict and progression system.
+- power_ranks, when relevant, run from weakest to strongest.
+- Follow the selected profile's pace, audience boundary, and story signals without imitating any author.
+Do not output commentary outside the `settings` block.
+"""
+
 
 class SettingGenSkill:
     contract = _CONTRACT
@@ -105,7 +128,22 @@ class SettingGenSkill:
 
         locked_fields = ws.get("locked_fields") or []
 
-        stable, dynamic = _build_prompt(ws, n, field, locked, avoid)
+        profile = ws.get("writing_profile")
+        if not isinstance(profile, dict):
+            profile = normalize_writing_selection(ws)
+            profile.update({
+                "profile_id": profile["writing_profile_id"],
+                "profile_version": 1,
+                "writing_profile_version": 1,
+                "cache_key": (
+                    f"{profile['content_language']}:{profile['writing_profile_id']}:"
+                    f"1:{profile['prompt_version']}"
+                ),
+            })
+        ws["writing_profile"] = profile
+        ws.setdefault("content_language", profile["content_language"])
+
+        stable, dynamic = _build_prompt(ws, n, field, locked, avoid, profile=profile)
         user_msg = f"{stable}\n\n{dynamic}" if stable else dynamic
 
         from ..control_plane.llm.provider import CacheHint, Message
@@ -114,8 +152,9 @@ class SettingGenSkill:
             [Message(role="user", content=user_msg)],
             parse=lambda txt: _parse_candidates(
                 txt, n=n, field=field, locked=locked, avoid=avoid,
-                locked_fields=locked_fields, require_n=not field),
-            system=_SYSTEM,
+                locked_fields=locked_fields, require_n=not field,
+                content_language=profile["content_language"]),
+            system=compile_system_prompt(_SYSTEM, profile, english_system=_SYSTEM_EN),
             max_tokens=4096,
             temperature=1.0,
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
@@ -150,9 +189,11 @@ class SettingGenSkill:
 
 # ── prompt 构造 ────────────────────────────────────────────────────────────────
 
-def _build_prompt(ws: dict, n: int, field, locked, avoid) -> tuple[str, str]:
+def _build_prompt(
+    ws: dict, n: int, field, locked, avoid, *, profile: dict | None = None,
+) -> tuple[str, str]:
     """返回 (stable_prefix, dynamic_task)。stable 为可缓存前缀。"""
-    stable_parts: list[str] = []
+    stable_parts: list[str] = [profile_prompt_block(profile)] if profile else []
     if locked:
         kept = {k: v for k, v in locked.items() if v}
         if kept:
@@ -239,9 +280,29 @@ def _normalize(raw: dict) -> dict | None:
     return out
 
 
+def _setting_language_matches(candidate: dict, content_language: str) -> bool:
+    from ..text_metrics import language_matches
+
+    text_fields = (
+        "premise", "world_setting", "power_system", "protagonist",
+        "main_conflict", "opening_hook", "target_audience", "tone",
+    )
+    values = [
+        str(candidate.get(key) or "").strip()
+        for key in text_fields
+        if candidate.get(key)
+    ]
+    ranks = candidate.get("power_ranks") or []
+    if ranks:
+        values.append(" ".join(str(item) for item in ranks))
+    return bool(values) and all(
+        language_matches(value, content_language) for value in values
+    )
+
+
 def _parse_candidates(
     text, n, field=None, locked=None, avoid=None, locked_fields=None,
-    require_n: bool = False,
+    require_n: bool = False, content_language: str = "zh-CN",
 ):
     """解析 LLM 输出为候选列表。失败/同质/不达标返回 None（触发升档/兜底）。"""
     avoid = avoid or []
@@ -270,10 +331,21 @@ def _parse_candidates(
                 return None
         base[field] = new_val
         merged = _normalize(base)
+        if (
+            merged
+            and content_language.startswith("en")
+            and not _setting_language_matches(merged, content_language)
+        ):
+            return None
         return [merged] if merged else None
 
     # ── 多候选：规范化 + genre/必填过滤 ──
     valid = [c for c in (_normalize(p) for p in parsed) if c]
+    if content_language.startswith("en"):
+        valid = [
+            c for c in valid
+            if _setting_language_matches(c, content_language)
+        ]
     if not valid:
         return None
 
@@ -316,6 +388,19 @@ def _fallback_candidate(ws: dict) -> dict:
     if genre not in GENRE_VALUES:
         genre = "default"
     locked = ws.get("locked") or {}
+    if str(ws.get("content_language") or "").startswith("en"):
+        return {
+            "genre": genre,
+            "premise": locked.get("premise") or "[Example] Generation is unavailable; enter your premise manually.",
+            "world_setting": locked.get("world_setting") or "",
+            "power_system": locked.get("power_system") or "[Example] Progression system",
+            "power_ranks": locked.get("power_ranks") or [],
+            "protagonist": locked.get("protagonist") or "[Example] Protagonist",
+            "main_conflict": locked.get("main_conflict") or "[Example] Central conflict",
+            "opening_hook": locked.get("opening_hook") or "",
+            "target_audience": locked.get("target_audience") or "",
+            "tone": locked.get("tone") or "",
+        }
     return {
         "genre": genre,
         "premise": locked.get("premise") or "（示例）生成暂不可用，可在手填模式自行填写。",

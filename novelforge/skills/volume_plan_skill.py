@@ -22,6 +22,11 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..craft.hooks import hook_menu
+from ..writing_profiles import (
+    compile_system_prompt,
+    get_project_writing_profile,
+    normalize_writing_selection,
+)
 
 _CONTRACT = SkillContract(
     name="volume_plan",
@@ -88,6 +93,30 @@ _SYSTEM = """\
     "__ENDING_HOOK_MENU__", hook_menu("ending")
 )
 
+_SYSTEM_EN = """\
+You are zi's volume planner. Produce chapter cards for the requested range in
+natural American English while following the locked writing profile.
+
+Return only a `plans` JSON code block. Every item uses the stable keys chapter,
+title, goal, arc_targets, volume_kr_targets, milestone_targets, must_advance,
+must_resolve, must_include_entities, must_not_reveal, must_not_resolve,
+forbidden_state_changes, target_state, success_criteria, hook_text,
+target_emotion, opening_hook_type, hook_type, expectation_score, and beats.
+
+Plan rules:
+- Chapter numbers are consecutive and exactly match the requested range.
+- Each chapter makes a profile-appropriate change: progress, clue, relationship
+  movement, everyday reward, costly consequence, or another concrete turn.
+- beats contain 3-5 items and finish with a hook; at least one beat is hard.
+- Hooks must vary between adjacent chapters and fit the genre's reader promise.
+- Use only real arc or milestone ids supplied by context.
+- success_criteria and prohibitions must be observable in finished prose.
+- Do not force a power fantasy payoff into every genre.
+- Every user-visible value, including nested target_state values and beat
+  summaries/value axes, must be natural English. Keep schema keys, enum values,
+  and supplied ids unchanged.
+"""
+
 
 class VolumePlanSkill:
     contract = _CONTRACT
@@ -98,37 +127,97 @@ class VolumePlanSkill:
         plan_to: int = ctx.workspace.get("plan_to", plan_from)
         foreshadow_due: list[dict] = ctx.workspace.get("foreshadow_due", [])
         stable: str = ctx.workspace.get("stable_context", "")
+        profile = ctx.workspace.get("writing_profile")
+        if not isinstance(profile, dict):
+            profile = (
+                get_project_writing_profile(ctx.conn, chapter=ctx.target_chapter)
+                if ctx.conn is not None else
+                normalize_writing_selection({"content_language": "zh-CN"})
+            )
+        ctx.workspace["writing_profile"] = profile
+        is_english = str(profile.get("content_language") or "").startswith("en")
 
         parts = []
         if stable:
             parts.append(stable)
-        parts.append(
-            f"## 本卷\n《{brief.get('title', '未命名')}》（第 {brief.get('volume_no', '?')} 卷）\n"
-            f"卷大纲：{brief.get('synopsis') or '（无）'}"
-        )
+        if is_english:
+            parts.append(
+                f"## Volume\n{brief.get('title') or 'Untitled'} (Volume {brief.get('volume_no', '?')})\n"
+                f"Synopsis: {brief.get('synopsis') or '(none)'}"
+            )
+        else:
+            parts.append(
+                f"## 本卷\n《{brief.get('title', '未命名')}》（第 {brief.get('volume_no', '?')} 卷）\n"
+                f"卷大纲：{brief.get('synopsis') or '（无）'}"
+            )
         if brief.get("rolling_summary"):
-            parts.append(f"## 本卷至今\n{brief['rolling_summary']}")
+            parts.append(
+                f"## Volume So Far\n{brief['rolling_summary']}"
+                if is_english else f"## 本卷至今\n{brief['rolling_summary']}"
+            )
         if foreshadow_due:
-            fs = "、".join(f"{f.get('label')}（第{f.get('due_chapter')}章到期）" for f in foreshadow_due)
-            parts.append(f"## 待回收伏笔\n{fs}")
+            if is_english:
+                fs = "; ".join(
+                    f"{f.get('label')} (due by Chapter {f.get('due_chapter')})"
+                    for f in foreshadow_due
+                )
+                parts.append(f"## Foreshadowing Due\n{fs}")
+            else:
+                fs = "、".join(
+                    f"{f.get('label')}（第{f.get('due_chapter')}章到期）"
+                    for f in foreshadow_due
+                )
+                parts.append(f"## 待回收伏笔\n{fs}")
         future = ctx.workspace.get("future_plan_context", "")
         if future:
             parts.append(future)
         hints = ctx.workspace.get("planning_hints", "")
         if hints:
-            parts.append(f"## 作者提示\n{hints}")
-        parts.append(f"## 规划范围\n第 {plan_from} 章 至 第 {plan_to} 章（共 {plan_to - plan_from + 1} 章）")
+            parts.append(
+                f"## Author Guidance\n{hints}"
+                if is_english else f"## 作者提示\n{hints}"
+            )
+        parts.append(
+            f"## Planning Range\nChapters {plan_from}-{plan_to} ({plan_to - plan_from + 1} chapters)"
+            if is_english else
+            f"## 规划范围\n第 {plan_from} 章 至 第 {plan_to} 章（共 {plan_to - plan_from + 1} 章）"
+        )
         user_msg = "\n\n".join(parts)
 
         from ..control_plane.llm.provider import Message
-        resp = ctx.llm.generate(
+        validated = ctx.llm.generate_validated(
             ModelTier.STRONG,
             [Message(role="user", content=user_msg)],
-            system=_SYSTEM,
+            parse=lambda text: _parse_plans_validated(
+                text,
+                plan_from,
+                plan_to,
+                content_language=str(profile.get("content_language") or "zh-CN"),
+            ),
+            system=compile_system_prompt(_SYSTEM, profile, english_system=_SYSTEM_EN),
             max_tokens=8192,
+            max_tier=ModelTier.STRONG,
+            attempts_per_tier=2,
         )
-
-        plans = _parse_plans(resp.text, plan_from, plan_to)
+        resp = validated.response
+        plans = validated.value
+        ctx.workspace["volume_plan_tier_used"] = validated.tier_used
+        ctx.workspace["volume_plan_escalated"] = validated.escalated
+        if plans is None:
+            plans = _fallback_plans(
+                brief,
+                plan_from,
+                plan_to,
+                content_language=str(profile.get("content_language") or "zh-CN"),
+            )
+            reason = "volume_plan_parse_window_or_language_validation_failed"
+            ctx.workspace["volume_plan_degraded"] = True
+            ctx.workspace["volume_plan_fallback_reason"] = reason
+            ctx.workspace["degraded"] = True
+            ctx.workspace["fallback_reason"] = reason
+        else:
+            ctx.workspace["volume_plan_degraded"] = False
+        ctx.workspace["raw_response"] = resp.text
         ctx.workspace["chapter_plans"] = plans
 
         dod = [
@@ -149,31 +238,12 @@ class VolumePlanSkill:
 _VALID_BEAT_TYPES = {"setup", "turn", "payoff_beat", "tension_point", "hook"}
 
 
-def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
+def _parse_plans(
+    text: str, plan_from: int, plan_to: int, *, content_language: str = "zh-CN",
+) -> list[dict]:
     """提取 ```plans 块并解析；截断时逐步补 ] 抢救；过滤越界章节。"""
-    raw = ""
-    m = re.search(r"```plans\s*(.*?)\s*```", text, re.DOTALL)
-    if m:
-        raw = m.group(1)
-    else:
-        m2 = re.search(r"```plans\s*(.*)", text, re.DOTALL)
-        if m2:
-            raw = m2.group(1)
-        else:
-            m3 = re.search(r"\[.*\]", text, re.DOTALL)
-            raw = m3.group(0) if m3 else ""
-    raw = raw.strip()
-    if not raw:
-        return []
-
-    parsed = None
-    for suffix in ("", "]", "}]", '"}]'):
-        try:
-            parsed = json.loads(raw + suffix)
-            break
-        except json.JSONDecodeError:
-            continue
-    if not isinstance(parsed, list):
+    parsed = _decode_plan_items(text)
+    if parsed is None:
         return []
 
     from ..craft.hooks import normalize_hook_type
@@ -188,6 +258,13 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             continue
         if not (plan_from <= ch <= plan_to):
             continue
+        if content_language.startswith("en"):
+            from ..text_metrics import language_matches
+            visible = " ".join(
+                str(p.get(key) or "") for key in ("title", "goal", "hook_text", "target_emotion")
+            )
+            if not language_matches(visible, content_language):
+                continue
         beats = []
         for i, b in enumerate(p.get("beats") or []):
             if not isinstance(b, dict):
@@ -214,6 +291,15 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             exp = max(1, min(5, int(exp))) if exp is not None else None
         except (TypeError, ValueError):
             exp = None
+        default_advance = (
+            "Advance the chapter's stated objective."
+            if content_language.startswith("en") else "推进本章目标"
+        )
+        default_success = (
+            "The prose completes the stated goal and ends with a reason to continue."
+            if content_language.startswith("en") else
+            "完成本章 goal 并以章末钩子形成后续行动动力"
+        )
         plans.append({
             "chapter": ch,
             "title": str(p.get("title", ""))[:100],
@@ -222,7 +308,7 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             "volume_kr_targets": _string_list(p.get("volume_kr_targets")),
             "milestone_targets": _string_list(p.get("milestone_targets")),
             "must_advance": _string_list(p.get("must_advance")) or [
-                str(p.get("goal", "推进本章目标"))[:500]
+                str(p.get("goal") or default_advance)[:500]
             ],
             "must_resolve": _string_list(p.get("must_resolve")),
             "must_include_entities": _string_list(p.get("must_include_entities")),
@@ -231,7 +317,7 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             "forbidden_state_changes": _string_list(p.get("forbidden_state_changes")),
             "target_state": p.get("target_state") if isinstance(p.get("target_state"), dict) else {},
             "success_criteria": _string_list(p.get("success_criteria")) or [
-                "完成本章 goal 并以章末钩子形成后续行动动力"
+                default_success
             ],
             "hook_text": str(p.get("hook_text", ""))[:300],
             "target_emotion": (str(p.get("target_emotion"))[:50]
@@ -242,6 +328,224 @@ def _parse_plans(text: str, plan_from: int, plan_to: int) -> list[dict]:
             "beats": beats,
         })
     plans.sort(key=lambda x: x["chapter"])
+    return plans
+
+
+def _decode_plan_items(text: str) -> list | None:
+    """Decode the raw array while retaining the legacy truncated-JSON rescue."""
+    raw = ""
+    m = re.search(r"```plans\s*(.*?)\s*```", text, re.DOTALL)
+    if m:
+        raw = m.group(1)
+    else:
+        m2 = re.search(r"```plans\s*(.*)", text, re.DOTALL)
+        if m2:
+            raw = m2.group(1)
+        else:
+            m3 = re.search(r"\[.*\]", text, re.DOTALL)
+            raw = m3.group(0) if m3 else ""
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    parsed = None
+    for suffix in ("", "]", "}]", '"}]'):
+        try:
+            parsed = json.loads(raw + suffix)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(parsed, list):
+        return None
+    return parsed
+
+
+_VISIBLE_PLAN_FIELDS = (
+    "title",
+    "goal",
+    "must_advance",
+    "must_resolve",
+    "must_include_entities",
+    "must_not_reveal",
+    "must_not_resolve",
+    "forbidden_state_changes",
+    "target_state",
+    "success_criteria",
+    "hook_text",
+    "target_emotion",
+)
+_CJK_VISIBLE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _parse_plans_validated(
+    text: str,
+    plan_from: int,
+    plan_to: int,
+    *,
+    content_language: str = "zh-CN",
+) -> list[dict] | None:
+    """Return a complete, usable planning window or ``None`` for retry.
+
+    The public ``_parse_plans`` remains intentionally tolerant for legacy
+    callers.  Generation uses this stricter boundary so a syntactically valid
+    partial window or a single wrong-language visible value cannot be applied.
+    """
+    raw_items = _decode_plan_items(text)
+    expected = list(range(plan_from, plan_to + 1))
+    if raw_items is None or not all(isinstance(item, dict) for item in raw_items):
+        return None
+    try:
+        raw_chapters = [int(item.get("chapter")) for item in raw_items]
+    except (TypeError, ValueError):
+        return None
+    if raw_chapters != expected:
+        return None
+
+    plans = _parse_plans(
+        text, plan_from, plan_to, content_language=content_language,
+    )
+    if [plan.get("chapter") for plan in plans] != expected:
+        return None
+
+    for plan in plans:
+        if not all(str(plan.get(field) or "").strip() for field in (
+            "title", "goal", "hook_text",
+        )):
+            return None
+        if not plan.get("must_advance") or not plan.get("success_criteria"):
+            return None
+        beats = plan.get("beats") or []
+        if not (3 <= len(beats) <= 5):
+            return None
+        if beats[-1].get("beat_type") != "hook":
+            return None
+        if not any(beat.get("constraint_level") == "hard" for beat in beats):
+            return None
+        if not all(str(beat.get("summary") or "").strip() for beat in beats):
+            return None
+        if str(content_language).startswith("en") and not _english_plan_values_match(
+            plan, content_language,
+        ):
+            return None
+    return plans
+
+
+def _english_plan_values_match(plan: dict, content_language: str) -> bool:
+    """Validate every user-visible value while ignoring ids and schema enums."""
+    from ..text_metrics import language_matches
+
+    def matches(value, *, include_keys: bool = False) -> bool:
+        if isinstance(value, str):
+            if not value.strip() or not any(char.isalpha() for char in value):
+                return True
+            return not _CJK_VISIBLE_RE.search(value) and language_matches(
+                value, content_language,
+            )
+        if isinstance(value, dict):
+            values = list(value.values())
+            if include_keys:
+                values.extend(value.keys())
+            return all(matches(child, include_keys=include_keys) for child in values)
+        if isinstance(value, (list, tuple)):
+            return all(matches(child, include_keys=include_keys) for child in value)
+        return True
+
+    for field in _VISIBLE_PLAN_FIELDS:
+        if not matches(plan.get(field), include_keys=(field == "target_state")):
+            return False
+    return all(
+        matches(beat.get("summary")) and matches(beat.get("value_axis"))
+        for beat in (plan.get("beats") or [])
+    )
+
+
+def _fallback_plans(
+    brief: dict,
+    plan_from: int,
+    plan_to: int,
+    *,
+    content_language: str,
+) -> list[dict]:
+    """Build a deterministic complete window in the project's language."""
+    is_english = str(content_language).startswith("en")
+    opening_types = ("suspense", "conflict", "anomaly", "action")
+    ending_types = ("decision", "new_threat", "mystery", "relationship")
+    plans: list[dict] = []
+    for offset, chapter in enumerate(range(plan_from, plan_to + 1)):
+        if is_english:
+            title = f"Chapter {chapter}: A Consequence Takes Shape"
+            goal = (
+                f"Chapter {chapter} forces a concrete choice that advances the "
+                "volume and changes the characters' available options."
+            )
+            must_advance = [
+                "Advance the volume through one observable decision or consequence."
+            ]
+            target_state = {
+                "chapter progress": "The chapter ends with a concrete change in the story state."
+            }
+            success = [
+                "The finished prose shows the decision, its immediate result, and the next pressure."
+            ]
+            hook_text = "A new consequence demands action before the next opportunity closes."
+            emotion = "mounting tension"
+            beat_values = (
+                ("setup", "Establish the immediate obstacle and what is at stake.",
+                 "uncertainty to pressure", "hard"),
+                ("tension_point", "Make inaction visibly more costly.",
+                 "pressure to urgency", "soft"),
+                ("turn", "A deliberate choice changes the available options.",
+                 "urgency to consequence", "soft"),
+                ("hook", "Reveal the consequence that drives the next chapter.",
+                 "consequence to anticipation", "hard"),
+            )
+        else:
+            title = f"第{chapter}章：后果初现"
+            goal = f"第{chapter}章以一次明确选择推进本卷，并改变人物接下来的行动空间。"
+            must_advance = ["通过可举证的选择或后果推进本卷。"]
+            target_state = {"章节进展": "章末故事状态发生明确变化。"}
+            success = ["正文呈现选择、即时结果与下一步压力。"]
+            hook_text = "新的后果迫使人物在机会消失前采取行动。"
+            emotion = "紧张递增"
+            beat_values = (
+                ("setup", "建立眼前阻碍与利害关系。", "不确定→压力", "hard"),
+                ("tension_point", "让不行动的代价清晰上升。", "压力→紧迫", "soft"),
+                ("turn", "一次主动选择改变可用方案。", "紧迫→后果", "soft"),
+                ("hook", "揭示推动下一章的新后果。", "后果→期待", "hard"),
+            )
+        plans.append({
+            "chapter": chapter,
+            "title": title,
+            "goal": goal,
+            "arc_targets": [],
+            "volume_kr_targets": [],
+            "milestone_targets": [],
+            "must_advance": must_advance,
+            "must_resolve": [],
+            "must_include_entities": [],
+            "must_not_reveal": [],
+            "must_not_resolve": [],
+            "forbidden_state_changes": [],
+            "target_state": target_state,
+            "success_criteria": success,
+            "hook_text": hook_text,
+            "target_emotion": emotion,
+            "opening_hook_type": opening_types[offset % len(opening_types)],
+            "hook_type": ending_types[offset % len(ending_types)],
+            "expectation_score": 3,
+            "beats": [
+                {
+                    "seq": seq,
+                    "beat_type": beat_type,
+                    "summary": summary,
+                    "value_axis": value_axis,
+                    "arc_id": None,
+                    "constraint_level": constraint_level,
+                }
+                for seq, (beat_type, summary, value_axis, constraint_level)
+                in enumerate(beat_values, start=1)
+            ],
+        })
     return plans
 
 

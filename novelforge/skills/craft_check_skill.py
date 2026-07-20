@@ -15,8 +15,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from ..control_plane.skill_base import DoDOutcome, SkillContext, SkillResult
 from ..control_plane.skill_contract import (
@@ -24,6 +24,7 @@ from ..control_plane.skill_contract import (
 )
 from ..control_plane.llm.tiers import ModelTier
 from ..craft.payoff_binding import check_payoff_binding
+from ..craft.language_quality import check_english_quality
 from ..craft.voice import check_voice_distinctness
 
 
@@ -32,7 +33,10 @@ _CONTRACT = SkillContract(
     version="1.0",
     trigger=SkillTrigger.CRAFT_CHECK,
     model_tier=ModelTier.MID,
-    inputs=IOSpec(["draft_text", "beats", "proposals", "pacing_state"], "草稿+beats+提案+节拍状态"),
+    inputs=IOSpec(
+        ["draft_text", "beats", "proposals", "pacing_state", "writing_profile"],
+        "草稿+beats+提案+节拍状态+可选写作配置",
+    ),
     outputs=IOSpec(["craft_issues"], "CraftIssue 列表"),
     dod=[
         DoDCheck("no_fake_payoff", "无 FAKE_PAYOFF block 问题"),
@@ -51,6 +55,10 @@ class CraftIssue:
     severity: str   # "block" | "warn"
     detail: str
     span: str = ""
+    fix: str = ""
+    repair_scope: str = "local"
+    category: str = ""
+    source: str = "craft"
 
 
 class CraftCheckSkill:
@@ -62,6 +70,14 @@ class CraftCheckSkill:
         proposals: list[dict] = ctx.workspace.get("proposals", [])
         entities: list[dict] = (ctx.workspace.get("recall_pack") and
                                  ctx.workspace["recall_pack"].entities) or []
+        writing_profile = _writing_profile(ctx)
+        content_language = str(
+            writing_profile.get("content_language") or writing_profile.get("language") or ""
+        )
+        english = content_language.lower().replace("_", "-").startswith("en")
+        quality_rules = _mapping(writing_profile.get("quality_rules"))
+        prompt_rules = _mapping(writing_profile.get("prompt_rules"))
+        profile_requires_hook = _requires_hook(prompt_rules, quality_rules)
 
         issues: list[CraftIssue] = []
 
@@ -69,28 +85,44 @@ class CraftCheckSkill:
         issues += _check_value_shift(beats)
 
         # ② hook：末尾有 hook beat
-        issues += _check_hook(beats)
+        if not english or profile_requires_hook:
+            issues += _check_hook(beats)
 
         # ③ pacing：与 pacing_state 比较
         pacing_state = ctx.workspace.get("pacing_state")
-        issues += _check_pacing(beats, pacing_state)
+        if not english:
+            issues += _check_pacing(beats, pacing_state)
 
         # ④ dialogue：对话区分度
-        for vi in check_voice_distinctness(draft_text, entities):
-            issues.append(CraftIssue(check="dialogue", severity=vi.severity, detail=vi.detail))
+        for vi in check_voice_distinctness(
+            draft_text, entities, language=content_language if english else None,
+        ):
+            issues.append(CraftIssue(
+                check="dialogue", severity=vi.severity, detail=vi.detail, span=vi.span,
+            ))
 
         # ⑤ payoff：爽点兑现强制
-        for pi in check_payoff_binding(beats, proposals, ctx.target_chapter, ctx.conn):
-            issues.append(CraftIssue(check="payoff", severity=pi.severity, detail=pi.detail))
+        if not english or bool(quality_rules.get("requires_payoff_event")):
+            for pi in check_payoff_binding(beats, proposals, ctx.target_chapter, ctx.conn):
+                issues.append(CraftIssue(check="payoff", severity=pi.severity, detail=pi.detail))
 
         # ⑥ flat_character（LLM soft check）
-        issues += _check_flat_character_llm(draft_text, ctx)
+        issues += _check_flat_character_llm(
+            draft_text, ctx, language=content_language if english else None,
+        )
 
         # ⑦ beat_contract：beats 条数与 beat_type 合规
         issues += _check_beat_contract(beats)
 
         # ⑧ hook_repeat：连续两章同型章尾钩子（P1#7，确定性零成本）
-        issues += _check_hook_repeat(ctx.conn, ctx.target_chapter)
+        if not english or profile_requires_hook:
+            issues += _check_hook_repeat(ctx.conn, ctx.target_chapter)
+
+        # ⑨ 英文 profile 确定性质量：每条 finding 都携带原文 evidence。
+        if english:
+            issues.extend(_english_findings_as_issues(
+                check_english_quality(draft_text, writing_profile)
+            ))
 
         ctx.workspace["craft_issues"] = [_issue_dict(i) for i in issues]
         blocks = [i for i in issues if i.severity == "block"]
@@ -200,8 +232,22 @@ _FLAT_SYSTEM = """\
 "evidence":"逐字引用草稿原文片段","fix":"一句话修改建议"}
 evidence 必须逐字摘自草稿原文，没有证据的问题不要输出。若无问题输出 []。只输出 JSON 数组。"""
 
+_FLAT_SYSTEM_EN = """\
+You are a fiction craft editor. Check whether characters act only as plot devices,
+without autonomous motivation or a believable emotional response.
+Return a JSON array. Each item must be:
+{"category":"flat_character","severity":"warn","issue":"specific issue",
+ "evidence":"verbatim excerpt from the draft","fix":"one-sentence revision advice"}
+Evidence must be an exact excerpt. Return [] when there is no supported issue.
+Return JSON only."""
 
-def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftIssue]:
+
+def _check_flat_character_llm(
+    draft_text: str,
+    ctx: SkillContext,
+    *,
+    language: str | None = None,
+) -> list[CraftIssue]:
     if not draft_text or len(draft_text) < 200:
         return []
     try:
@@ -215,7 +261,8 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
         resp = ctx.llm.generate(
             ModelTier.MID,
             [Message(role="user", content=prefix + draft_text[:2000])],
-            system=_FLAT_SYSTEM,
+            system=(_FLAT_SYSTEM_EN if str(language or "").lower().startswith("en")
+                    else _FLAT_SYSTEM),
             max_tokens=max_out,
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
@@ -226,7 +273,8 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
             parsed = normalize_findings(json.loads(raw), draft_text, "craft_llm")
             return [
                 CraftIssue(check="flat_character", severity=p["severity"],
-                           detail=p["issue"], span=p["evidence"])
+                           detail=p["issue"], span=p["evidence"], fix=p["fix"],
+                           repair_scope=p["repair_scope"])
                 for p in parsed
             ]
     except Exception:
@@ -237,5 +285,46 @@ def _check_flat_character_llm(draft_text: str, ctx: SkillContext) -> list[CraftI
 def _issue_dict(i: CraftIssue) -> dict:
     return {"check": i.check, "severity": i.severity, "detail": i.detail, "span": i.span,
             # P1#8 findings 字段（旧字段保留，只增不删）
-            "category": f"craft.{i.check}", "issue": i.detail, "evidence": i.span,
-            "fix": "", "repair_scope": "local", "source": "craft"}
+            "category": i.category or f"craft.{i.check}",
+            "issue": i.detail, "evidence": i.span,
+            "fix": i.fix, "repair_scope": i.repair_scope, "source": i.source}
+
+
+def _writing_profile(ctx: SkillContext) -> Mapping[str, Any]:
+    value = ctx.workspace.get("writing_profile") or ctx.extra.get("writing_profile")
+    if isinstance(value, Mapping):
+        return value
+    if ctx.conn is None:
+        return {}
+    from ..writing_profiles import get_project_writing_profile
+    return get_project_writing_profile(ctx.conn, chapter=ctx.target_chapter)
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _requires_hook(
+    prompt_rules: Mapping[str, Any],
+    quality_rules: Mapping[str, Any],
+) -> bool:
+    if quality_rules.get("requires_forward_hook") or quality_rules.get("requires_hook"):
+        return True
+    ending = str(prompt_rules.get("chapter_end") or quality_rules.get("chapter_end") or "").lower()
+    return any(term in ending for term in ("hook", "forward", "cliffhanger"))
+
+
+def _english_findings_as_issues(findings: list[dict]) -> list[CraftIssue]:
+    return [
+        CraftIssue(
+            check=str(finding.get("check") or finding.get("category") or "english_quality"),
+            severity="block" if finding.get("severity") == "block" else "warn",
+            detail=str(finding.get("issue") or finding.get("detail") or ""),
+            span=str(finding.get("evidence") or finding.get("span") or ""),
+            fix=str(finding.get("fix") or ""),
+            repair_scope=str(finding.get("repair_scope") or "local"),
+            category=str(finding.get("category") or finding.get("check") or "english_quality"),
+            source=str(finding.get("source") or "english_deterministic"),
+        )
+        for finding in findings
+    ]

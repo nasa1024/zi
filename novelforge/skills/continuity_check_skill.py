@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from ..control_plane.skill_base import DoDOutcome, Skill, SkillContext, SkillResult
 from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..control_plane.llm.tiers import ModelTier
+from ..text_metrics import language_matches
 from ..validators.types import WorldState
 
 
@@ -21,7 +22,10 @@ _CONTRACT = SkillContract(
     version="1.0",
     trigger=SkillTrigger.CONTINUITY_CHECK,
     model_tier=ModelTier.MID,
-    inputs=IOSpec(["draft_text", "proposals", "world_state"], "草稿 + 提案 + 世界状态"),
+    inputs=IOSpec(
+        ["draft_text", "proposals", "world_state", "writing_profile"],
+        "草稿 + 提案 + 世界状态 + 可选写作配置",
+    ),
     outputs=IOSpec(["continuity_issues"], "Issue 列表"),
     dod=[
         DoDCheck("no_hard_violations", "硬一致性 validator 无 BLOCK 级问题"),
@@ -196,6 +200,32 @@ evidence 必须逐字摘自草稿原文；没有原文证据的问题不要输�
 若无问题，输出 []。只输出 JSON 数组。
 """
 
+_SOFT_SYSTEM_EN = """\
+You are zi's continuity editor. Check the chapter against the supplied canon,
+current world state, chapter contract, and locked writing profile. Report only
+problems supported by an exact excerpt from the draft.
+
+Check these stable classes:
+1 Timeline and causality: absolute-time conflict, duration conflict, impossible
+  simultaneity, effect without setup, effect before cause, abandoned explicit line.
+2 Character continuity: memory conflict, impossible knowledge, unexplained ability
+  change, established ability ignored without a credible reason.
+3 World and scene: world-rule violation, social-rule inconsistency, geography or
+  travel contradiction.
+4 Factual detail: appearance drift, name confusion, quantity mismatch.
+5 Narrative profile: unintended POV shift, narrative-tense shift, tone or style
+  drift relative to the locked writing profile.
+
+Return a JSON array. Each item must use stable English keys:
+{"category":"2.3-ability_change","severity":"warn|block","issue":"specific issue",
+ "evidence":"verbatim continuous excerpt from the draft","fix":"one-sentence fix",
+ "repair_scope":"local|structural"}
+Use structural for fundamental OOC behavior, main-line divergence, timeline structure,
+or POV/tense regime changes. Use block only for a direct contradiction of supplied
+canon (rule, ability, knowledge, inventory, or numeric state); otherwise use warn.
+If there is no exact evidence, omit the finding. Return [] when clean. JSON only.
+"""
+
 
 def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -> list[dict]:
     if not draft_text:
@@ -205,20 +235,78 @@ def _run_soft_check(draft_text: str, proposals: list[dict], ctx: SkillContext) -
         model_id = ctx.llm.model_for(ModelTier.MID)
         caps = ctx.llm._provider.capabilities(model_id)
         max_out = min(caps.max_tokens_out, 2048)   # 软检查只需短列表
+        profile = _resolve_writing_profile(ctx)
+        language = str(profile.get("content_language") or "zh-CN")
+        english = language.lower().replace("_", "-").startswith("en")
         # M1-⑥：跨章软检查共享稳定前缀（前缀缓存命中），设定语境也让软检查更准
         stable = ctx.workspace.get("stable_context", "")
         prefix = f"{stable}\n\n" if stable else ""
+        if english:
+            user_content = (
+                f"{prefix}Draft chapter:\n\n{draft_text[:8000]}\n\n"
+                f"Extracted proposal summary:\n{json.dumps(proposals[:5], ensure_ascii=False)}"
+            )
+        else:
+            user_content = (
+                f"{prefix}草稿：\n\n{draft_text[:6000]}\n\n"
+                f"提案摘要：\n{json.dumps(proposals[:5], ensure_ascii=False)}"
+            )
+        from ..writing_profiles import compile_system_prompt
+        system = compile_system_prompt(
+            _SOFT_SYSTEM,
+            profile,
+            english_system=_SOFT_SYSTEM_EN,
+        )
         resp = ctx.llm.generate(
             ModelTier.MID,
-            [Message(role="user", content=f"{prefix}草稿：\n\n{draft_text[:6000]}\n\n提案摘要：\n{json.dumps(proposals[:5], ensure_ascii=False)}")],
-            system=_SOFT_SYSTEM,
+            [Message(role="user", content=user_content)],
+            system=system,
             max_tokens=max_out,
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
         )
         text = resp.text.strip()
         if text.startswith("["):
             from ..craft.findings import normalize_findings
-            return normalize_findings(json.loads(text), draft_text, "llm_soft")
+            findings = normalize_findings(json.loads(text), draft_text, "llm_soft")
+            if english:
+                findings = [
+                    finding for finding in findings
+                    if language_matches(finding.get("issue", ""), language)
+                    and (
+                        not finding.get("fix")
+                        or language_matches(finding.get("fix", ""), language)
+                    )
+                ]
+            return findings
     except Exception:
         pass
     return []
+
+
+def _resolve_writing_profile(ctx: SkillContext) -> dict[str, Any]:
+    explicit = ctx.workspace.get("writing_profile") or ctx.extra.get("writing_profile")
+    if isinstance(explicit, Mapping):
+        profile = dict(explicit)
+        if "content_language" not in profile and profile.get("language"):
+            profile["content_language"] = profile["language"]
+        if "writing_profile_id" not in profile:
+            profile["writing_profile_id"] = profile.get("profile_id") or profile.get("id")
+        if "writing_profile_version" not in profile and profile.get("profile_version") is not None:
+            profile["writing_profile_version"] = profile["profile_version"]
+        profile.setdefault("content_language", "zh-CN")
+        profile.setdefault("prompt_rules", {})
+        profile.setdefault("quality_rules", {})
+        if not profile.get("cache_key") and profile.get("writing_profile_id"):
+            profile["cache_key"] = (
+                f"{profile['content_language']}:{profile['writing_profile_id']}:"
+                f"{profile.get('writing_profile_version', 0)}:{profile.get('prompt_version', 0)}"
+            )
+        return profile
+    try:
+        from ..writing_profiles import get_project_writing_profile
+
+        return get_project_writing_profile(
+            ctx.conn, chapter=ctx.target_chapter,
+        )
+    except Exception:
+        return {"content_language": "zh-CN", "prompt_rules": {}, "quality_rules": {}}

@@ -225,6 +225,42 @@ class TestMigrations:
         assert old2 == new2 == SCHEMA_VERSION
         conn.close()
 
+    def test_v21_migrated_style_anchor_rights_are_unconfirmed_and_boolean(self, tmp_path):
+        from novelforge.db.migrations.v21 import migrate_v21
+
+        conn = _make_v4_db(tmp_path / "v21_anchor_rights.db")
+        conn.executescript("""
+            CREATE TABLE style_anchors (
+                id TEXT PRIMARY KEY,
+                emotion TEXT NOT NULL,
+                title TEXT,
+                content TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO style_anchors(id, emotion, content)
+            VALUES('legacy_anchor','紧张','旧锚点内容');
+        """)
+
+        migrate_v21(conn)
+
+        row = conn.execute(
+            "SELECT content, language, source_type, rights_confirmed"
+            " FROM style_anchors"
+            " WHERE id='legacy_anchor'"
+        ).fetchone()
+        assert row["content"] == "旧锚点内容"
+        assert row["language"] == "zh-CN"
+        assert row["source_type"] == "legacy"
+        assert row["rights_confirmed"] == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO style_anchors("
+                "id, emotion, content, rights_confirmed)"
+                " VALUES('invalid_rights','紧张','无效',2)"
+            )
+        conn.close()
+
     def test_migrate_data_preserved(self, tmp_path):
         """迁移不删除现有数据。"""
         from novelforge.db.migrations import migrate
@@ -286,7 +322,7 @@ class TestMigrations:
         old, new = migrate(conn)
 
         assert (old, new) == ("18", SCHEMA_VERSION)
-        assert SCHEMA_VERSION == "20"
+        assert SCHEMA_VERSION == "21"
         for table in ("l2_scenes", "scene_vec", "drafts_fts"):
             assert table_exists(conn, table), f"v19 未修复 v18 缺表 {table}"
         assert column_exists(conn, "fact_candidates", "source_draft_id")

@@ -269,8 +269,8 @@ class TestStablePrefix:
         draft_user = user_text(draft_calls[0])
         soft_user = user_text(soft_calls[0])
         # 两者都以同一稳定前缀开头
-        assert draft_user.startswith("## 世界设定（稳定）")
-        assert soft_user.startswith("## 世界设定（稳定）")
+        assert draft_user.startswith("## 项目写作配置（锁定）")
+        assert soft_user.startswith("## 项目写作配置（锁定）")
         prefix_len = 0
         for a, b in zip(draft_user, soft_user):
             if a != b:
@@ -279,6 +279,7 @@ class TestStablePrefix:
         # 公共前缀至少覆盖整个稳定块（含实体名）
         common = draft_user[:prefix_len]
         assert "陆天" in common
+        assert "cn_web_novel_v1" in common
         assert "## 世界设定（稳定）" in common
 
     def test_cache_read_tokens_flow_to_outcome(self, client, project):

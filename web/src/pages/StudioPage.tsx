@@ -7,6 +7,17 @@ import '../styles/studio.css';
 import '../styles/studio-page.css';
 import '../styles/workspace.css';
 
+function projectProfileLabel(project: ProjectResponse): string {
+  if (
+    project.writing_profile_summary
+    && typeof project.writing_profile_summary === 'object'
+    && project.writing_profile_summary.display_name
+  ) {
+    return project.writing_profile_summary.display_name;
+  }
+  return project.writing_profile_name ?? project.writing_profile_id ?? 'cn_web_novel_v1';
+}
+
 function StudioNav(): JSX.Element {
   const { online, version } = useHealth();
   const label = online === null ? '连接中…' : online ? (version ? `v${version}` : '在线') : '离线';
@@ -61,9 +72,13 @@ export default function StudioPage(): JSX.Element {
             {projects.map((project, index) => (
               <article className="project-book" key={project.project_id}>
                 <div className="project-book-index">NF / {String(index + 1).padStart(2, '0')}</div>
-                <span className="project-book-genre">{project.genre}</span>
+                <span className="project-book-genre">{project.primary_genre || project.genre}</span>
                 <h2>{project.name}</h2>
                 <p>{project.premise || '这本书还在等待一句清晰的核心命题。'}</p>
+                <div className="project-book-profile">
+                  <span>{project.content_language ?? 'zh-CN'}</span>
+                  <span>{projectProfileLabel(project)}</span>
+                </div>
                 <dl>
                   <div><dt>章节</dt><dd>{project.chapter_count}</dd></div>
                   <div><dt>Canon</dt><dd>{project.canon_fact_count}</dd></div>

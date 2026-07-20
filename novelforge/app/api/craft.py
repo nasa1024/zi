@@ -341,10 +341,33 @@ def delete_foreshadow(
 
 # ── Style anchors（P1#9 文风锚点）─────────────────────────────────────────────
 
+_RIGHTS_GATED_ANCHOR_SOURCES = {"user", "official", "licensed"}
+
+
+def _require_anchor_rights(source_type: str, rights_confirmed: bool) -> None:
+    if source_type in _RIGHTS_GATED_ANCHOR_SOURCES and not rights_confirmed:
+        raise HTTPException(
+            422,
+            "user/official/licensed 文风锚点必须确认拥有可使用权利",
+        )
+
+
 def _row_to_anchor(row) -> StyleAnchorResponse:
+    keys = set(row.keys())
+    try:
+        profile_tags = json.loads(row["profile_tags"]) if "profile_tags" in keys else []
+    except (json.JSONDecodeError, TypeError):
+        profile_tags = []
     return StyleAnchorResponse(
         id=row["id"], emotion=row["emotion"], title=row["title"],
         content=row["content"], enabled=bool(row["enabled"]),
+        language=row["language"] if "language" in keys else "zh-CN",
+        source_type=row["source_type"] if "source_type" in keys else "legacy",
+        source_note=row["source_note"] if "source_note" in keys else None,
+        rights_confirmed=(
+            bool(row["rights_confirmed"]) if "rights_confirmed" in keys else True
+        ),
+        profile_tags=profile_tags if isinstance(profile_tags, list) else [],
         created_at=row["created_at"],
     )
 
@@ -358,9 +381,22 @@ def create_style_anchor(
     conn = registry.open_conn(project_id)
     try:
         aid = f"anchor_{uuid.uuid4().hex[:12]}"
+        language = req.language
+        if "language" not in req.model_fields_set:
+            from ...writing_profiles import get_project_writing_profile
+
+            language = get_project_writing_profile(conn)["content_language"]
+        _require_anchor_rights(req.source_type, req.rights_confirmed)
         conn.execute(
-            "INSERT INTO style_anchors(id, emotion, title, content) VALUES(?,?,?,?)",
-            (aid, req.emotion, req.title, req.content))
+            "INSERT INTO style_anchors("
+            "id, emotion, title, content, language, source_type, source_note,"
+            " rights_confirmed, profile_tags) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                aid, req.emotion, req.title, req.content, language,
+                req.source_type, req.source_note, int(req.rights_confirmed),
+                json.dumps(req.profile_tags, ensure_ascii=False),
+            ),
+        )
         conn.commit()
         row = conn.execute("SELECT * FROM style_anchors WHERE id=?", (aid,)).fetchone()
         return _row_to_anchor(row)
@@ -372,17 +408,26 @@ def create_style_anchor(
 def list_style_anchors(
     project_id: str,
     emotion: str | None = None,
+    language: str | None = None,
     registry: ProjectRegistry = Depends(get_registry),
 ) -> list[StyleAnchorResponse]:
     conn = registry.open_conn(project_id)
     try:
+        where: list[str] = []
+        params: list[str] = []
         if emotion:
-            rows = conn.execute(
-                "SELECT * FROM style_anchors WHERE emotion=? ORDER BY created_at DESC",
-                (emotion,)).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM style_anchors ORDER BY created_at DESC").fetchall()
+            where.append("emotion=?")
+            params.append(emotion)
+        if language:
+            if language not in {"zh-CN", "en-US", "en-GB"}:
+                raise HTTPException(422, f"不支持的锚点语言: {language}")
+            where.append("language=?")
+            params.append(language)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = conn.execute(
+            f"SELECT * FROM style_anchors{clause} ORDER BY created_at DESC",
+            params,
+        ).fetchall()
         return [_row_to_anchor(r) for r in rows]
     finally:
         conn.close()
@@ -397,9 +442,25 @@ def update_style_anchor(
 ) -> StyleAnchorResponse:
     conn = registry.open_conn(project_id)
     try:
+        current = conn.execute(
+            "SELECT * FROM style_anchors WHERE id=?", (anchor_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
         updates = {k: v for k, v in req.model_dump().items() if v is not None}
+        source_type = updates.get("source_type", current["source_type"])
+        rights_confirmed = bool(
+            updates.get("rights_confirmed", current["rights_confirmed"])
+        )
+        _require_anchor_rights(source_type, rights_confirmed)
         if "enabled" in updates:
             updates["enabled"] = int(updates["enabled"])
+        if "rights_confirmed" in updates:
+            updates["rights_confirmed"] = int(updates["rights_confirmed"])
+        if "profile_tags" in updates:
+            updates["profile_tags"] = json.dumps(
+                updates["profile_tags"], ensure_ascii=False,
+            )
         if updates:
             set_clause = ", ".join(f"{k}=?" for k in updates)
             cur = conn.execute(
@@ -410,8 +471,6 @@ def update_style_anchor(
                 raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
         row = conn.execute(
             "SELECT * FROM style_anchors WHERE id=?", (anchor_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, f"style_anchor 不存在: {anchor_id}")
         return _row_to_anchor(row)
     finally:
         conn.close()

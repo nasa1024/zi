@@ -1,5 +1,6 @@
 import type { RefObject } from 'react';
 import type { SSEStageEvent } from '../../api/types';
+import { countContentUnits } from '../../utils/contentCount';
 
 interface ChapterEditorProps {
   chapter: number;
@@ -14,6 +15,7 @@ interface ChapterEditorProps {
   generating: boolean;
   generationStages: SSEStageEvent[];
   generationError?: string | null;
+  contentLanguage?: string | null;
   onChange: (value: string) => void;
   onSave: () => void;
   onGenerate: () => void;
@@ -32,11 +34,13 @@ export default function ChapterEditor({
   generating,
   generationStages,
   generationError,
+  contentLanguage,
   onChange,
   onSave,
   onGenerate,
 }: ChapterEditorProps): JSX.Element {
-  const count = text.replace(/\s/g, '').length;
+  const count = countContentUnits(text, contentLanguage);
+  const numberLocale = contentLanguage?.startsWith('en') ? 'en-US' : 'zh-CN';
 
   return (
     <main className="manuscript-desk">
@@ -68,7 +72,7 @@ export default function ChapterEditor({
       </header>
 
       <div className="manuscript-meta" aria-live="polite">
-        <span>{count.toLocaleString('zh-CN')} 字符</span>
+        <span>{count.value.toLocaleString(numberLocale)} {count.unit === 'words' ? 'words' : '字符'}</span>
         <span>{saveMessage}</span>
         <span>⌘/Ctrl + S 保存</span>
       </div>

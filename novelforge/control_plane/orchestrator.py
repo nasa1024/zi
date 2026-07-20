@@ -30,6 +30,11 @@ from .llm.gateway import LLMGateway
 from .llm.tiers import ModelTier
 from .skill_base import SkillContext, SkillResult
 from .skill_registry import SkillRegistry, get_registry
+from ..writing_profiles import (
+    compile_system_prompt,
+    get_project_writing_profile,
+    profile_prompt_block,
+)
 
 
 class DraftRevisionConflict(RuntimeError):
@@ -157,6 +162,14 @@ def validate_final_candidate(
     workspace = dict(skill_ctx.workspace)
     workspace["draft_text"] = draft_text
     workspace["proposals"] = list(proposals or [])
+    writing_profile = (
+        workspace.get("writing_profile")
+        or skill_ctx.extra.get("writing_profile")
+        or get_project_writing_profile(
+            skill_ctx.conn, chapter=skill_ctx.target_chapter,
+        )
+    )
+    workspace["writing_profile"] = writing_profile
     context = plan_context or workspace.get("plan_context")
     if context is None:
         context = gather_plan_context(skill_ctx.conn, skill_ctx.target_chapter)
@@ -177,7 +190,7 @@ def validate_final_candidate(
         llm=skill_ctx.llm,
         conn=skill_ctx.conn,
         workspace=workspace,
-        extra=dict(skill_ctx.extra),
+        extra={**skill_ctx.extra, "writing_profile": writing_profile},
     )
     reg = registry or get_registry()
 
@@ -222,6 +235,7 @@ def validate_final_candidate(
             judge_tier,
             workspace.get("chapter_goal", ""),
             draft_text,
+            writing_profile,
         )
     return {
         "ok": not hard_blocks,
@@ -262,6 +276,7 @@ class Orchestrator:
     ) -> ChapterOutcome:
         cfg = self._cfg
         ledger = self._gw.ledger
+        writing_profile = get_project_writing_profile(conn, chapter=chapter)
         # 成本快照：落库本章净消耗（调用方复用 ledger 跨章时差值依然正确）
         _tokens0, _usd0 = ledger.tokens_spent, ledger.usd_spent
         _cache0 = getattr(ledger, "cache_read_tokens", 0)
@@ -272,10 +287,22 @@ class Orchestrator:
 
         # ── 0. init workspace + pipeline_run 状态机 ──────────────────────────
         run_id = new_id("run")
-        _begin_pipeline_run(conn, chapter, cfg.project_id, run_id)
+        try:
+            generation_model = self._gw.model_for(ModelTier.STRONG)
+        except Exception:
+            generation_model = None
+        _begin_pipeline_run(
+            conn, chapter, cfg.project_id, run_id,
+            writing_profile=writing_profile, model_id=generation_model,
+        )
         workspace: dict = {
             "chapter_goal": chapter_goal,
+            "writing_profile": writing_profile,
+            "profile_cache_key": writing_profile["cache_key"],
         }
+        quality_rules = writing_profile.get("quality_rules") or {}
+        target_range = quality_rules.get("chapter_word_range") or [1500, 2500]
+        target_words = int((int(target_range[0]) + int(target_range[1])) / 2)
         skill_ctx = SkillContext(
             project_id=cfg.project_id,
             target_chapter=chapter,
@@ -285,7 +312,11 @@ class Orchestrator:
             llm=self._gw,
             conn=conn,
             workspace=workspace,
-            extra={"draft_target_chars": cfg.draft_target_chars},
+            extra={
+                "draft_target_chars": cfg.draft_target_chars,
+                "draft_target_words": target_words,
+                "writing_profile": writing_profile,
+            },
         )
 
         pacing = PacingController()
@@ -319,17 +350,34 @@ class Orchestrator:
             workspace["world_state"] = world_state
             # M1-⑥：稳定前缀一次构建（含标题头，保证各 skill 的 user 消息从第 0 字节
             # 起完全一致），draft/check/revise 共享，吃 provider 前缀缓存
-            _stable = recall_pack.to_stable_context_str()
-            workspace["stable_context"] = f"## 世界设定（稳定）\n{_stable}" if _stable else ""
-            workspace["dynamic_context"] = recall_pack.to_dynamic_context_str()
+            content_language = writing_profile["content_language"]
+            _stable = recall_pack.to_stable_context_str(content_language)
+            _world_stable = (
+                (f"## Stable world context\n{_stable}" if content_language.startswith("en")
+                 else f"## 世界设定（稳定）\n{_stable}")
+                if _stable else ""
+            )
+            workspace["stable_context"] = "\n\n".join(
+                part for part in (profile_prompt_block(writing_profile), _world_stable)
+                if part
+            )
+            workspace["dynamic_context"] = recall_pack.to_dynamic_context_str(
+                content_language,
+            )
 
             # v16：历史事实继续严格 as_of(N-1)；未来路线走独立 PlanContext，
             # 只作为作者意图/创作护栏，绝不进入 World State 或 canon。
             plan_context = gather_plan_context(conn, chapter, lookahead_chapters=5)
             workspace["plan_context"] = plan_context
-            workspace["future_plan_context"] = plan_context.render_for_planner()
-            workspace["future_guardrails"] = plan_context.render_guardrails_for_draft()
-            workspace["chapter_contract_context"] = plan_context.render_contract_for_draft()
+            workspace["future_plan_context"] = plan_context.render_for_planner(
+                content_language,
+            )
+            workspace["future_guardrails"] = plan_context.render_guardrails_for_draft(
+                content_language,
+            )
+            workspace["chapter_contract_context"] = plan_context.render_contract_for_draft(
+                content_language,
+            )
 
             # P1#9：文风锚点 few-shot——按本章细纲目标情绪选段，注入动态段。
             # 无情绪/无匹配锚点 → 空块（fail-fast 不瞎编）；不碰稳定前缀，缓存无损。
@@ -343,12 +391,19 @@ class Orchestrator:
             except sqlite3.OperationalError:
                 target_emotion = None   # 老库无 v13 列
             workspace["style_anchor_block"] = render_anchor_block(
-                pick_style_anchors(conn, target_emotion))
+                pick_style_anchors(
+                    conn,
+                    target_emotion,
+                    language=writing_profile["content_language"],
+                    profile_tags=writing_profile.get("story_tags") or [],
+                ),
+                language=writing_profile["content_language"],
+            )
 
             # PacingController：读取节拍状态，附加建议到 chapter_goal
             pacing_state = pacing.get_state(conn)
             workspace["pacing_state"] = pacing_state
-            hint = pacing.recommend_beat_hint(pacing_state)
+            hint = _profile_pacing_hint(writing_profile, pacing, pacing_state)
             if hint:
                 workspace["chapter_goal"] = (chapter_goal + "\n" + hint).strip()
 
@@ -433,6 +488,7 @@ class Orchestrator:
                     plan_context=plan_context,
                     gateway=self._gw,
                     judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
+                    writing_profile=writing_profile,
                 )
                 winner = cand_list[report["winner"]]
                 workspace["draft_text"] = winner["draft_text"]
@@ -440,7 +496,14 @@ class Orchestrator:
                 workspace["candidate_report"] = {
                     **report,
                     "n_candidates": n_cands,
-                    "lengths": [len(c["draft_text"]) for c in cand_list],
+                    "lengths": [
+                        _content_units(c["draft_text"], writing_profile["content_language"])
+                        for c in cand_list
+                    ],
+                    "length_unit": (
+                        "words" if writing_profile["content_language"].startswith("en")
+                        else "characters"
+                    ),
                     "beats": list(workspace.get("beats") or []),
                     "selected_by": "auto",
                     # 候选全文 + 提案持久化（M6: human_gate 下前端 3 选 1 换稿的数据源）
@@ -459,14 +522,62 @@ class Orchestrator:
                         "reason": report["reason"],
                     })
 
-            _draft_chars = len(workspace.get("draft_text", ""))
+            _draft_length = _content_units(
+                workspace.get("draft_text", ""), writing_profile["content_language"]
+            )
             if progress_cb:
-                progress_cb("draft", "ok" if (draft_ok or workspace.get("draft_text")) else "blocked",
-                            {"chars": _draft_chars})
+                draft_stage_ok = bool(
+                    draft_ok
+                    or (
+                        workspace.get("draft_text")
+                        and not writing_profile["content_language"].startswith("en")
+                    )
+                )
+                progress_cb("draft", "ok" if draft_stage_ok else "blocked",
+                            {
+                                "length": _draft_length,
+                                "unit": "words" if writing_profile["content_language"].startswith("en") else "characters",
+                            })
             if not draft_ok and not workspace.get("draft_text"):
+                _fail_pipeline_run(
+                    conn, run_id, "draft_empty", {"chapter": chapter},
+                )
                 return ChapterOutcome(
                     chapter=chapter, ok=False, run_id=run_id,
                     error="draft 失败: 所有候选均无产出",
+                    usage_tokens=ledger.tokens_spent - _tokens0,
+                    usage_usd=ledger.usd_spent - _usd0,
+                    cache_read_tokens=(
+                        getattr(ledger, "cache_read_tokens", 0) - _cache0
+                    ),
+                )
+
+            # English language and hard word floor are locked profile
+            # constraints, not advisory craft findings.  The drafting skill has
+            # already retried invalid output; never extract or persist a last
+            # invalid response merely because it contains some text.
+            profile_blocks = _locked_profile_blocks(
+                workspace.get("draft_text", ""), writing_profile,
+            )
+            if profile_blocks:
+                _fail_pipeline_run(
+                    conn, run_id, "writing_profile_constraints", {
+                        "chapter": chapter,
+                        "issues": profile_blocks,
+                    },
+                )
+                if progress_cb:
+                    progress_cb("draft", "blocked", {
+                        "reason": "writing_profile_constraints",
+                        "issues": profile_blocks,
+                    })
+                return ChapterOutcome(
+                    chapter=chapter,
+                    ok=False,
+                    run_id=run_id,
+                    draft_text=workspace.get("draft_text", ""),
+                    issues=profile_blocks,
+                    error="draft failed locked writing-profile constraints",
                     usage_tokens=ledger.tokens_spent - _tokens0,
                     usage_usd=ledger.usd_spent - _usd0,
                     cache_read_tokens=(
@@ -546,10 +657,48 @@ class Orchestrator:
                     {"source": "craft", **i} for i in craft_issues
                 ] + plan_issues
 
+            # A revise/polish pass can replace the accepted text.  Re-evaluate
+            # the two locked English constraints immediately before durability
+            # so no later mutation can bypass them.
+            final_profile_blocks = _locked_profile_blocks(
+                workspace.get("draft_text", ""), writing_profile,
+            )
+            if final_profile_blocks:
+                all_issues = _merge_issues(all_issues, final_profile_blocks)
+                _fail_pipeline_run(
+                    conn, run_id, "writing_profile_constraints", {
+                        "chapter": chapter,
+                        "issues": final_profile_blocks,
+                    },
+                )
+                if progress_cb:
+                    progress_cb("check", "blocked", {
+                        "reason": "writing_profile_constraints",
+                        "issues": final_profile_blocks,
+                    })
+                return ChapterOutcome(
+                    chapter=chapter,
+                    ok=False,
+                    run_id=run_id,
+                    draft_text=workspace.get("draft_text", ""),
+                    issues=all_issues,
+                    error="revised draft failed locked writing-profile constraints",
+                    usage_tokens=ledger.tokens_spent - _tokens0,
+                    usage_usd=ledger.usd_spent - _usd0,
+                    cache_read_tokens=(
+                        getattr(ledger, "cache_read_tokens", 0) - _cache0
+                    ),
+                    quality_score=quality_score,
+                    quality_dimensions=workspace.get("quality_dimensions"),
+                )
+
             # ── 6. COMMIT-DRAFT（P1#11：正文先落袋，结算失败不丢章）─────────
             draft_text: str = workspace.get("draft_text", "")
             proposals: list[dict] = list(workspace.get("proposals") or [])
-            draft_id = _persist_draft(conn, draft_text, chapter, cfg.project_id, cfg.db_path)
+            draft_id = _persist_draft(
+                conn, draft_text, chapter, cfg.project_id, cfg.db_path,
+                writing_profile=writing_profile,
+            )
 
             try:
                 alignment = evaluate_and_persist_alignment(
@@ -605,6 +754,18 @@ class Orchestrator:
             )
 
             run_detail = workspace.get("candidate_report")
+            run_detail = {
+                **(run_detail or {}),
+                "writing_profile": {
+                    "content_language": writing_profile["content_language"],
+                    "profile_id": writing_profile["writing_profile_id"],
+                    "profile_version": writing_profile["writing_profile_version"],
+                    "catalog_version": writing_profile["writing_profile_catalog_version"],
+                    "prompt_version": writing_profile["prompt_version"],
+                    "effective_from_chapter": writing_profile["effective_from_chapter"],
+                },
+                "model": generation_model,
+            }
             if workspace.get("patch_stats"):
                 run_detail = {**(run_detail or {}), "patch_stats": workspace["patch_stats"]}
             if workspace.get("quality_dimensions"):
@@ -787,7 +948,15 @@ class Orchestrator:
 
         _step("l1_atoms", _write_l1)
         beats = workspace.get("beats", [])
-        _step("pacing", lambda: pacing.update(chapter, beats, len(draft_text), conn))
+        _step("pacing", lambda: pacing.update(
+            chapter,
+            beats,
+            _content_units(
+                draft_text,
+                str((workspace.get("writing_profile") or {}).get("content_language") or "zh-CN"),
+            ),
+            conn,
+        ))
         if getattr(cfg.recall, "enable_summaries", True) and draft_text:
             _step("summary", lambda: _persist_chapter_summary(
                 conn, self._gw, chapter, draft_text))
@@ -875,8 +1044,16 @@ class Orchestrator:
         if isinstance(w, int) and w < len(scores) and scores[w] is not None:
             score = float(scores[w])
         if score is None:
-            detail = score_chapter_detailed(self._gw, judge_tier, chapter_goal,
-                                            ctx.workspace.get("draft_text", ""))
+            detail = score_chapter_detailed(
+                self._gw,
+                judge_tier,
+                chapter_goal,
+                ctx.workspace.get("draft_text", ""),
+                ctx.extra.get("writing_profile")
+                or get_project_writing_profile(
+                    ctx.conn, chapter=ctx.target_chapter,
+                ),
+            )
             if detail is not None:
                 score = detail["score"]
                 if detail["dimensions"]:
@@ -899,7 +1076,15 @@ class Orchestrator:
                     ctx.workspace["draft_text"] = polished
                     self._reg.invoke("craft_check", ctx)
                     new_detail = score_chapter_detailed(
-                        self._gw, judge_tier, chapter_goal, polished)
+                        self._gw,
+                        judge_tier,
+                        chapter_goal,
+                        polished,
+                        ctx.extra.get("writing_profile")
+                        or get_project_writing_profile(
+                            ctx.conn, chapter=ctx.target_chapter,
+                        ),
+                    )
                     if new_detail is not None and new_detail["score"] >= score:
                         score = new_detail["score"]
                         if new_detail["dimensions"]:
@@ -926,7 +1111,14 @@ class Orchestrator:
         """
         from ..craft.findings import findings_to_issues_str
         draft_text: str = ctx.workspace.get("draft_text", "")
-        warns_str = findings_to_issues_str(craft_warns) or "- 整体打磨节奏与钩子"
+        profile = ctx.workspace.get("writing_profile") or get_project_writing_profile(
+            ctx.conn, chapter=ctx.target_chapter,
+        )
+        is_english = profile["content_language"].startswith("en")
+        warns_str = findings_to_issues_str(craft_warns) or (
+            "- Improve pacing, prose clarity, and the continuation hook."
+            if is_english else "- 整体打磨节奏与钩子"
+        )
         stable = ctx.workspace.get("stable_context", "")
 
         if getattr(self._cfg, "patch_revise", True):
@@ -934,7 +1126,9 @@ class Orchestrator:
             patches = generate_patches(
                 self._gw, ModelTier.MID,
                 stable_context=stable, draft_text=draft_text[:8000],
-                issues_str=warns_str, task_label="润色补丁任务",
+                issues_str=warns_str,
+                task_label="Polish Patch Task" if is_english else "润色补丁任务",
+                writing_profile=profile,
             )
             if patches:
                 result = apply_patches(draft_text, patches)
@@ -943,8 +1137,16 @@ class Orchestrator:
                     return result.text
 
         from .llm.provider import CacheHint, Message
-        system = ("你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
-                  "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。")
+        system = compile_system_prompt(
+            "你是 NovelForge 润色助手。在不改变情节走向、人物行为与事实设定的前提下"
+            "润色草稿，重点解决列出的工艺问题。只输出润色后的完整草稿，不要其他说明。",
+            profile,
+            english_system=(
+                "You are zi's prose editor. Fix only the listed craft problems while preserving "
+                "plot direction, character actions, facts, point of view, tense, and American "
+                "English spelling. Return only the complete polished chapter."
+            ),
+        )
         prefix = f"{stable}\n\n" if stable else ""
         # P1#9：润色是文风敏感环节，注入锚点块（锚点补丁分支不注入——局部修复
         # 引入风格样本反而引导改写过多）
@@ -954,7 +1156,11 @@ class Orchestrator:
             [Message(role="user", content=(
                 f"{prefix}"
                 + (f"{anchor_block}\n\n" if anchor_block else "")
-                + f"工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
+                + (
+                    f"Craft issues:\n{warns_str}\n\nCurrent draft:\n{draft_text[:9000]}"
+                    if is_english else
+                    f"工艺问题：\n{warns_str}\n\n当前草稿：\n{draft_text[:6000]}"
+                )
             ))],
             system=system,
             max_tokens=8192,
@@ -967,6 +1173,10 @@ class Orchestrator:
         draft_text: str = ctx.workspace.get("draft_text", "")
         issues_str = findings_to_issues_str(hard_blocks)
         stable = ctx.workspace.get("stable_context", "")
+        profile = ctx.workspace.get("writing_profile") or get_project_writing_profile(
+            ctx.conn, chapter=ctx.target_chapter,
+        )
+        is_english = profile["content_language"].startswith("en")
 
         # P0#2/P1#8（inkos repair_scope 路由）：结构性问题（OOC/主线偏离/时间线）
         # 补丁救不了，跳过锚点补丁直接全文重写；全 local 才走补丁。
@@ -977,7 +1187,9 @@ class Orchestrator:
             patches = generate_patches(
                 self._gw, ModelTier.STRONG,
                 stable_context=stable, draft_text=draft_text[:8000],
-                issues_str=issues_str, task_label="修订补丁任务",
+                issues_str=issues_str,
+                task_label="Revision Patch Task" if is_english else "修订补丁任务",
+                writing_profile=profile,
             )
             if patches:
                 result = apply_patches(draft_text, patches)
@@ -986,12 +1198,23 @@ class Orchestrator:
                     return {"draft_text": result.text}
 
         from .llm.provider import CacheHint, Message
-        system = "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。"
+        system = compile_system_prompt(
+            "你是 NovelForge 修订助手。根据以下一致性问题修改草稿。只输出修改后的完整草稿，不要其他说明。",
+            profile,
+            english_system=(
+                "You are zi's revision editor. Correct the listed continuity and profile "
+                "violations while preserving unaffected events and prose. Keep the configured "
+                "point of view, tense, and American English. Return only the complete revised chapter."
+            ),
+        )
         prefix = f"{stable}\n\n" if stable else ""
         user_msg = (
             f"{prefix}"
-            f"一致性问题：\n{issues_str}\n\n"
-            f"当前草稿：\n{draft_text[:4000]}"
+            + (
+                f"Issues to correct:\n{issues_str}\n\nCurrent draft:\n{draft_text[:9000]}"
+                if is_english else
+                f"一致性问题：\n{issues_str}\n\n当前草稿：\n{draft_text[:4000]}"
+            )
         )
         resp = ctx.llm.generate(
             ModelTier.STRONG,
@@ -1015,6 +1238,37 @@ def _infer_entity_ids(conn: sqlite3.Connection, chapter: int, limit: int = 10) -
         return [r["entity_id"] for r in rows]
     rows = conn.execute("SELECT id FROM entities LIMIT ?", (limit,)).fetchall()
     return [r["id"] for r in rows]
+
+
+def _content_units(text: str, language: str) -> int:
+    from ..text_metrics import count_content_units
+
+    return count_content_units(text or "", language)
+
+
+def _profile_pacing_hint(profile: dict, pacing: PacingController, state) -> str:
+    """Keep legacy cadence for Chinese; English rules follow the profile."""
+    if not str(profile.get("content_language") or "").startswith("en"):
+        return pacing.recommend_beat_hint(state)
+    if state.needs_cooldown:
+        return (
+            "Pacing note: recent chapters have stayed at high tension. Let this chapter "
+            "breathe through character reaction, consequence, or relationship movement."
+        )
+    quality = profile.get("quality_rules") or {}
+    if not quality.get("requires_progress_event"):
+        return ""
+    if state.needs_big_payoff and state.buildup >= 5:
+        return (
+            "Pacing note: deliver an earned major progress event that resolves prior setup "
+            "and creates a concrete new cost or objective."
+        )
+    if state.needs_small_payoff:
+        return (
+            "Pacing note: include at least one observable, earned progress event or useful "
+            "feedback loop in this chapter."
+        )
+    return ""
 
 
 def _proposals_to_candidates(
@@ -1085,14 +1339,37 @@ def _resolve_entity(ref: str, conn: sqlite3.Connection) -> Optional[str]:
     return row["id"] if row else None
 
 
-def _begin_pipeline_run(conn: sqlite3.Connection, chapter: int, project_id: str, run_id: str) -> None:
+def _begin_pipeline_run(
+    conn: sqlite3.Connection,
+    chapter: int,
+    project_id: str,
+    run_id: str,
+    *,
+    writing_profile: Optional[dict] = None,
+    model_id: Optional[str] = None,
+) -> None:
     """在 pipeline_run 表插入 'running' 行（F6 状态机开始）。"""
     try:
-        conn.execute(
-            "INSERT OR IGNORE INTO pipeline_run(run_id, chapter, project_id, status)"
-            " VALUES(?, ?, ?, 'running')",
-            (run_id, chapter, project_id),
-        )
+        profile = writing_profile or {}
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO pipeline_run("
+                "run_id, chapter, project_id, status, content_language,"
+                " writing_profile_id, writing_profile_version, prompt_version, model_id)"
+                " VALUES(?, ?, ?, 'running', ?, ?, ?, ?, ?)",
+                (
+                    run_id, chapter, project_id,
+                    profile.get("content_language"), profile.get("writing_profile_id"),
+                    profile.get("writing_profile_version"), profile.get("prompt_version"),
+                    model_id,
+                ),
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                "INSERT OR IGNORE INTO pipeline_run(run_id, chapter, project_id, status)"
+                " VALUES(?, ?, ?, 'running')",
+                (run_id, chapter, project_id),
+            )
         conn.commit()
     except Exception:
         pass
@@ -1118,6 +1395,61 @@ def _complete_pipeline_run(
         conn.commit()
     except Exception:
         pass
+
+
+def _fail_pipeline_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    reason: str,
+    detail: Optional[dict] = None,
+) -> None:
+    """Close a run rejected before draft durability using the legacy state enum."""
+    try:
+        payload = {"failure_reason": reason, **(detail or {})}
+        conn.execute(
+            "UPDATE pipeline_run SET status='crashed', detail_json=?,"
+            " finished_at=datetime('now') WHERE run_id=?",
+            (json.dumps(payload, ensure_ascii=False), run_id),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _locked_profile_blocks(text: str, writing_profile: dict) -> list[dict]:
+    """Return only non-negotiable language/length findings for English prose."""
+    language = str(writing_profile.get("content_language") or "")
+    if not language.startswith("en"):
+        return []
+    from ..craft.language_quality import check_english_quality
+
+    blocks: list[dict] = []
+    for finding in check_english_quality(text, writing_profile):
+        category = str(finding.get("category") or "")
+        if finding.get("severity") != "block" or category not in {
+            "language_match", "word_count_range",
+        }:
+            continue
+        blocks.append({
+            "source": "craft",
+            "check": category,
+            **finding,
+        })
+    return blocks
+
+
+def _merge_issues(existing: list[dict], additions: list[dict]) -> list[dict]:
+    merged = list(existing)
+    seen = {
+        (item.get("source"), item.get("check"), item.get("detail") or item.get("issue"))
+        for item in merged
+    }
+    for item in additions:
+        key = (item.get("source"), item.get("check"), item.get("detail") or item.get("issue"))
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
 
 
 def _flip_overdue_foreshadow(conn: sqlite3.Connection, chapter: int) -> None:
@@ -1169,6 +1501,13 @@ _SUMMARY_SYSTEM = """\
 ① 发生了什么（关键事件）；② 谁的状态/关系变了；③ 章末悬念或情绪落点。
 只输出摘要正文，不要标题、不要解释。"""
 
+_SUMMARY_SYSTEM_EN = """\
+You are zi's continuity summarizer. In no more than 180 words, objectively
+summarize: (1) the chapter's key events, (2) meaningful state or relationship
+changes, and (3) the ending question or emotional landing. Write natural
+American English. Return only the summary, with no heading or commentary.
+"""
+
 
 def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: str) -> None:
     """§06.2.2 L2 场景聚合。触发=每 N 章 或 卷末；聚合当前章 + 回填本窗口缺 L2 的章。
@@ -1191,7 +1530,14 @@ def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: st
 
     kw = dict(max_scenes=mcfg.l2_max_scenes_per_chapter, tier=mcfg.l2_tier, embedder=embedder)
     # 当前章用手头正文（可能尚未 flush 到 L0）
-    aggregate_chapter_scenes(conn, gateway, chapter, draft_text, **kw)
+    aggregate_chapter_scenes(
+        conn,
+        gateway,
+        chapter,
+        draft_text,
+        writing_profile=get_project_writing_profile(conn, chapter=chapter),
+        **kw,
+    )
     # 回填窗口内更早、尚无 L2 的章（从 L0 读回）
     window_start = max(1, chapter - n + 1)
     pending = set(pending_l2_chapters(conn, chapter))
@@ -1200,7 +1546,14 @@ def _run_l2(conn: sqlite3.Connection, gateway, cfg, chapter: int, draft_text: st
             continue
         text = _load_chapter_text(conn, ch)
         if text:
-            aggregate_chapter_scenes(conn, gateway, ch, text, **kw)
+            aggregate_chapter_scenes(
+                conn,
+                gateway,
+                ch,
+                text,
+                writing_profile=get_project_writing_profile(conn, chapter=ch),
+                **kw,
+            )
 
 
 def _run_l3(
@@ -1210,7 +1563,14 @@ def _run_l3(
     """§06.2.3 L3 事件驱动 canon 提案。产出的提案进 staging（proposed，人审兜底）。"""
     from ..memory.l3_events import extract_canon_events
 
-    proposals = extract_canon_events(conn, gateway, chapter, draft_text, tier=cfg.memory.l3_tier)
+    proposals = extract_canon_events(
+        conn,
+        gateway,
+        chapter,
+        draft_text,
+        tier=cfg.memory.l3_tier,
+        writing_profile=get_project_writing_profile(conn, chapter=chapter),
+    )
     if proposals:
         _proposals_to_candidates(
             proposals, chapter, conn, source_draft_id=draft_id
@@ -1240,13 +1600,30 @@ def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, dr
     from .llm.tiers import ModelTier
 
     try:
+        profile = get_project_writing_profile(conn, chapter=chapter)
+        is_english = profile["content_language"].startswith("en")
         resp = gateway.generate(
             ModelTier.FAST,
-            [Message(role="user", content=f"第 {chapter} 章正文：\n\n{draft_text[:6000]}")],
-            system=_SUMMARY_SYSTEM,
+            [Message(
+                role="user",
+                content=(
+                    f"Chapter {chapter} text:\n\n{draft_text[:9000]}"
+                    if is_english else f"第 {chapter} 章正文：\n\n{draft_text[:6000]}"
+                ),
+            )],
+            system=compile_system_prompt(
+                _SUMMARY_SYSTEM, profile, english_system=_SUMMARY_SYSTEM_EN,
+            ),
             max_tokens=400,
         )
         summary = resp.text.strip()
+        if is_english:
+            from ..text_metrics import count_words, language_matches
+            if not summary or not language_matches(summary, profile["content_language"]):
+                words = draft_text.split()
+                summary = " ".join(words[: min(180, len(words))])
+            elif count_words(summary) > 180:
+                summary = " ".join(summary.split()[:180])
         if not summary:
             return
 
@@ -1281,7 +1658,7 @@ def _persist_chapter_summary(conn: sqlite3.Connection, gateway, chapter: int, dr
 
         # 全局梗概：每 10 章或卷末刷新（M2-② 第三层，跨卷长程记忆的地基）
         if chapter % 10 == 0 or at_volume_end:
-            _update_global_synopsis(conn, gateway)
+            _update_global_synopsis(conn, gateway, as_of_chapter=chapter)
     except Exception:
         pass
 
@@ -1297,15 +1674,37 @@ def _rollup_volume_summary(conn: sqlite3.Connection, gateway, volume_no: int) ->
     ).fetchall()
     if not rows:
         return
-    joined = "\n".join(f"第{r['chapter']}章：{r['summary']}" for r in rows)
+    as_of_chapter = max(int(row["chapter"]) for row in rows)
+    profile = get_project_writing_profile(conn, chapter=as_of_chapter)
+    is_english = profile["content_language"].startswith("en")
+    joined = "\n".join(
+        (f"Chapter {r['chapter']}: {r['summary']}" if is_english
+         else f"第{r['chapter']}章：{r['summary']}")
+        for r in rows
+    )
     resp = gateway.generate(
         ModelTier.FAST,
-        [Message(role="user", content=f"以下是本卷各章摘要：\n\n{joined[:8000]}")],
-        system="你是 NovelForge 的卷情节梳理助手。把各章摘要压缩成不超过 300 字的本卷剧情概要，"
-               "保留主线推进、关键转折与当前悬而未决的冲突。只输出概要正文。",
+        [Message(role="user", content=(
+            f"Chapter summaries for this volume:\n\n{joined[:10000]}"
+            if is_english else f"以下是本卷各章摘要：\n\n{joined[:8000]}"
+        ))],
+        system=compile_system_prompt(
+            "你是 NovelForge 的卷情节梳理助手。把各章摘要压缩成不超过 300 字的本卷剧情概要，"
+            "保留主线推进、关键转折与当前悬而未决的冲突。只输出概要正文。",
+            profile,
+            english_system=(
+                "You are zi's volume summarizer. Compress the chapter summaries into at most "
+                "250 English words, retaining main-line movement, key turns, and unresolved "
+                "pressures. Return only the summary."
+            ),
+        ),
         max_tokens=500,
     )
     summary = resp.text.strip()
+    if is_english:
+        from ..text_metrics import language_matches
+        if not language_matches(summary, profile["content_language"]):
+            summary = " ".join(joined.split()[:250])
     if summary:
         conn.execute(
             "UPDATE volumes SET rolling_summary=? WHERE volume_no=?",
@@ -1314,7 +1713,12 @@ def _rollup_volume_summary(conn: sqlite3.Connection, gateway, volume_no: int) ->
         conn.commit()
 
 
-def _update_global_synopsis(conn: sqlite3.Connection, gateway) -> None:
+def _update_global_synopsis(
+    conn: sqlite3.Connection,
+    gateway,
+    *,
+    as_of_chapter: Optional[int] = None,
+) -> None:
     """M2-② 第三层：把各卷滚动摘要 + 近期章摘要压成 ≤400 字全书梗概，存 meta_kv。"""
     from .llm.provider import Message
     from .llm.tiers import ModelTier
@@ -1327,19 +1731,51 @@ def _update_global_synopsis(conn: sqlite3.Connection, gateway) -> None:
     ch_rows = conn.execute(
         "SELECT chapter, summary FROM chapter_summaries ORDER BY chapter DESC LIMIT 5",
     ).fetchall()
-    parts = [f"第{r['volume_no']}卷《{r['title']}》：{r['rolling_summary']}" for r in vol_rows]
-    parts += [f"第{r['chapter']}章：{r['summary']}" for r in reversed(ch_rows)]
+    if as_of_chapter is None:
+        chapter_values = [int(row["chapter"]) for row in ch_rows]
+        if chapter_values:
+            as_of_chapter = max(chapter_values)
+        else:
+            latest = conn.execute(
+                "SELECT COALESCE(MAX(chapter), 1) FROM draft_index"
+            ).fetchone()[0]
+            as_of_chapter = int(latest or 1)
+    profile = get_project_writing_profile(conn, chapter=as_of_chapter)
+    is_english = profile["content_language"].startswith("en")
+    parts = [
+        (f"Volume {r['volume_no']} — {r['title']}: {r['rolling_summary']}"
+         if is_english else f"第{r['volume_no']}卷《{r['title']}》：{r['rolling_summary']}")
+        for r in vol_rows
+    ]
+    parts += [
+        (f"Chapter {r['chapter']}: {r['summary']}"
+         if is_english else f"第{r['chapter']}章：{r['summary']}")
+        for r in reversed(ch_rows)
+    ]
     if not parts:
         return
     resp = gateway.generate(
         ModelTier.FAST,
         [Message(role="user", content="\n".join(parts)[:8000])],
-        system="你是 NovelForge 的全书梗概助手。把以下各卷概要与近期章节摘要压缩成"
-               "不超过 400 字的全书至此梗概：主线推进、主要人物当前处境、最大的未解冲突。"
-               "只输出梗概正文。",
+        system=compile_system_prompt(
+            "你是 NovelForge 的全书梗概助手。把以下各卷概要与近期章节摘要压缩成"
+            "不超过 400 字的全书至此梗概：主线推进、主要人物当前处境、最大的未解冲突。"
+            "只输出梗概正文。",
+            profile,
+            english_system=(
+                "You are zi's whole-story summarizer. Compress the volume summaries and recent "
+                "chapters into at most 300 English words covering main-line movement, each major "
+                "character's current position, and the largest unresolved pressure. Return only "
+                "the synopsis."
+            ),
+        ),
         max_tokens=600,
     )
     synopsis = resp.text.strip()
+    if is_english:
+        from ..text_metrics import language_matches
+        if not language_matches(synopsis, profile["content_language"]):
+            synopsis = " ".join("\n".join(parts).split()[:300])
     if synopsis:
         set_meta(conn, "global_synopsis", synopsis)
         conn.commit()
@@ -1353,6 +1789,7 @@ def _persist_draft(
     db_path: str = "novel.db",
     *,
     expected_base_revision_id: Optional[str] = None,
+    writing_profile: Optional[dict] = None,
 ) -> Optional[str]:
     """原子写入 L0 草稿文件并在 draft_index 登记（F7）。
 
@@ -1409,13 +1846,30 @@ def _persist_draft(
         # 原子写文件
         final_path, sha256 = atomic_write_l0(l0_dir, filename, text)
 
-        # 写 draft_index
-        word_count = len(text)
-        conn.execute(
-            "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, word_count, status)"
-            " VALUES(?,?,?,?,?,?,'draft')",
-            (draft_id, chapter, revision_round, relative_path, sha256, word_count),
+        # ``word_count`` retains its historical column name, but now stores the
+        # language-aware project metric (English words / Chinese characters).
+        profile = writing_profile or get_project_writing_profile(
+            conn, chapter=chapter,
         )
+        word_count = _content_units(text, profile["content_language"])
+        try:
+            conn.execute(
+                "INSERT INTO draft_index("
+                "id, chapter, revision_round, file_path, sha256, word_count, status,"
+                " content_language, writing_profile_id, writing_profile_version, prompt_version)"
+                " VALUES(?,?,?,?,?,?,'draft',?,?,?,?)",
+                (
+                    draft_id, chapter, revision_round, relative_path, sha256, word_count,
+                    profile["content_language"], profile["writing_profile_id"],
+                    profile["writing_profile_version"], profile["prompt_version"],
+                ),
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                "INSERT INTO draft_index(id, chapter, revision_round, file_path, sha256, word_count, status)"
+                " VALUES(?,?,?,?,?,?,'draft')",
+                (draft_id, chapter, revision_round, relative_path, sha256, word_count),
+            )
         # 新修订是新的当前证据源；旧稿原子保留用于审计，但不再声称是当前证据。
         try:
             conn.execute(

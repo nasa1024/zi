@@ -16,6 +16,7 @@ from ..control_plane.skill_registry import SkillRegistry
 from ..db.connection import get_meta
 from ..ids import new_id
 from ..skills import register_default_skills
+from ..writing_profiles import get_project_writing_profile
 from .context import gather_plan_context
 from .generation import generate_chapter_route_options
 from .models import ChapterPlanDraft, ChapterRoutePayload, DecisionOptionDraft
@@ -104,7 +105,11 @@ class PlanningService:
             from ..memory.embedding import build_embedder
 
             embedder = build_embedder(cfg.memory, dim=cfg.memory.embedding_dim)
-        scene_query = (hints or context.render_for_planner())[:2000]
+        profile = get_project_writing_profile(conn, chapter=start_chapter)
+        content_language = str(profile.get("content_language") or "zh-CN")
+        scene_query = (
+            hints or context.render_for_planner(content_language)
+        )[:2000]
 
         pack = recall_mod.gather_hard_context(
             entity_ids,
@@ -127,7 +132,7 @@ class PlanningService:
             start_chapter=start_chapter,
             horizon=horizon,
             plan_context=context.to_dict(),
-            history_context=pack.to_context_str(),
+            history_context=pack.to_context_str(content_language),
             hints=hints,
         )
         normalized = self._validate_options(
@@ -320,6 +325,9 @@ class PlanningService:
         if volume is None:
             raise KeyError(f"volume {volume_no} not found")
 
+        profile = get_project_writing_profile(conn, chapter=start_chapter)
+        is_english = str(profile.get("content_language") or "").startswith("en")
+
         db_path = self._db_path(conn)
         cfg = build_project_config(project_id, db_path, conn)
         gateway = build_project_gateway(
@@ -332,7 +340,10 @@ class PlanningService:
                 horizon=horizon,
                 source="volume_api",
                 hints=hints,
-                error="LLM 网关不可用（缺 API key）",
+                error=(
+                    "The creative model is unavailable because no API key is configured."
+                    if is_english else "LLM 网关不可用（缺 API key）"
+                ),
                 metadata={"degraded": True, "reason": "no_llm_key"},
             )
 
@@ -360,6 +371,8 @@ class PlanningService:
         registry = SkillRegistry()
         register_default_skills(registry)
         context = gather_plan_context(conn, start_chapter, lookahead_chapters=horizon)
+        content_language = str(profile.get("content_language") or "zh-CN")
+        stable_recall = pack.to_stable_context_str(content_language)
         skill_ctx = SkillContext(
             project_id=project_id,
             target_chapter=start_chapter,
@@ -377,17 +390,29 @@ class PlanningService:
                 "plan_to": plan_to,
                 "foreshadow_due": [dict(row) for row in foreshadow],
                 "stable_context": (
-                    f"## 世界设定（稳定）\n{pack.to_stable_context_str()}"
-                    if pack.to_stable_context_str() else ""
+                    (
+                        f"## Stable World Context\n{stable_recall}"
+                        if is_english else
+                        f"## 世界设定（稳定）\n{stable_recall}"
+                    )
+                    if stable_recall else ""
                 ),
-                "future_plan_context": context.render_for_planner(),
+                "future_plan_context": context.render_for_planner(content_language),
                 "planning_hints": hints or "",
+                "writing_profile": profile,
             },
         )
         result = registry.invoke("volume_plan", skill_ctx)
         plans = skill_ctx.workspace.get("chapter_plans") or []
-        error = None if result.ok else (result.error or "规划无产出")
+        error = None if result.ok else (
+            "Planning could not produce a complete chapter window."
+            if is_english else "规划未能产出完整章节窗"
+        )
         if error:
+            metadata: dict[str, Any] = {
+                "degraded": True,
+                "reason": "volume_plan_failed",
+            }
             return GeneratedPlanWindow(
                 project_id=project_id,
                 start_chapter=start_chapter,
@@ -395,18 +420,28 @@ class PlanningService:
                 source="volume_api",
                 hints=hints,
                 error=error,
-                metadata={"degraded": True, "reason": error},
+                metadata=metadata,
             )
         route = ChapterRoutePayload.model_validate({
-            "route_title": f"第{volume_no}卷兼容规划",
-            "route_summary": str(volume["objective"] or volume["synopsis"] or "滚动推进"),
+            "route_title": (
+                f"Volume {volume_no} Chapter Plan"
+                if is_english else f"第{volume_no}卷兼容规划"
+            ),
+            "route_summary": str(
+                volume["objective"] or volume["synopsis"] or (
+                    "Rolling chapter progression" if is_english else "滚动推进"
+                )
+            ),
             "chapters": plans,
         })
         option = DecisionOptionDraft(
             title=route.route_title,
             summary=route.route_summary,
             payload=route.model_dump(mode="json"),
-            rationale="由统一规划服务生成并按整窗事务应用",
+            rationale=(
+                "Generated by the unified planning service and applied as one transactional window."
+                if is_english else "由统一规划服务生成并按整窗事务应用"
+            ),
             impact={"chapter_range": [start_chapter, plan_to], "source": "volume_api"},
             score=8.0,
         )
@@ -418,7 +453,16 @@ class PlanningService:
             source="volume_api",
             hints=hints,
             options=[option],
-            metadata={"degraded": False, "tier_used": result.usage_summary},
+            metadata={
+                "degraded": bool(skill_ctx.workspace.get("volume_plan_degraded")),
+                "tier_used": skill_ctx.workspace.get(
+                    "volume_plan_tier_used", result.usage_summary,
+                ),
+                **(
+                    {"reason": skill_ctx.workspace["volume_plan_fallback_reason"]}
+                    if skill_ctx.workspace.get("volume_plan_fallback_reason") else {}
+                ),
+            },
         )
 
     def _validate_options(

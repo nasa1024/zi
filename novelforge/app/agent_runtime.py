@@ -36,6 +36,7 @@ from ..planning.repository import (
     story_map,
     supersede_decision,
 )
+from ..writing_profiles import get_project_writing_profile
 from .deps import ProjectRegistry
 
 
@@ -112,9 +113,41 @@ def _infer_stage(conn: sqlite3.Connection, state: AgentState) -> str:
     return "chapter_action"
 
 
-def _fixed_action_options(stage: str, state: AgentState) -> list[DecisionOptionDraft]:
+def _fixed_action_options(
+    stage: str,
+    state: AgentState,
+    *,
+    content_language: str = "zh-CN",
+) -> list[DecisionOptionDraft]:
+    english = content_language.startswith("en")
     if stage == "chapter_action":
         chapter = state.get("current_chapter") or 1
+        if english:
+            return [
+                DecisionOptionDraft(
+                    title=f"Generate Chapter {chapter}",
+                    summary="Generate three drafts from the selected chapter contract and preselect the strongest one.",
+                    payload={"action": "generate_chapter", "chapter": chapter},
+                    rationale="The current route is ready for drafting.",
+                    impact={"candidate_count": 3, "uses_future_guardrails": True},
+                    score=9.2,
+                ),
+                DecisionOptionDraft(
+                    title="Replan the future route",
+                    summary="Keep established facts and regenerate the future chapter window.",
+                    payload={"action": "replan"},
+                    rationale="Use this when the current route no longer fits the story.",
+                    impact={"canon_changed": False},
+                    score=7.5,
+                ),
+                DecisionOptionDraft(
+                    title="Finish for now",
+                    summary="Save the session and all plans so work can resume from this point.",
+                    payload={"action": "finish"},
+                    impact={"reversible": True},
+                    score=5.0,
+                ),
+            ]
         return [
             DecisionOptionDraft(
                 title=f"生成第 {chapter} 章",
@@ -143,6 +176,33 @@ def _fixed_action_options(stage: str, state: AgentState) -> list[DecisionOptionD
     if stage == "post_chapter":
         report = state.get("alignment_report") or {}
         divergence = report.get("divergence_score")
+        if english:
+            divergence_note = (
+                f" Current divergence: {float(divergence) * 100:.0f}%."
+                if isinstance(divergence, (int, float)) else ""
+            )
+            return [
+                DecisionOptionDraft(
+                    title="Continue to the next chapter",
+                    summary="Keep the current route and use the latest world state." + divergence_note,
+                    payload={"action": "continue"},
+                    score=9.2 if state.get("recommended_plan_action") == "keep" else 7.0,
+                ),
+                DecisionOptionDraft(
+                    title="Accept and replan",
+                    summary="Keep this chapter and replan future chapters from its actual outcome.",
+                    payload={"action": "replan"},
+                    impact={"canon_changed": False, "future_plan_changed": True},
+                    score=(9.2 if state.get("recommended_plan_action") in {"patch", "replan"}
+                           else 7.8),
+                ),
+                DecisionOptionDraft(
+                    title="End this writing session",
+                    summary="Save the checkpoint and continue later.",
+                    payload={"action": "finish"},
+                    score=9.5 if state.get("recommended_plan_action") == "pause" else 5.0,
+                ),
+            ]
         divergence_note = (
             f" 当前偏航 {float(divergence) * 100:.0f}%。"
             if isinstance(divergence, (int, float)) else ""
@@ -181,17 +241,26 @@ def _draft_options(conn: sqlite3.Connection, state: AgentState) -> list[Decision
         return []
     registry = get_registry()
     detail = _load_run_detail(conn, registry, state["project_id"], run_id)
+    english = get_project_writing_profile(conn)["content_language"].startswith("en")
     options = []
     for candidate in detail.candidates:
         options.append(DecisionOptionDraft(
-            title=f"候选稿 {candidate.index + 1}",
+            title=(
+                f"Draft {candidate.index + 1}"
+                if english else f"候选稿 {candidate.index + 1}"
+            ),
             summary=candidate.draft_text[:360] + ("…" if len(candidate.draft_text) > 360 else ""),
             payload={
                 "action": "select_draft",
                 "run_id": run_id,
                 "candidate_index": candidate.index,
             },
-            rationale=("流水线自动择优稿" if candidate.is_winner else "可人工改选的备选稿"),
+            rationale=(
+                "Pipeline-selected draft" if candidate.is_winner
+                else "Alternative draft available for manual selection"
+            ) if english else (
+                "流水线自动择优稿" if candidate.is_winner else "可人工改选的备选稿"
+            ),
             impact={
                 "length": candidate.length,
                 "score": candidate.score,
@@ -208,12 +277,15 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
     conn = _connect(state["db_path"])
     try:
         stage = _infer_stage(conn, state)
+        writing_profile = get_project_writing_profile(conn)
+        content_language = writing_profile["content_language"]
+        english = content_language.startswith("en")
         project = conn.execute("SELECT 1").fetchone()  # force early DB validation
         del project
         meta: dict[str, Any] = {}
         scope_type = "project"
         scope_id = state["project_id"]
-        question = "请选择下一步"
+        question = "Choose the next step." if english else "请选择下一步"
         recommended_index = 0
 
         if stage == "story_plan":
@@ -224,14 +296,20 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
                 genre=pm.genre if pm else "default", project_name=pm.name if pm else "未命名小说",
                 hints=state.get("hints") or None,
             )
-            question = "这本小说接下来采用哪一条全书路线？"
+            question = (
+                "Which whole-story direction should this novel follow?"
+                if english else "这本小说接下来采用哪一条全书路线？"
+            )
             scope_type = "story"
         elif stage == "volume_plan":
             options, meta = generate_volume_options(
                 conn, project_id=state["project_id"], db_path=state["db_path"],
                 hints=state.get("hints") or None,
             )
-            question = "下一卷采用哪一种冲突与节奏方案？"
+            question = (
+                "Which conflict and pacing plan should the next volume use?"
+                if english else "下一卷采用哪一种冲突与节奏方案？"
+            )
             scope_type = "volume"
         elif stage == "chapter_route":
             chapter = _next_unwritten_chapter(conn, state["project_id"])
@@ -248,14 +326,22 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
                 candidate_count=3,
             )
             options, meta = window.options, window.metadata
-            question = f"从第 {chapter} 章开始，未来路线选择哪一套？"
+            question = (
+                f"Which future route should begin with Chapter {chapter}?"
+                if english else f"从第 {chapter} 章开始，未来路线选择哪一套？"
+            )
             scope_type = "chapter"
             scope_id = str(chapter)
         elif stage == "chapter_action":
             chapter = _next_unwritten_chapter(conn, state["project_id"])
             state = {**state, "current_chapter": chapter}
-            options = _fixed_action_options(stage, state)
-            question = f"第 {chapter} 章已经规划完成，下一步怎么做？"
+            options = _fixed_action_options(
+                stage, state, content_language=content_language,
+            )
+            question = (
+                f"Chapter {chapter} is planned. What should happen next?"
+                if english else f"第 {chapter} 章已经规划完成，下一步怎么做？"
+            )
             scope_type = "chapter"
             scope_id = str(chapter)
         elif stage == "draft_choice":
@@ -264,13 +350,22 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
                 # Single-candidate or degraded detail: skip the fake choice and
                 # immediately ask the real post-chapter decision instead.
                 stage = "post_chapter"
-                options = _fixed_action_options(stage, state)
-                question = "本章已经落盘，接下来继续、重排还是结束？"
+                options = _fixed_action_options(
+                    stage, state, content_language=content_language,
+                )
+                question = (
+                    "The chapter is saved. Continue, replan, or finish?"
+                    if english else "本章已经落盘，接下来继续、重排还是结束？"
+                )
                 scope_type = "replan"
                 scope_id = str(state.get("current_chapter") or "")
                 meta = {"draft_choice_skipped": True}
             else:
-                question = f"第 {state.get('current_chapter') or '?'} 章采用哪一稿？"
+                current_chapter = state.get("current_chapter") or "?"
+                question = (
+                    f"Which draft should Chapter {current_chapter} use?"
+                    if english else f"第 {current_chapter} 章采用哪一稿？"
+                )
                 scope_type = "draft"
                 scope_id = state.get("last_run_id")
                 winner = next((i for i, o in enumerate(options)
@@ -288,10 +383,15 @@ def _prepare_node(state: AgentState) -> dict[str, Any]:
                     "generation_meta": meta,
                 }
         elif stage == "post_chapter":
-            options = _fixed_action_options(stage, state)
+            options = _fixed_action_options(
+                stage, state, content_language=content_language,
+            )
             action = state.get("recommended_plan_action") or "keep"
             recommended_index = 0 if action == "keep" else 1 if action in {"patch", "replan"} else 2
-            question = "本章已经完成计划与实际对账，接下来保持、重排还是暂停？"
+            question = (
+                "The chapter has been reconciled with the plan. Continue, replan, or pause?"
+                if english else "本章已经完成计划与实际对账，接下来保持、重排还是暂停？"
+            )
             scope_type = "replan"
             scope_id = str(state.get("current_chapter") or "")
         elif stage == "finished":

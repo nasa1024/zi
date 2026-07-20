@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -33,9 +34,9 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
     if is_new:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-        _load_user_terms(conn)
+        language, terms = project_tokenizer_context(conn)
         set_meta(conn, "schema_version", SCHEMA_VERSION)
-        set_meta(conn, "tokenizer_version", tokenizer_version())
+        set_meta(conn, "tokenizer_version", tokenizer_version(language, terms))
         conn.commit()
     else:
         from .migrations import check_and_migrate
@@ -51,9 +52,9 @@ def init_db_from_conn(conn: sqlite3.Connection) -> sqlite3.Connection:
     """建库：对已有连接执行 schema.sql，适用于 :memory: 测试 fixture。
     调用方负责 connect() + PRAGMA 设置；本函数只执行 DDL + 元数据写入。"""
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-    _load_user_terms(conn)
+    language, terms = project_tokenizer_context(conn)
     set_meta(conn, "schema_version", SCHEMA_VERSION)
-    set_meta(conn, "tokenizer_version", tokenizer_version())
+    set_meta(conn, "tokenizer_version", tokenizer_version(language, terms))
     conn.commit()
     return conn
 
@@ -71,7 +72,20 @@ def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     return row["value"] if row else None
 
 
-def _load_user_terms(conn: sqlite3.Connection) -> None:
+def project_content_language(conn: sqlite3.Connection) -> str:
+    """Return the project's language without importing writing_profiles.
+
+    ``writing_profiles`` itself imports this module, so this small meta lookup
+    is intentionally kept here to avoid an import cycle.  Missing metadata is
+    the legacy Chinese project contract.
+    """
+    try:
+        return (get_meta(conn, "content_language") or "zh-CN").strip() or "zh-CN"
+    except sqlite3.Error:
+        return "zh-CN"
+
+
+def _load_user_terms(conn: sqlite3.Connection, language: str | None = None) -> tuple[str, ...]:
     """把专名（实体规范名/别名/境界名）灌入分词器词典（§2.8 关键工程点3）。"""
     terms: list[str] = []
     for tbl, col in (
@@ -83,12 +97,33 @@ def _load_user_terms(conn: sqlite3.Connection) -> None:
             terms += [r[0] for r in conn.execute(f"SELECT {col} FROM {tbl}")]
         except sqlite3.Error:
             pass
-    add_user_terms(terms)
+    try:
+        custom = json.loads(get_meta(conn, "tokenizer_user_terms_json") or "[]")
+        if isinstance(custom, list):
+            terms.extend(str(term) for term in custom)
+    except (json.JSONDecodeError, sqlite3.Error):
+        pass
+    # Stable, project-scoped term snapshot.  add_user_terms remains for jieba
+    # compatibility, while tokenize/version below receive this explicit set.
+    normalized = tuple(sorted({str(term).strip() for term in terms if str(term).strip()}))
+    add_user_terms(normalized, language or project_content_language(conn))
+    return normalized
+
+
+def project_tokenizer_context(conn: sqlite3.Connection) -> tuple[str, tuple[str, ...]]:
+    """Return ``(language, project terms)`` for indexing and query parity."""
+    language = project_content_language(conn)
+    return language, _load_user_terms(conn, language)
+
+
+def project_tokenizer_version(conn: sqlite3.Connection) -> str:
+    language, terms = project_tokenizer_context(conn)
+    return tokenizer_version(language, terms)
 
 
 def rebuild_facts_fts(conn: sqlite3.Connection) -> int:
     """从 status='canon' 的 facts 重建 facts_fts（派生索引，可丢可重放）。返回索引行数。"""
-    _load_user_terms(conn)  # 词典随实体增长，重建时刷新
+    language, terms = project_tokenizer_context(conn)  # 词典随实体增长，重建时刷新
     conn.execute("DELETE FROM facts_fts")
     rows = conn.execute(
         "SELECT id, subject, predicate, object, COALESCE(detail_json,'') AS detail "
@@ -99,8 +134,10 @@ def rebuild_facts_fts(conn: sqlite3.Connection) -> int:
         conn.execute(
             "INSERT INTO facts_fts(fact_id, subject_tok, predicate_tok, object_tok, detail_tok) "
             "VALUES(?, ?, ?, ?, ?)",
-            (r["id"], tokenize(r["subject"]), tokenize(r["predicate"]),
-             tokenize(r["object"]), tokenize(r["detail"])),
+            (r["id"], tokenize(r["subject"], language, user_terms=terms),
+             tokenize(r["predicate"], language, user_terms=terms),
+             tokenize(r["object"], language, user_terms=terms),
+             tokenize(r["detail"], language, user_terms=terms)),
         )
         n += 1
     conn.commit()
@@ -132,11 +169,12 @@ def index_draft_fts(
     text: str,
 ) -> int:
     """把一章最新 L0 正文写入 drafts_fts；调用方控制事务。"""
+    language, terms = project_tokenizer_context(conn)
     # Recall 只应看到当前修订，换稿时移除同章旧版本索引，避免过期内容混入。
     conn.execute("DELETE FROM drafts_fts WHERE chapter_no=?", (chapter,))
     count = 0
     for line_start, line_end, body in _iter_draft_chunks(text):
-        tokenized = tokenize(body)
+        tokenized = tokenize(body, language, user_terms=terms)
         if not tokenized:
             continue
         conn.execute(

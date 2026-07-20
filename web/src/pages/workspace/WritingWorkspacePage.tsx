@@ -364,6 +364,7 @@ export default function WritingWorkspacePage(): JSX.Element {
               generating={generating}
               generationStages={generationStages}
               generationError={generationError}
+              contentLanguage={project.content_language}
               onChange={(value) => { setText(value); setDirty(true); setSaveMessage('有未保存修改'); }}
               onSave={() => void save()}
               onGenerate={() => void generate()}

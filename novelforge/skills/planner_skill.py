@@ -13,6 +13,7 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..control_plane.llm.tiers import ModelTier
+from ..writing_profiles import compile_system_prompt, get_project_writing_profile
 
 
 _CONTRACT = SkillContract(
@@ -43,6 +44,19 @@ _SYSTEM = """\
 只输出 JSON 数组，不要任何额外说明。
 """
 
+_SYSTEM_EN = """\
+You are zi's chapter planner. Build a beat sheet that follows the supplied
+world state, locked chapter contract, and writing profile.
+- Return a JSON array with 4-8 beats.
+- beat_type must be setup, turn, payoff_beat, tension_point, or hook.
+- The final beat must be a hook, but its intensity and kind must fit the profile.
+- Each item has beat_type, summary, and value_axis.
+- Write every user-visible value in natural American English.
+- Do not force a power payoff into genres whose profile calls for clues,
+  relationships, low-pressure rewards, or costly consequences.
+Return only the JSON array.
+"""
+
 
 class PlannerSkill:
     contract = _CONTRACT
@@ -50,30 +64,52 @@ class PlannerSkill:
     def run(self, ctx: SkillContext) -> SkillResult:
         recall: object = ctx.workspace.get("recall_pack")
         chapter_goal: str = ctx.workspace.get("chapter_goal", "")
+        profile = ctx.workspace.get("writing_profile") or get_project_writing_profile(
+            ctx.conn, chapter=ctx.target_chapter,
+        )
+        is_english = str(profile.get("content_language") or "").startswith("en")
 
         # M1-⑥ 收尾：与 draft 同构——稳定前缀在前、本章规划任务在后，
         # 跨章的 planner 调用共享（system + stable）前缀吃缓存。
         stable = ctx.workspace.get("stable_context")
         dynamic = ctx.workspace.get("dynamic_context")
         if stable is None and recall is not None:
-            _s = recall.to_stable_context_str()
-            stable = f"## 世界设定（稳定）\n{_s}" if _s else ""
-            dynamic = recall.to_dynamic_context_str()
+            _s = recall.to_stable_context_str(profile["content_language"])
+            if _s:
+                stable = (
+                    f"## Stable world context\n{_s}" if is_english
+                    else f"## 世界设定（稳定）\n{_s}"
+                )
+            else:
+                stable = ""
+            dynamic = recall.to_dynamic_context_str(profile["content_language"])
         context_block = "\n\n".join(
             p for p in (
                 stable or "",
-                f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
+                (
+                    f"## Current world state\n{dynamic}" if is_english
+                    else f"## 世界状态（当前）\n{dynamic}"
+                ) if dynamic else "",
             ) if p
-        ) or "(无召回上下文)"
+        ) or ("(No recalled context)" if is_english else "(无召回上下文)")
         future_plan = ctx.workspace.get("future_plan_context", "")
 
-        user_msg = (
-            f"{context_block}\n\n"
-            + (f"{future_plan}\n\n" if future_plan else "")
-            + f"## 规划任务\n"
-            f"当前章节：第 {ctx.target_chapter} 章\n"
-            f"章节目标：{chapter_goal or '按情节自然发展'}"
-        )
+        if is_english:
+            user_msg = (
+                f"{context_block}\n\n"
+                + (f"{future_plan}\n\n" if future_plan else "")
+                + "## Planning Task\n"
+                + f"Chapter: {ctx.target_chapter}\n"
+                + f"Chapter goal: {chapter_goal or 'Advance the story naturally within the profile.'}"
+            )
+        else:
+            user_msg = (
+                f"{context_block}\n\n"
+                + (f"{future_plan}\n\n" if future_plan else "")
+                + f"## 规划任务\n"
+                f"当前章节：第 {ctx.target_chapter} 章\n"
+                f"章节目标：{chapter_goal or '按情节自然发展'}"
+            )
 
         from ..control_plane.llm.provider import CacheHint, Message
         model_id = ctx.llm.model_for(ModelTier.MID)
@@ -85,14 +121,18 @@ class PlannerSkill:
         result = ctx.llm.generate_validated(
             ModelTier.MID,
             [Message(role="user", content=user_msg)],
-            parse=_parse_beats_strict,
-            system=_SYSTEM,
+            parse=lambda text: _parse_beats_strict(
+                text, content_language=profile["content_language"]
+            ),
+            system=compile_system_prompt(_SYSTEM, profile, english_system=_SYSTEM_EN),
             max_tokens=max_out,
             cache_hint=CacheHint(user_prefix_chars=len(stable)) if stable else None,
             max_tier=ModelTier.STRONG,
         )
         resp = result.response
-        beats = result.value if result.value is not None else _parse_beats(resp.text)
+        beats = result.value if result.value is not None else _parse_beats(
+            resp.text, content_language=profile["content_language"]
+        )
         ctx.workspace["beats"] = beats
         ctx.workspace["planner_raw"] = resp.text
         ctx.workspace["planner_tier_used"] = result.tier_used
@@ -112,7 +152,9 @@ class PlannerSkill:
         )
 
 
-def _parse_beats_strict(text: str) -> list[dict] | None:
+def _parse_beats_strict(
+    text: str, *, content_language: str = "zh-CN",
+) -> list[dict] | None:
     """generate_validated 的 parse：结构合格返回 beats，否则 None 触发升档。
 
     合格 = 解析出非空 JSON 数组、每条含 beat_type/summary、末尾有 hook beat
@@ -140,10 +182,30 @@ def _parse_beats_strict(text: str) -> list[dict] | None:
         return None
     if not any(b.get("beat_type") == "hook" for b in beats):
         return None
+    if content_language.startswith("en"):
+        from ..text_metrics import language_matches
+        if not language_matches(
+            " ".join(str(b.get("summary") or "") for b in beats), content_language
+        ):
+            return None
     return beats
 
 
-def _parse_beats(text: str) -> list[dict]:
+def _parse_beats(text: str, *, content_language: str = "zh-CN") -> list[dict]:
+    if content_language.startswith("en"):
+        strict = _parse_beats_strict(text, content_language=content_language)
+        return strict or [
+            {
+                "beat_type": "setup",
+                "summary": "Re-establish the immediate goal and its present obstacle.",
+                "value_axis": "certainty to pressure",
+            },
+            {
+                "beat_type": "hook",
+                "summary": "End on a profile-appropriate choice, clue, cost, or new objective.",
+                "value_axis": "answer to question",
+            },
+        ]
     text = text.strip()
     # 尝试直接解析 JSON 数组
     if text.startswith("["):

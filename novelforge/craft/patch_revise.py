@@ -28,6 +28,18 @@ _PATCH_SYSTEM = """\
 只输出 JSON 数组，不要其他说明。
 """
 
+_PATCH_SYSTEM_EN = """\
+You are zi's revision editor. Make the smallest possible changes needed to fix
+the supplied issues; leave unrelated wording untouched.
+
+Return a JSON array of patches: {"find": "exact source text", "replace": "replacement"}.
+- find must be copied exactly from the draft, be 10-300 characters long, and
+  occur only once; include surrounding context if necessary.
+- Use one or two patches per issue. For deletion, use an empty replacement.
+- Preserve the configured point of view, tense, spelling variant, and style.
+Return only the JSON array.
+"""
+
 
 @dataclass
 class PatchResult:
@@ -38,11 +50,18 @@ class PatchResult:
 
 
 def generate_patches(gateway, tier, *, stable_context: str, draft_text: str,
-                     issues_str: str, task_label: str) -> list[dict]:
+                     issues_str: str, task_label: str,
+                     writing_profile: dict | None = None) -> list[dict]:
     """单次 LLM 调用产出补丁列表。失败返回 []（调用方回退全文重写）。"""
     try:
         from ..control_plane.llm.provider import CacheHint, Message
         prefix = f"{stable_context}\n\n" if stable_context else ""
+        system = _PATCH_SYSTEM
+        if writing_profile:
+            from ..writing_profiles import compile_system_prompt
+            system = compile_system_prompt(
+                _PATCH_SYSTEM, writing_profile, english_system=_PATCH_SYSTEM_EN,
+            )
         resp = gateway.generate(
             tier,
             [Message(role="user", content=(
@@ -50,7 +69,7 @@ def generate_patches(gateway, tier, *, stable_context: str, draft_text: str,
                 f"待修订问题：\n{issues_str}\n\n"
                 f"草稿全文：\n{draft_text}"
             ))],
-            system=_PATCH_SYSTEM,
+            system=system,
             max_tokens=4096,   # 补丁输出短；思考型模型推理也计入，留足余量
             cache_hint=CacheHint(user_prefix_chars=len(stable_context)) if stable_context else None,
         )

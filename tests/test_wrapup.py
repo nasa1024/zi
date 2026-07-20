@@ -116,7 +116,8 @@ class TestPlannerPrefix:
         planner_user = str(planner_calls[0]["messages"][-1].content)
         draft_user = str(draft_calls[0]["messages"][-1].content)
         # planner 与 draft 的 user 消息从第 0 字节起共享稳定前缀
-        assert planner_user.startswith("## 世界设定（稳定）")
+        assert planner_user.startswith("## 项目写作配置（锁定）")
+        assert "cn_web_novel_v1" in planner_user
         assert "## 规划任务" in planner_user
         stable_len = planner_calls[0]["cache_hint"].user_prefix_chars
         assert stable_len > 0

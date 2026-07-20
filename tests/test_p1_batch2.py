@@ -183,7 +183,8 @@ class TestHookRepeatCheck:
 class TestStyleAnchorApi:
     def test_crud_roundtrip(self, client, project):
         r = client.post(f"/v1/{project}/style-anchors", json={
-            "emotion": "紧张", "title": "某书第3章", "content": "刀光一闪。" * 20})
+            "emotion": "紧张", "title": "某书第3章", "content": "刀光一闪。" * 20,
+            "rights_confirmed": True})
         assert r.status_code == 201
         aid = r.json()["id"]
         rows = client.get(f"/v1/{project}/style-anchors",
@@ -199,6 +200,33 @@ class TestStyleAnchorApi:
                         json={"emotion": "x", "content": "短"})
         assert r.status_code == 422
 
+    def test_rights_confirmation_required(self, client, project):
+        r = client.post(f"/v1/{project}/style-anchors", json={
+            "emotion": "紧张", "content": "这是一段用于测试的足够长文风锚点。" * 8,
+        })
+        assert r.status_code == 422
+
+    def test_language_rights_and_profile_tags_roundtrip(self, client, project):
+        created = client.post(f"/v1/{project}/style-anchors", json={
+            "emotion": "suspense",
+            "content": "A licensed reference passage with controlled suspense. " * 3,
+            "language": "en-US",
+            "source_type": "licensed",
+            "source_note": "Licensed for project use",
+            "rights_confirmed": True,
+            "profile_tags": ["mystery"],
+        })
+        assert created.status_code == 201
+        body = created.json()
+        assert body["language"] == "en-US"
+        assert body["rights_confirmed"] is True
+        assert body["profile_tags"] == ["mystery"]
+
+        rows = client.get(
+            f"/v1/{project}/style-anchors", params={"language": "en-US"},
+        ).json()
+        assert [row["id"] for row in rows] == [body["id"]]
+
     def test_patch_missing_404(self, client, project):
         r = client.patch(f"/v1/{project}/style-anchors/nope", json={"enabled": False})
         assert r.status_code == 404
@@ -210,7 +238,8 @@ def _seed_anchor(conn, emotion, content, enabled=1):
     from novelforge.ids import new_id
     aid = new_id("anchor")
     conn.execute(
-        "INSERT INTO style_anchors(id, emotion, content, enabled) VALUES(?,?,?,?)",
+        "INSERT INTO style_anchors("
+        "id, emotion, content, enabled, rights_confirmed) VALUES(?,?,?,?,1)",
         (aid, emotion, content, enabled))
     conn.commit()
     return aid

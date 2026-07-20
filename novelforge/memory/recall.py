@@ -28,7 +28,7 @@ class RecallPack:
     global_synopsis: str = ""                                    # M2-②: 全书至此梗概（meta_kv）
     similar_scenes: list[dict] = field(default_factory=list)     # §06.4.5 相似桥段（向量+词法 RRF，可选）
 
-    def to_stable_context_str(self) -> str:
+    def to_stable_context_str(self, language: str = "zh-CN") -> str:
         """慢变层：跨章基本不变的设定（taboo/金手指/实体/canon 事实）。
 
         放在所有 prompt 的最前面作为**稳定前缀**——provider 前缀缓存
@@ -36,6 +36,8 @@ class RecallPack:
         同章多次调用与多候选生成共享此前缀（M1-⑥）。
         底层 SQL 均带 ORDER BY，序列化输出确定性。
         """
+        if str(language).startswith("en"):
+            return self._stable_context_en()
         parts = []
         if self.taboos:
             parts.append("## 常驻禁忌（绝对不可违反）\n" + _fmt_rows(self.taboos, ["rule_text", "reason"]))
@@ -47,12 +49,14 @@ class RecallPack:
             parts.append("## 既定事实（canon）\n" + _fmt_rows(self.canon_facts, ["subject", "fact_type", "object", "valid_from_chapter"]))
         return "\n\n".join(parts)
 
-    def to_dynamic_context_str(self) -> str:
+    def to_dynamic_context_str(self, language: str = "zh-CN") -> str:
         """快变层：逐章演进的世界状态，放在稳定前缀之后。
 
         前情摘要置于动态层最前——这是 LLM 最缺的叙事语境
         （硬状态管得住等级数值，管不住上一章的情绪余韵）。
         """
+        if str(language).startswith("en"):
+            return self._dynamic_context_en()
         parts = []
         if self.global_synopsis:
             parts.append(f"## 全书至此\n{self.global_synopsis}")
@@ -80,11 +84,59 @@ class RecallPack:
                          + _fmt_rows(self.similar_scenes, ["chapter", "summary"]))
         return "\n\n".join(parts)
 
-    def to_context_str(self) -> str:
+    def to_context_str(self, language: str = "zh-CN") -> str:
         """全量序列化 = 稳定层 + 动态层（保持单入口兼容）。"""
-        stable = self.to_stable_context_str()
-        dynamic = self.to_dynamic_context_str()
+        stable = self.to_stable_context_str(language)
+        dynamic = self.to_dynamic_context_str(language)
         return "\n\n".join(p for p in (stable, dynamic) if p)
+
+    def _stable_context_en(self) -> str:
+        parts = []
+        if self.taboos:
+            parts.append("## Permanent taboos (never violate)\n" + _fmt_rows(
+                self.taboos, ["rule_text", "reason"],
+            ))
+        if self.gimmick_rules:
+            parts.append("## Special-system rules\n" + _fmt_rows(
+                self.gimmick_rules, ["gimmick_name", "cooldown_chapters"],
+            ))
+        if self.entities:
+            parts.append("## Core entities\n" + _fmt_rows(
+                self.entities, ["canonical_name", "entity_type"],
+            ))
+        if self.canon_facts:
+            parts.append("## Established canon facts\n" + _fmt_rows(
+                self.canon_facts,
+                ["subject", "fact_type", "object", "valid_from_chapter"],
+            ))
+        return "\n\n".join(parts)
+
+    def _dynamic_context_en(self) -> str:
+        parts = []
+        if self.global_synopsis:
+            parts.append(f"## Story so far\n{self.global_synopsis}")
+        if self.volume_summary:
+            parts.append(f"## Volume so far\n{self.volume_summary}")
+        if self.chapter_summaries:
+            lines = [
+                f"  Chapter {row['chapter']}: {row['summary']}"
+                for row in self.chapter_summaries
+            ]
+            parts.append("## Recent chapter summaries\n" + "\n".join(lines))
+        sections = (
+            (self.power_states, "Current power states", ["entity_id", "rank_name", "rank_order"]),
+            (self.knowledge_edges, "Knowledge relationships", ["knower_entity_id", "secret_key", "knowledge_state"]),
+            (self.item_states, "Item ownership", ["item_entity_id", "to_owner_id", "quantity_delta", "change_type"]),
+            (self.numeric_facts, "Numeric facts", ["entity_id", "metric_key", "value", "unit"]),
+            (self.timeline_events, "Timeline events", ["title", "chapter", "story_time_start"]),
+            (self.keyword_hits, "Keyword recall excerpts", ["chapter", "snippet"]),
+            (self.recent_beats, "Recent beats", ["chapter", "beat_type", "summary"]),
+            (self.similar_scenes, "Similar earlier scenes (reference; avoid repetition)", ["chapter", "summary"]),
+        )
+        for rows, title, keys in sections:
+            if rows:
+                parts.append(f"## {title}\n" + _fmt_rows(rows, keys))
+        return "\n\n".join(parts)
 
 
 def _fmt_rows(rows: list, keys: list[str]) -> str:
@@ -424,7 +476,8 @@ def _fetch_global_synopsis(conn) -> str:
 
 def _fts_search(query: str, as_of: int, limit: int, conn) -> list[dict]:
     from ..db.l0 import load_draft_text_by_id
-    from ..tokenizer import cut
+    from ..db.connection import project_tokenizer_context
+    from ..tokenizer import tokenize
 
     try:
         query = (query or "").strip()[:500]
@@ -432,8 +485,9 @@ def _fts_search(query: str, as_of: int, limit: int, conn) -> list[dict]:
             return []
         as_of = max(0, int(as_of))
         limit = min(int(limit), 100)
+        language, terms = project_tokenizer_context(conn)
         query_tokens = []
-        for token in cut(query):
+        for token in tokenize(query, language, user_terms=terms).split():
             token = "".join(
                 ch for ch in token.strip() if ch.isalnum() or ch == "_"
             )[:64]

@@ -263,6 +263,8 @@
 }
 .project-book h2 { margin: 16px 0 10px; font-size: 1.7rem; }
 .project-book > p { color: var(--ink-soft); font-size: 0.9rem; }
+.project-book-profile { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.project-book-profile span { padding: 4px 7px; border: 1.5px solid var(--ink); border-radius: 999px; color: var(--ink-soft); font: 600 0.58rem/1 var(--font-mono); }
 .project-book dl { display: flex; gap: 20px; margin-top: auto; padding-top: 24px; }
 .project-book dl div { display: grid; gap: 2px; }
 .project-book dt { color: var(--ink-soft); font: 500 0.6rem/1 var(--font-mono); text-transform: uppercase; }
@@ -291,6 +293,40 @@
 }
 .studio-picker-empty h2 { margin: 10px 0; font-family: var(--font-cn); font-size: 2rem; }
 .studio-picker-empty p { margin-bottom: 25px; color: var(--ink-soft); }
+
+/* ── Versioned writing profile settings ───────────────────────── */
+.writing-profile-panel { padding: 26px; border: var(--bd); border-radius: 24px; background: var(--cream); box-shadow: var(--shadow); }
+.writing-profile-panel > .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.writing-profile-panel > .panel-head span { color: var(--pink); font: 600 0.64rem/1 var(--font-mono); letter-spacing: 0.14em; }
+.writing-profile-panel > .panel-head h2 { margin: 5px 0; font-size: 1.55rem; }
+.writing-profile-panel > .panel-head p { color: var(--ink-soft); font-size: 0.82rem; }
+.profile-current-card { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.profile-current-card > div { display: grid; gap: 7px; min-width: 0; padding: 14px; border: 2px solid var(--ink); border-radius: 14px; background: var(--cream-2); }
+.profile-current-card span { color: var(--pink); font: 600 0.58rem/1 var(--font-mono); letter-spacing: 0.08em; }
+.profile-current-card b { overflow-wrap: anywhere; font-size: 0.88rem; }
+.profile-current-card small { color: var(--ink-soft); font-size: 0.68rem; line-height: 1.35; }
+.profile-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; padding: 18px; border: 2px dashed var(--ink); border-radius: 16px; }
+.profile-settings-form .full { grid-column: 1 / -1; }
+.profile-settings-preview { padding: 14px; border-left: 5px solid var(--lime); background: var(--cream-2); }
+.profile-settings-preview p { margin: 4px 0; color: var(--ink-soft); font-size: 0.78rem; }
+.profile-settings-preview small { color: var(--blue); font: 600 0.66rem/1 var(--font-mono); }
+.profile-history { margin-top: 24px; padding-top: 20px; border-top: 2px solid var(--ink); }
+.profile-history h3 { margin: 4px 0 12px; }
+.profile-history > p { color: var(--ink-soft); font-size: 0.8rem; }
+.profile-history ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.profile-history li { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.7fr) minmax(180px, 1fr); gap: 12px; padding: 10px 12px; border: 1.5px solid var(--ink); border-radius: 10px; font-size: 0.72rem; }
+.profile-history li span,
+.profile-history li small { color: var(--ink-soft); }
+
+@media (max-width: 880px) {
+  .profile-current-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .writing-profile-panel > .panel-head { flex-direction: column; }
+  .profile-current-card,
+  .profile-settings-form { grid-template-columns: 1fr; }
+  .profile-history li { grid-template-columns: 1fr; }
+}
 
 /* ── Three-column Writing Desk ───────────────────────────────── */
 .writing-workspace {

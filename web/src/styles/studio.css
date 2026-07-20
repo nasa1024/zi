@@ -1350,6 +1350,106 @@
   .memory-action-spacer { display: none; }
 }
 
+/* ============================== PROJECT WIZARD ============================== */
+.modal-card.project-wizard {
+  max-width: 980px;
+  padding: 30px 34px;
+}
+.wizard-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 26px;
+  padding: 0;
+  list-style: none;
+}
+.wizard-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 2px solid color-mix(in srgb, var(--ink) 24%, transparent);
+  border-radius: 12px;
+  color: var(--ink-soft);
+  font: 600 0.7rem/1.2 var(--font-mono);
+}
+.wizard-steps li span {
+  flex: none;
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+.wizard-steps li.active { border-color: var(--ink); background: var(--lime); color: var(--ink); }
+.wizard-steps li.complete { border-color: var(--ink); color: var(--ink); }
+.wizard-steps li.complete span { background: var(--ink); color: var(--cream); }
+.wizard-pane { display: grid; gap: 18px; }
+.wizard-pane-head { padding-bottom: 4px; border-bottom: 2px dashed color-mix(in srgb, var(--ink) 25%, transparent); }
+.wizard-pane-head > span,
+.profile-preview > span,
+.profile-history > div > span {
+  color: var(--pink);
+  font: 600 0.65rem/1 var(--font-mono);
+  letter-spacing: 0.13em;
+}
+.wizard-pane-head h4 { margin: 6px 0; font: 400 1.6rem/1.2 var(--font-cn); }
+.wizard-pane-head p { max-width: 700px; color: var(--ink-soft); font-size: 0.88rem; }
+.field-help { color: var(--ink-soft); font: 500 0.7rem/1.45 var(--font-mono); }
+.wizard-style-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, 0.8fr); gap: 18px; align-items: stretch; }
+.wizard-style-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.profile-preview {
+  padding: 18px;
+  border: var(--bd);
+  border-radius: 18px;
+  background: var(--ink);
+  color: var(--cream);
+  box-shadow: var(--shadow-sm);
+}
+.profile-preview h5 { margin: 8px 0; color: var(--lime); font: 700 1.05rem/1.2 var(--font-body); }
+.profile-preview p { color: color-mix(in srgb, var(--cream) 80%, transparent); font-size: 0.78rem; line-height: 1.55; }
+.profile-preview dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; margin-top: 14px; }
+.profile-preview dl div { display: grid; gap: 3px; }
+.profile-preview dt { color: color-mix(in srgb, var(--cream) 55%, transparent); font: 500 0.58rem/1 var(--font-mono); }
+.profile-preview dd { color: var(--cream); font: 600 0.72rem/1.25 var(--font-mono); }
+.profile-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.profile-cards label {
+  position: relative;
+  display: block;
+  padding: 13px 14px;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  background: var(--cream-2);
+  cursor: pointer;
+}
+.profile-cards label.selected { background: color-mix(in srgb, var(--lime) 34%, var(--cream)); box-shadow: 4px 4px 0 var(--ink); }
+.profile-cards input { position: absolute; opacity: 0; pointer-events: none; }
+.profile-cards label > span { display: grid; gap: 4px; }
+.profile-cards b { font-size: 0.86rem; }
+.profile-cards small { color: var(--ink-soft); font-size: 0.72rem; line-height: 1.4; }
+.profile-cards em { color: var(--blue); font: 600 0.62rem/1 var(--font-mono); font-style: normal; }
+.profile-advanced-toggle { justify-self: start; }
+.profile-advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; border: 2px dashed var(--ink); border-radius: 15px; }
+.content-warning-fieldset { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 14px; border: 2px solid var(--ink); border-radius: 15px; }
+.content-warning-fieldset legend { padding: 0 7px; font: 700 0.72rem/1 var(--font-mono); }
+.content-warning-fieldset legend span { color: var(--ink-soft); font-weight: 400; }
+.content-warning-fieldset .nf-check { font-size: 0.8rem; }
+.setup-context-summary { display: flex; flex-wrap: wrap; gap: 7px; }
+.setup-context-summary span { padding: 5px 9px; border: 2px solid var(--ink); border-radius: 999px; background: var(--cream-2); font: 600 0.64rem/1 var(--font-mono); }
+.wizard-actions { padding-top: 8px; border-top: 2px solid var(--ink); }
+
+@media (max-width: 760px) {
+  .modal-card.project-wizard { padding: 24px 20px; }
+  .wizard-steps li { justify-content: center; padding: 8px 4px; font-size: 0; }
+  .wizard-steps li span { font-size: 0.7rem; }
+  .wizard-style-grid,
+  .wizard-style-fields,
+  .profile-cards,
+  .profile-advanced-grid { grid-template-columns: 1fr; }
+}
+
 /* ============================== CHOICE-DRIVEN AGENT ============================== */
 .agent-panel {
   overflow: hidden;

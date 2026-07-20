@@ -21,11 +21,13 @@ class ErrorResponse(BaseModel):
 
 # ── Projects ──────────────────────────────────────────────────────────────────
 
-# genre 单一事实源：前端 GENRE_OPTIONS（CreateProjectModal.tsx）的 value 集合必须与此一致。
-# default 是通用兜底项：手填路径允许，但不作为「生成」候选的题材枚举。
+# Compatibility whitelist used by PlotSetting validation.  The user-facing
+# source of truth is GET /v1/catalogs/genres; the frontend must not copy it.
 GENRE_VALUES: tuple[str, ...] = (
     "xuanhuan", "xianxia", "dushi", "kehuan", "lishi",
     "wuxia", "yanqing", "xuanyi", "default",
+    "fantasy", "science_fiction", "romance", "mystery", "thriller",
+    "young_adult", "speculative_fiction",
 )
 GENRE_GENERATABLE: tuple[str, ...] = tuple(g for g in GENRE_VALUES if g != "default")
 
@@ -44,7 +46,23 @@ class PlotSetting(BaseModel):
     tone: Optional[str] = None
 
 
-class ProjectCreateRequest(BaseModel):
+class WritingSelectionFields(BaseModel):
+    """Project writing dimensions shared by create and pre-create suggest."""
+
+    content_language: Literal["zh-CN", "en-US", "en-GB"] = "zh-CN"
+    target_market: Optional[Literal["cn_web", "global_english", "us", "uk"]] = None
+    publication_format: Optional[Literal["web_serial", "novel"]] = None
+    primary_genre: Optional[str] = None
+    story_tags: list[str] = Field(default_factory=list, max_length=30)
+    audience_rating: Optional[Literal["general", "young_adult", "adult"]] = None
+    content_warnings: list[str] = Field(default_factory=list, max_length=30)
+    writing_profile_id: Optional[str] = None
+    # Accepted compatibility name from the product PRD.
+    style_preset_id: Optional[str] = None
+    writing_profile_overrides: dict = Field(default_factory=dict)
+
+
+class ProjectCreateRequest(WritingSelectionFields):
     # Choice-driven Agent entry permits a zero-text start.  The projects API
     # assigns a genre-aware title when this is blank or omitted.
     name: str = ""
@@ -65,9 +83,20 @@ class ProjectResponse(BaseModel):
     archived: bool = False
     power_system: Optional[str] = None         # 回显
     premise: Optional[str] = None              # 回显
+    content_language: str = "zh-CN"
+    target_market: str = "cn_web"
+    publication_format: str = "web_serial"
+    primary_genre: Optional[str] = None
+    story_tags: list[str] = Field(default_factory=list)
+    audience_rating: str = "general"
+    content_warnings: list[str] = Field(default_factory=list)
+    writing_profile_id: str = "cn_web_novel_v1"
+    writing_profile_version: int = 0
+    writing_profile_effective_from_chapter: int = 1
+    writing_profile_summary: dict = Field(default_factory=dict)
 
 
-class SettingSuggestRequest(BaseModel):
+class SettingSuggestRequest(WritingSelectionFields):
     """生成 N 个情节设定候选（建项目前，无 project DB）。
 
     - locked + locked_fields：锁定字段作为条件生成前提。
@@ -88,6 +117,22 @@ class SettingSuggestResponse(BaseModel):
     candidates: list[PlotSetting]
     degraded: bool = False                     # 无 key / 解析失败 → 兜底示例，前端明示
     tier_used: Optional[str] = None            # generate_validated 实际档位
+
+
+class WritingProfilePatchRequest(BaseModel):
+    content_language: Optional[Literal["zh-CN", "en-US", "en-GB"]] = None
+    target_market: Optional[Literal["cn_web", "global_english", "us", "uk"]] = None
+    publication_format: Optional[Literal["web_serial", "novel"]] = None
+    primary_genre: Optional[str] = None
+    story_tags: Optional[list[str]] = Field(default=None, max_length=30)
+    audience_rating: Optional[Literal["general", "young_adult", "adult"]] = None
+    content_warnings: Optional[list[str]] = Field(default=None, max_length=30)
+    writing_profile_id: Optional[str] = None
+    writing_profile_overrides: Optional[dict] = None
+    effective_from_chapter: Optional[int] = Field(default=None, ge=1)
+    confirm_high_risk: bool = False
+    change_reason: Optional[str] = Field(default=None, max_length=500)
+    changed_by: str = Field(default="user", min_length=1, max_length=100)
 
 
 # ── Capture ───────────────────────────────────────────────────────────────────
@@ -826,6 +871,11 @@ class StyleAnchorCreate(BaseModel):
     emotion: str = Field(min_length=1, max_length=50)
     title: Optional[str] = Field(default=None, max_length=200)
     content: str = Field(min_length=50, max_length=2000)   # 300-500 字最佳，硬限 50-2000
+    language: Literal["zh-CN", "en-US", "en-GB"] = "zh-CN"
+    source_type: Literal["user", "official", "licensed", "legacy"] = "user"
+    source_note: Optional[str] = Field(default=None, max_length=500)
+    rights_confirmed: bool = False
+    profile_tags: list[str] = Field(default_factory=list, max_length=30)
 
 
 class StyleAnchorUpdate(BaseModel):
@@ -833,6 +883,11 @@ class StyleAnchorUpdate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
     content: Optional[str] = Field(default=None, min_length=50, max_length=2000)
     enabled: Optional[bool] = None
+    language: Optional[Literal["zh-CN", "en-US", "en-GB"]] = None
+    source_type: Optional[Literal["user", "official", "licensed", "legacy"]] = None
+    source_note: Optional[str] = Field(default=None, max_length=500)
+    rights_confirmed: Optional[bool] = None
+    profile_tags: Optional[list[str]] = Field(default=None, max_length=30)
 
 
 class StyleAnchorResponse(BaseModel):
@@ -841,6 +896,11 @@ class StyleAnchorResponse(BaseModel):
     title: Optional[str] = None
     content: str
     enabled: bool = True
+    language: str = "zh-CN"
+    source_type: str = "legacy"
+    source_note: Optional[str] = None
+    rights_confirmed: bool = False
+    profile_tags: list[str] = Field(default_factory=list)
     created_at: Optional[str] = None
 
 

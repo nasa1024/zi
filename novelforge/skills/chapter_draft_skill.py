@@ -15,6 +15,7 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..control_plane.llm.tiers import ModelTier
+from ..writing_profiles import compile_system_prompt, get_project_writing_profile
 
 
 _CONTRACT = SkillContract(
@@ -25,7 +26,8 @@ _CONTRACT = SkillContract(
     inputs=IOSpec(["recall_pack", "beats"], "召回包 + beat sheet"),
     outputs=IOSpec(["draft_text", "proposals"], "草稿正文 + 可选兼容提案"),
     dod=[
-        DoDCheck("min_length", "草稿字数 ≥ 1000 字"),
+        DoDCheck("min_length", "草稿达到项目 writing profile 的硬下限"),
+        DoDCheck("language_match", "草稿主语言与项目 content_language 一致"),
         DoDCheck("proposal_output_valid", "无提案或合法 proposals 数组"),
     ],
     read_scopes=["entities", "facts", "beats"],
@@ -48,6 +50,22 @@ _SYSTEM = """\
 只输出以上代码块，不要其他说明。
 """
 
+_SYSTEM_EN = """\
+You are zi's fiction drafting assistant. Write one complete English-language
+chapter that follows the locked world state, chapter contract, beat sheet, and
+writing profile.
+
+Return only one code block:
+```draft
+(the complete chapter in natural American English)
+```
+
+Stay in the configured point of view and tense. Use English dialogue
+punctuation and paragraphing. Do not add commentary or proposals; state-change
+extraction runs only after a final candidate is selected. Do not imitate a
+named author or copy wording from a style reference.
+"""
+
 
 class ChapterDraftSkill:
     contract = _CONTRACT
@@ -57,6 +75,14 @@ class ChapterDraftSkill:
         beats: list[dict] = ctx.workspace.get("beats", [])
         chapter_goal: str = ctx.workspace.get("chapter_goal", "")
         target_chars: int = ctx.extra.get("draft_target_chars", 3000)
+        profile = ctx.workspace.get("writing_profile") or get_project_writing_profile(
+            ctx.conn, chapter=ctx.target_chapter,
+        )
+        language = str(profile.get("content_language") or "zh-CN")
+        is_english = language.startswith("en")
+        quality_rules = profile.get("quality_rules") or {}
+        target_range = quality_rules.get("chapter_word_range") or [1500, 2500]
+        target_words = int(ctx.extra.get("draft_target_words") or sum(target_range) / 2)
 
         # M1-⑥：稳定前缀（慢变设定）在前、动态状态居中、本章任务最后——
         # 同章 draft/check/revise 与多候选生成的 user 消息共享首段字节，
@@ -64,15 +90,24 @@ class ChapterDraftSkill:
         stable = ctx.workspace.get("stable_context")
         dynamic = ctx.workspace.get("dynamic_context")
         if stable is None and recall is not None:
-            _s = recall.to_stable_context_str()
-            stable = f"## 世界设定（稳定）\n{_s}" if _s else ""
-            dynamic = recall.to_dynamic_context_str()
+            _s = recall.to_stable_context_str(language)
+            if _s:
+                stable = (
+                    f"## Stable world context\n{_s}" if is_english
+                    else f"## 世界设定（稳定）\n{_s}"
+                )
+            else:
+                stable = ""
+            dynamic = recall.to_dynamic_context_str(language)
         context_block = "\n\n".join(
             p for p in (
                 stable or "",
-                f"## 世界状态（当前）\n{dynamic}" if dynamic else "",
+                (
+                    f"## Current world state\n{dynamic}" if is_english
+                    else f"## 世界状态（当前）\n{dynamic}"
+                ) if dynamic else "",
             ) if p
-        ) or "(无召回上下文)"
+        ) or ("(No recalled context)" if is_english else "(无召回上下文)")
         beats_str = _fmt_beats(beats)
 
         # Prompt 顺序固定为：稳定世界 → 当前状态 → 计划契约 → 文风 →
@@ -82,36 +117,69 @@ class ChapterDraftSkill:
             ctx.workspace.get("chapter_contract_context")
             or ctx.workspace.get("future_guardrails", "")
         )
-        user_msg = (
-            f"{context_block}\n\n"
-            + (f"{contract_block}\n\n" if contract_block else "")
-            + (f"{anchor_block}\n\n" if anchor_block else "")
-            + f"## 本章任务\n"
-            f"第 {ctx.target_chapter} 章\n"
-            f"目标字数：约 {target_chars} 字\n"
-            f"章节目标：{chapter_goal or '按情节发展'}\n\n"
-            f"## Beat Sheet\n{beats_str}"
-        )
+        if is_english:
+            user_msg = (
+                f"{context_block}\n\n"
+                + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{anchor_block}\n\n" if anchor_block else "")
+                + "## Chapter Task\n"
+                + f"Chapter {ctx.target_chapter}\n"
+                + f"Target length: {target_range[0]}-{target_range[1]} words "
+                  f"(aim for about {target_words})\n"
+                + f"Chapter goal: {chapter_goal or 'Advance the story according to the profile.'}\n\n"
+                + f"## Beat Sheet\n{beats_str}"
+            )
+        else:
+            user_msg = (
+                f"{context_block}\n\n"
+                + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{anchor_block}\n\n" if anchor_block else "")
+                + f"## 本章任务\n"
+                f"第 {ctx.target_chapter} 章\n"
+                f"目标字数：约 {target_chars} 字\n"
+                f"章节目标：{chapter_goal or '按情节发展'}\n\n"
+                f"## Beat Sheet\n{beats_str}"
+            )
 
         from ..control_plane.llm.provider import CacheHint, Message
         # 根据 provider 能力动态选 max_tokens：取模型上限的一半（留余量），最少 8192
         model_id = ctx.llm.model_for(ModelTier.STRONG)
         caps = ctx.llm._provider.capabilities(model_id)
-        max_out = min(caps.max_tokens_out // 2, 32_000)   # 草稿阶段不需要超长输出
-        max_out = max(max_out, 8192)
+        if is_english:
+            # A safe upper bound derived from the requested word range.  English
+            # prose usually needs fewer than two output tokens per word, with a
+            # modest allowance for formatting and model variance.
+            desired = int(target_range[1] * 1.8) + 1024
+            max_out = min(caps.max_tokens_out, max(2048, desired), 32_000)
+        else:
+            max_out = min(caps.max_tokens_out // 2, 32_000)
+            max_out = max(min(caps.max_tokens_out, 8192), max_out)
 
         # P0#2（generate_validated 全场景覆盖）：草稿完全无产出（接口畸形/截断成
-        # 空文）是当前唯一会中断整章的机械失败——已在最高档 STRONG 无档可升，
-        # 用 attempts_per_tier=2 做一次同档重采样抢救；正常产出仍然单次调用。
+        # 空文）、语言错误或未达到 profile 硬下限时在同档重采样一次。把这些
+        # 硬约束放进 parser，避免“有文本但 DoD 失败”的稿件绕过 validated 重试。
+        from ..text_metrics import count_content_units, language_matches
+        hard_min = int(quality_rules.get("hard_min_words") or 1000)
+
         def _parse_draft(text: str):
             d, p = _parse_output(text, ctx.target_chapter)
-            return (d, p, text) if d.strip() else None
+            if not d.strip():
+                return None
+            # Preserve the legacy Chinese single-call behavior.  English P0
+            # introduces locked word/language gates and therefore validates
+            # them before accepting a generated response.
+            if is_english:
+                if count_content_units(d, language) < hard_min:
+                    return None
+                if not language_matches(d, language):
+                    return None
+            return d, p, text
 
         result = ctx.llm.generate_validated(
             ModelTier.STRONG,
             [Message(role="user", content=user_msg)],
             parse=_parse_draft,
-            system=_SYSTEM,
+            system=compile_system_prompt(_SYSTEM, profile, english_system=_SYSTEM_EN),
             max_tokens=max_out,
             # M3-①: 多候选时由 orchestrator 注入不同温度制造多样性
             temperature=ctx.extra.get("temperature", 1.0),
@@ -130,11 +198,21 @@ class ChapterDraftSkill:
         ctx.workspace["draft_raw"] = raw_text
         ctx.workspace["draft_tier_used"] = result.tier_used
 
-        char_count = len(draft_text)
+        content_count = count_content_units(draft_text, language)
+        language_ok = language_matches(draft_text, language)
         proposal_output_valid = _proposal_output_valid(raw_text)
         dod = [
-            DoDOutcome("min_length", passed=char_count >= 1000,
-                       detail=f"字数={char_count}"),
+            DoDOutcome(
+                "min_length", passed=content_count >= hard_min,
+                detail=(
+                    f"words={content_count}; hard_min={hard_min}"
+                    if is_english else f"字数={content_count}"
+                ),
+            ),
+            DoDOutcome(
+                "language_match", passed=language_ok,
+                detail=f"expected={language}",
+            ),
             DoDOutcome("proposal_output_valid", passed=proposal_output_valid,
                        detail=f"proposals={len(proposals)}; valid={proposal_output_valid}"),
         ]

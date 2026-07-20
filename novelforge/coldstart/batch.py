@@ -3,10 +3,10 @@
 单章版 ColdExtractSkill 只能"一章文本 → staging 提案"。本模块补齐存量迁移
 的三块缺口：
 
-1. split_manuscript()：整部已写好的正文（几十万字）按「第N章/回」标题自动
-   切章；无标题时按固定字数分块兜底。
-2. dedup_proposals()：冷启动会抽出大量重复/近似设定——先做规范化哈希精确
-   去重，再在同 (entity, fact_type) 簇内做字符 bigram Jaccard 近邻去噪；
+1. split_manuscript()：整部正文按「第N章/回」或 ``Chapter N/One/XII``、
+   Prologue/Epilogue 标题自动切章；无标题时按固定字数分块兜底。
+2. dedup_proposals()：先做规范化哈希精确去重，再在同 (entity, fact_type)
+   簇内做中文字符 bigram / 英文词元 Jaccard 近邻去噪；
    与既有 canon facts 逐字重复的直接丢弃。
 3. tier_route_proposals()：按 risk_tier 分层晋升——低风险可由程序直接
    commit_canon（auto_promote_low_risk=True 时），中/高风险统一进
@@ -30,10 +30,23 @@ from ..ids import new_id
 
 # ── 1. 切章 ───────────────────────────────────────────────────────────────────
 
+_EN_NUMBER_WORDS = (
+    "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    "twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+    "nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+    "hundred|thousand|and|first|second|third"
+)
+
 _CHAPTER_HEAD = re.compile(
-    r"^\s*(?:第\s*([0-9零一二三四五六七八九十百千两]+)\s*[章回节卷]|Chapter\s+(\d+))"
-    r"[^\n]*$",
-    re.MULTILINE,
+    rf"""^\s*(?:
+        第\s*(?P<cn>[0-9零一二三四五六七八九十百千两]+)\s*[章回节卷]
+        |
+        (?P<special>prologue|epilogue|interlude)\b
+        |
+        chapter\s+(?P<en>\d+|[ivxlcdm]+|(?:{_EN_NUMBER_WORDS})(?:[\s-]+(?:{_EN_NUMBER_WORDS}))*)
+        (?=\s|[:.\-–—]|$)
+    )[^\n]*$""",
+    re.MULTILINE | re.IGNORECASE | re.VERBOSE,
 )
 
 _CN_NUM = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -60,13 +73,70 @@ def _cn_to_int(s: str) -> Optional[int]:
     return total or None
 
 
+_EN_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19,
+    "first": 1, "second": 2, "third": 3,
+}
+_EN_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
+def _roman_to_int(value: str) -> Optional[int]:
+    value = value.upper()
+    if not value or not re.fullmatch(
+        r"M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})",
+        value,
+    ):
+        return None
+    numbers = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100,
+               "D": 500, "M": 1000}
+    total = previous = 0
+    for char in reversed(value):
+        current = numbers[char]
+        total += -current if current < previous else current
+        previous = max(previous, current)
+    return total or None
+
+
+def _en_to_int(value: str) -> Optional[int]:
+    value = (value or "").strip().casefold()
+    if value.isdigit():
+        return int(value)
+    roman = _roman_to_int(value)
+    if roman is not None:
+        return roman
+    tokens = [token for token in re.split(r"[\s-]+", value) if token != "and"]
+    if not tokens:
+        return None
+    total = current = 0
+    for token in tokens:
+        if token in _EN_ONES:
+            current += _EN_ONES[token]
+        elif token in _EN_TENS:
+            current += _EN_TENS[token]
+        elif token == "hundred":
+            current = (current or 1) * 100
+        elif token == "thousand":
+            total += (current or 1) * 1000
+            current = 0
+        else:
+            return None
+    return total + current or None
+
+
 def split_manuscript(
     text: str, *, fallback_chunk_chars: int = 3000, max_chapters: int = 500,
 ) -> list[dict]:
     """整本正文 → [{chapter_no, title, text}]。
 
-    优先按「第N章/回/节」标题切；无标题时按 fallback_chunk_chars 均块兜底
-    （章号从 1 递增）。章号解析失败或重复时按出现顺序重编号。
+    优先按中文章标或英文 Chapter/Prologue/Epilogue 切；无标题时按
+    fallback_chunk_chars 均块兜底。章号解析失败或重复时按出现顺序重编号。
     """
     text = (text or "").strip()
     if not text:
@@ -74,14 +144,17 @@ def split_manuscript(
 
     heads = list(_CHAPTER_HEAD.finditer(text))
     chapters: list[dict] = []
-    if len(heads) >= 2:
+    if heads:
         for i, m in enumerate(heads[:max_chapters]):
             start = m.end()
             end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
             body = text[start:end].strip()
             if not body:
                 continue
-            no = _cn_to_int(m.group(1) or m.group(2) or "")
+            no = (
+                _cn_to_int(m.group("cn") or "")
+                if m.group("cn") else _en_to_int(m.group("en") or "")
+            )
             chapters.append({
                 "chapter_no": no,
                 "title": m.group(0).strip(),
@@ -112,19 +185,32 @@ def split_manuscript(
 
 # ── 2. 去噪（哈希精确去重 + 近邻聚类）─────────────────────────────────────────
 
-def _prop_key(p: dict) -> tuple:
+def _normalize_dedup_text(value: object, language: str) -> str:
+    text = " ".join(str(value or "").split())
+    return text.casefold() if language.startswith("en") else text
+
+
+def _prop_key(p: dict, language: str = "zh-CN") -> tuple:
     new = p.get("new") or {}
     return (
-        str(p.get("fact_type") or "").strip(),
-        str(p.get("entity") or new.get("subject") or "").strip(),
-        str(new.get("predicate") or "").strip(),
-        str(new.get("object") or "").strip(),
+        _normalize_dedup_text(p.get("fact_type"), language),
+        _normalize_dedup_text(p.get("entity") or new.get("subject"), language),
+        _normalize_dedup_text(new.get("predicate"), language),
+        _normalize_dedup_text(new.get("object"), language),
     )
 
 
 def _bigrams(s: str) -> set[str]:
     s = re.sub(r"\s+", "", s)
     return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else {s} if s else set()
+
+
+def _near_features(value: str, language: str) -> set[str]:
+    if language.startswith("en"):
+        from ..tokenizer import cut
+
+        return set(cut(value, language))
+    return _bigrams(value)
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -135,12 +221,13 @@ def _jaccard(a: set, b: set) -> float:
 
 def dedup_proposals(
     proposals: list[dict], conn: Optional[sqlite3.Connection] = None,
-    *, near_threshold: float = 0.6,
+    *, near_threshold: float = 0.6, language: str = "zh-CN",
 ) -> tuple[list[dict], int]:
     """三段式去噪：canon 已有 → 丢；规范化键重复 → 丢；同簇近邻 → 丢。
 
     Returns (kept, dropped_count)。near_threshold 为同 (entity, fact_type)
-    簇内 "predicate object" 字符 bigram 的 Jaccard 上限，超过视为近似重复。
+    簇内 ``predicate object`` 特征的 Jaccard 上限：中文用字符 bigram，
+    英文用小写化词元。
     """
     kept: list[dict] = []
     dropped = 0
@@ -149,7 +236,7 @@ def dedup_proposals(
     clusters: dict[tuple, list[set]] = {}
 
     for p in proposals:
-        key = _prop_key(p)
+        key = _prop_key(p, language)
         # a) 规范化键精确去重（跨章的同一条设定只留最早一条）
         if key in seen_keys:
             dropped += 1
@@ -157,11 +244,20 @@ def dedup_proposals(
         # b) 与既有 canon facts 逐字重复 → 丢弃（存量迁移分批跑时防重灌）
         if conn is not None and key[1] and key[2] and key[3]:
             try:
-                row = conn.execute(
-                    "SELECT 1 FROM facts WHERE status='canon'"
-                    "  AND subject=? AND predicate=? AND object=? LIMIT 1",
-                    (key[1], key[2], key[3]),
-                ).fetchone()
+                if language.startswith("en"):
+                    row = conn.execute(
+                        "SELECT 1 FROM facts WHERE status='canon'"
+                        "  AND subject=? COLLATE NOCASE"
+                        "  AND predicate=? COLLATE NOCASE"
+                        "  AND object=? COLLATE NOCASE LIMIT 1",
+                        (key[1], key[2], key[3]),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT 1 FROM facts WHERE status='canon'"
+                        "  AND subject=? AND predicate=? AND object=? LIMIT 1",
+                        (key[1], key[2], key[3]),
+                    ).fetchone()
             except Exception:
                 row = None
             if row is not None:
@@ -169,7 +265,7 @@ def dedup_proposals(
                 continue
         # c) 近邻去噪：同 (entity, fact_type) 簇内 predicate+object 高度相似
         ckey = (key[1], key[0])
-        grams = _bigrams(key[2] + key[3])
+        grams = _near_features(f"{key[2]} {key[3]}", language)
         if any(_jaccard(grams, g) >= near_threshold for g in clusters.get(ckey, [])):
             dropped += 1
             continue
@@ -363,26 +459,46 @@ class ColdStartJobManager:
         from concurrent.futures import ThreadPoolExecutor
         import os
 
-        from ..config import NovelForgeConfig
         from ..control_plane.budget import BudgetLedger
-        from ..control_plane.llm.factory import build_gateway
+        from ..control_plane.llm.runtime import (
+            build_configured_gateway,
+            build_project_config,
+        )
         from ..control_plane.skill_base import SkillContext
         from ..skills.cold_extract_skill import ColdExtractSkill
+        from ..writing_profiles import get_project_writing_profile
 
         try:
-            cfg = NovelForgeConfig(project_id=job.project_id, db_path="")
-            key = api_key or os.environ.get("DEEPSEEK_API_KEY") \
-                or os.environ.get("ANTHROPIC_API_KEY")
-            if key:
-                cfg.provider.api_key = key
-                cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-            else:
+            project_meta = registry.get(job.project_id)
+            profile_conn = registry.open_conn(job.project_id)
+            try:
+                profile = get_project_writing_profile(profile_conn)
+                cfg = build_project_config(
+                    job.project_id,
+                    project_meta.db_path if project_meta else "novel.db",
+                    profile_conn,
+                )
+            finally:
+                profile_conn.close()
+            # build_project_config already resolved provider-specific env keys,
+            # including OpenAI-compatible deployments.  An explicit legacy
+            # argument still wins; otherwise preserve that resolved provider.
+            if api_key:
+                cfg.provider.api_key = api_key
+                cfg.provider.provider = os.environ.get(
+                    "NOVELFORGE_PROVIDER", "deepseek",
+                )
+            elif not cfg.provider.api_key:
                 cfg.provider.provider = "fake"
-            gw = build_gateway(cfg, ledger=BudgetLedger())
+            gw = build_configured_gateway(cfg, ledger=BudgetLedger())
             skill = ColdExtractSkill()
 
             def _extract(ch: dict) -> list[dict]:
-                ws = {"source_text": ch["text"], "chapter_no": ch["chapter_no"]}
+                ws = {
+                    "source_text": ch["text"],
+                    "chapter_no": ch["chapter_no"],
+                    "writing_profile": profile,
+                }
                 ctx = SkillContext(
                     project_id=job.project_id,
                     target_chapter=ch["chapter_no"], mode="human_gate",
@@ -415,7 +531,6 @@ class ColdStartJobManager:
             try:
                 from ..control_plane.orchestrator import _persist_draft
 
-                project_meta = registry.get(job.project_id)
                 draft_ids: dict[int, str] = {}
                 chapter_texts: dict[int, str] = {}
                 # 冷启动正文先进入 L0；来源原子因此可回读、可校验、可幂等。
@@ -459,7 +574,10 @@ class ColdStartJobManager:
                                     ensure_ascii=False),
                          1, max(1, len(text.splitlines())), source_hash),
                     )
-                kept, dropped = dedup_proposals(all_props, conn)
+                kept, dropped = dedup_proposals(
+                    all_props, conn,
+                    language=str(profile.get("content_language") or "zh-CN"),
+                )
                 job.dedup_dropped = dropped
                 routed = tier_route_proposals(
                     conn, kept, auto_promote_low_risk=auto_promote_low_risk,

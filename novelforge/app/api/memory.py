@@ -429,13 +429,16 @@ def search_facts(
         keyword_query = _sanitize_keyword_query(q)
         if not keyword_query:
             return {"hits": [], "mode": "bm25"}
+        from ...db.connection import project_tokenizer_context
+
+        language, terms = project_tokenizer_context(conn)
         rows = conn.execute(
             "SELECT f.id, f.subject, f.predicate, f.object, f.valid_from_chapter"
             " FROM facts_fts fts"
             " JOIN facts f ON f.id=fts.fact_id"
             " WHERE fts.facts_fts MATCH ?"
             " ORDER BY bm25(fts.facts_fts) LIMIT ?",
-            (_fts_escape(keyword_query), top_k),
+            (_fts_escape(keyword_query, language, user_terms=terms), top_k),
         ).fetchall()
         hits = [
             {"id": r["id"], "snippet": f"{r['predicate']}: {r['object']}",
@@ -458,12 +461,19 @@ def _resolve_entity(ref: str, conn) -> str | None:
     return row["id"] if row else None
 
 
-def _fts_escape(q: str) -> str:
+def _fts_escape(
+    q: str,
+    language: str = "zh-CN",
+    *,
+    user_terms=None,
+) -> str:
     """将用户关键词转为纯文本 token 查询，不允许注入 FTS5 操作符。"""
-    from ...tokenizer import cut
+    from ...tokenizer import tokenize
 
     tokens: list[str] = []
-    for token in cut((q or "")[:500]):
+    for token in tokenize(
+        (q or "")[:500], language, user_terms=user_terms,
+    ).split():
         token = "".join(
             ch for ch in token.strip() if ch.isalnum() or ch == "_"
         )[:64]

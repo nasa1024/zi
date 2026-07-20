@@ -26,6 +26,8 @@ from .api.admin import router as admin_router
 from .api.summaries import router as summaries_router
 from .api.agent import router as agent_router
 from .api.planning import router as planning_router
+from .api.catalogs import router as catalogs_router
+from .api.writing_profiles import router as writing_profiles_router
 
 
 @asynccontextmanager
@@ -92,16 +94,24 @@ async def conflict(request, exc):
     detail = exc.detail
     if isinstance(detail, dict):
         message = str(detail.get("message") or "资源已被并发更新")
-        details = {key: value for key, value in detail.items() if key != "message"}
+        code = str(detail.get("code") or "conflict")
+        params = detail.get("params") if isinstance(detail.get("params"), dict) else {}
+        details = {
+            key: value for key, value in detail.items()
+            if key not in {"message", "code", "params"}
+        }
     else:
         message = str(detail)
+        code = "conflict"
+        params = {}
         details = {}
     return JSONResponse(
         status_code=409,
         content={
             "error": {
-                "code": "conflict",
+                "code": code,
                 "message": message,
+                "params": params,
                 "details": details,
             }
         },
@@ -123,6 +133,8 @@ app.include_router(admin_router, prefix=PREFIX)
 app.include_router(summaries_router, prefix=PREFIX)
 app.include_router(agent_router, prefix=PREFIX)
 app.include_router(planning_router, prefix=PREFIX)
+app.include_router(catalogs_router, prefix=PREFIX)
+app.include_router(writing_profiles_router, prefix=PREFIX)
 
 
 @app.get("/health")

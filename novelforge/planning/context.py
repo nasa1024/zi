@@ -113,7 +113,9 @@ class PlanContext:
             "forbidden_reveals": self.forbidden_reveals,
         }
 
-    def render_for_planner(self) -> str:
+    def render_for_planner(self, language: str = "zh-CN") -> str:
+        if str(language).startswith("en"):
+            return _render_for_planner_en(self)
         parts: list[str] = []
         if self.story_plan:
             parts.append(
@@ -171,7 +173,7 @@ class PlanContext:
             parts.append("## 禁止提前揭示/兑现\n" + "\n".join(lines))
         return "\n\n".join(parts)
 
-    def render_contract_for_draft(self) -> str:
+    def render_contract_for_draft(self, language: str = "zh-CN") -> str:
         """Render the immutable story anchors and the complete chapter contract.
 
         This is deliberately separate from historical recall: everything in
@@ -179,6 +181,8 @@ class PlanContext:
         happened.  The renderer also understands v16 cards, so older projects
         degrade to the fields they actually possess.
         """
+        if str(language).startswith("en"):
+            return _render_contract_for_draft_en(self)
         parts: list[str] = []
 
         if self.story_plan:
@@ -269,7 +273,9 @@ class PlanContext:
 
         return "\n\n".join(parts)
 
-    def render_guardrails_for_draft(self) -> str:
+    def render_guardrails_for_draft(self, language: str = "zh-CN") -> str:
+        if str(language).startswith("en"):
+            return _render_guardrails_for_draft_en(self)
         parts: list[str] = []
         if self.lookahead:
             parts.append(
@@ -298,6 +304,190 @@ class PlanContext:
             "## 未来剧情护栏（作者视角；绝不能写成已经发生）\n"
             + "\n".join(f"- {p}" for p in parts)
         )
+
+
+def _render_for_planner_en(context: PlanContext) -> str:
+    parts: list[str] = []
+    if context.story_plan:
+        parts.append(
+            "## Whole-story direction (future intent, not established fact)\n"
+            f"- Plan: {context.story_plan.get('title', '')}\n"
+            f"- Ending direction: {context.story_plan.get('ending_direction') or 'Not specified'}\n"
+            f"- Phase route: {context.story_plan.get('phase_summary') or 'Not specified'}"
+        )
+    if context.current_volume:
+        parts.append(
+            "## Current volume objective\n"
+            f"{context.current_volume.get('title', '')}: "
+            f"{context.current_volume.get('synopsis') or ''}\n"
+            f"Objective: {context.current_volume.get('objective') or 'Not specified'}"
+        )
+    if context.current_contract:
+        beats = "\n".join(
+            f"  {beat.get('seq')}. [{beat.get('beat_type')}] {beat.get('summary')}"
+            for beat in context.current_contract.get("beats") or []
+        )
+        parts.append(
+            "## Selected chapter contract\n"
+            f"Title: {context.current_contract.get('title') or 'Untitled'}\n"
+            f"Goal: {context.current_contract.get('goal') or ''}\n"
+            f"Beats:\n{beats or '(No beats selected yet)'}"
+        )
+    if context.active_arcs:
+        lines = [
+            f"- [{arc.get('arc_type', 'other')}] {arc.get('title', '')}: "
+            f"{arc.get('objective') or arc.get('summary') or ''} "
+            f"(Chapters {arc.get('start_chapter', '?')}-{arc.get('end_chapter') or '?'}, "
+            f"priority {arc.get('priority', 3)})"
+            for arc in context.active_arcs
+        ]
+        parts.append("## Active story arcs\n" + "\n".join(lines))
+    if context.lookahead:
+        lines = [
+            f"- Chapter {item['chapter']}: {item.get('goal') or item.get('summary') or ''}"
+            + (f"; hook: {item['hook_text']}" if item.get("hook_text") else "")
+            for item in context.lookahead
+        ]
+        parts.append(
+            "## Upcoming route (seed only; do not resolve early)\n" + "\n".join(lines)
+        )
+    if context.due_milestones:
+        lines = [
+            f"- {item['title']}: {item['summary']} (window "
+            f"{item.get('due_start_chapter') or '?'}-{item.get('due_end_chapter') or '?'})"
+            for item in context.due_milestones
+        ]
+        parts.append("## Active milestones\n" + "\n".join(lines))
+    if context.forbidden_reveals:
+        lines = [
+            f"- Do not reveal or resolve before Chapter {item['not_before_chapter']}: "
+            f"{item['title']} ({item['summary']})"
+            for item in context.forbidden_reveals
+        ]
+        parts.append("## Forbidden early reveals or resolutions\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _render_contract_for_draft_en(context: PlanContext) -> str:
+    parts: list[str] = []
+    if context.story_plan:
+        story_lines = [
+            f"- Core premise: {context.story_plan.get('premise') or 'Not specified'}",
+            f"- Ending direction: {context.story_plan.get('ending_direction') or 'Not specified'}",
+        ]
+        if context.story_plan.get("phase_summary"):
+            story_lines.append(f"- Phase route: {context.story_plan['phase_summary']}")
+        constraints = context.story_plan.get("constraints") or {}
+        if constraints:
+            story_lines.append(
+                "- Whole-story constraints: "
+                + json.dumps(constraints, ensure_ascii=False, separators=(",", ":"))
+            )
+        parts.append(
+            "## Immutable story anchors (future intent, not established fact)\n"
+            + "\n".join(story_lines)
+        )
+
+    if context.current_volume:
+        volume_lines = [
+            f"- Volume: {context.current_volume.get('title') or 'Untitled'}",
+            f"- Objective: {context.current_volume.get('objective') or 'Not specified'}",
+        ]
+        if synopsis := context.current_volume.get("synopsis"):
+            volume_lines.append(f"- Synopsis: {synopsis}")
+        key_results = [
+            text for item in _as_list(context.current_volume.get("key_results"))
+            if (text := _kr_text(item))
+        ]
+        if key_results:
+            volume_lines.append("- Key results:\n  - " + "\n  - ".join(key_results[:12]))
+        parts.append("## Current volume contract\n" + "\n".join(volume_lines))
+
+    contract = context.current_contract or {}
+    if contract:
+        chapter_lines = [
+            f"- Chapter: {contract.get('chapter') or context.target_chapter}",
+            f"- Title: {contract.get('title') or 'Untitled'}",
+            f"- Core goal: {contract.get('goal') or contract.get('summary') or 'Not specified'}",
+        ]
+        if contract.get("target_emotion"):
+            chapter_lines.append(f"- Target emotion: {contract['target_emotion']}")
+        if contract.get("hook_text"):
+            chapter_lines.append(f"- Ending promise: {contract['hook_text']}")
+        parts.append("## Locked chapter contract\n" + "\n".join(chapter_lines))
+
+        required = [
+            _bullet_block("### Must advance", contract.get("must_advance")),
+            _bullet_block("### Must resolve", contract.get("must_resolve")),
+            _bullet_block("### Required entities", contract.get("must_include_entities")),
+            _bullet_block("### Story arcs served", contract.get("arc_targets")),
+            _bullet_block("### Volume key results served", contract.get("volume_kr_targets")),
+            _bullet_block("### Milestones served", contract.get("milestone_targets")),
+        ]
+        required = [block for block in required if block]
+        if required:
+            parts.append("\n\n".join(required))
+
+        forbidden = [
+            _bullet_block("### Must not reveal", contract.get("must_not_reveal")),
+            _bullet_block("### Must not resolve", contract.get("must_not_resolve")),
+            _bullet_block("### Forbidden state changes", contract.get("forbidden_state_changes")),
+        ]
+        forbidden = [block for block in forbidden if block]
+        if forbidden:
+            parts.append("\n\n".join(forbidden))
+
+        if target_state := contract.get("target_state") or {}:
+            parts.append(
+                "### Target state after completion\n```json\n"
+                + json.dumps(target_state, ensure_ascii=False, indent=2)[:2400]
+                + "\n```"
+            )
+        if success := _bullet_block("### Success criteria", contract.get("success_criteria")):
+            parts.append(success)
+
+    if context.active_arcs:
+        lines = [
+            f"- {arc.get('id') or '?'} · {arc.get('title') or 'Untitled'}: "
+            f"{arc.get('objective') or arc.get('summary') or ''}"
+            for arc in context.active_arcs[:12]
+        ]
+        parts.append("## Currently active story arcs\n" + "\n".join(lines))
+
+    if guardrails := _render_guardrails_for_draft_en(context):
+        parts.append(guardrails)
+    return "\n\n".join(parts)
+
+
+def _render_guardrails_for_draft_en(context: PlanContext) -> str:
+    lines: list[str] = []
+    if context.lookahead:
+        lines.append(
+            "The next 1-5 chapters continue: "
+            + "; ".join(
+                f"Chapter {item['chapter']} {item.get('goal') or item.get('summary') or ''}"
+                for item in context.lookahead[:5]
+            )
+        )
+    if context.forbidden_reveals:
+        lines.append(
+            "Do not resolve early: "
+            + "; ".join(
+                f"{item['title']} (not before Chapter {item['not_before_chapter']})"
+                for item in context.forbidden_reveals[:8]
+            )
+        )
+    if context.due_milestones:
+        lines.append(
+            "Long-term milestones this chapter should serve: "
+            + "; ".join(item["title"] for item in context.due_milestones[:8])
+        )
+    if not lines:
+        return ""
+    return (
+        "## Future-story guardrails (author intent; never state as already happened)\n"
+        + "\n".join(f"- {line}" for line in lines)
+    )
 
 
 def _chapter_contract(conn: sqlite3.Connection, chapter: int) -> dict[str, Any] | None:

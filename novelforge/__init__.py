@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-SCHEMA_VERSION = "20"  # +章节契约版本、actuals 与偏航对账报告
+SCHEMA_VERSION = "21"  # +语言感知写作配置、版本历史与生成元数据

@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import Optional
+from typing import Any, Mapping, Optional
+
+from ..text_metrics import language_matches
 
 # §06.2.3 L3 触发的四类 canon 原子
 CANON_TYPES = {"world_rule", "new_entity", "foreshadowing", "constraint"}
@@ -39,8 +41,26 @@ _FORESHADOW_MARKERS = ("伏笔", "预言", "谶语", "预兆", "征兆", "暗示
 _CONSTRAINT_MARKERS = ("禁忌", "绝不得", "不得外传", "严禁", "禁止", "不可泄露",
                        "戒律", "绝不能", "违者")
 
+_WORLD_RULE_MARKERS_EN = (
+    "world rule", "law of magic", "law of the world", "immutable law",
+    "magic always", "magic never", "the rule is", "it is impossible for",
+)
+_FORESHADOW_MARKERS_EN = (
+    "prophecy", "prophesied", "omen", "foretold", "foretell", "destined",
+    "one day", "someday", "years from now", "a sign of what was to come",
+)
+_CONSTRAINT_MARKERS_EN = (
+    "forbidden", "must never", "may never", "cannot be revealed", "must not be revealed",
+    "under no circumstances", "prohibited", "taboo", "on pain of death",
+)
+
 # 书名号/引号内专名（新实体候选）
 _NAME_RE = re.compile(r"[《〈「『\"“]([^》〉」』\"”]{2,12})[》〉」』\"”]")
+_EN_NEW_ENTITY_RE = re.compile(
+    r"\b(?:called|named|known as|introduced as|the (?:order|kingdom|city|guild|academy) of)\s+"
+    r"(?:the\s+)?[\"“]?([A-Z][A-Za-z'’-]*(?:\s+[A-Z][A-Za-z'’-]*|"
+    r"\s+(?:of|the|and)\s+[A-Z][A-Za-z'’-]*){0,5})[\"”]?"
+)
 
 _L3_SYSTEM = (
     "你是 NovelForge 的 canon 级事件抽取器。只抽取以下四类、且本章明确出现的设定级信息："
@@ -52,27 +72,60 @@ _L3_SYSTEM = (
     "不确定就不要抽。只输出 JSON 数组，不要其它文字。"
 )
 
+_L3_SYSTEM_EN = (
+    "You are zi's canonical-event extractor. Extract only setting-level information that is "
+    "explicitly established in this chapter: world_rule (a world or magic law), new_entity "
+    "(a person, faction, or place first introduced here), foreshadowing (a newly planted omen "
+    "or prophecy), and constraint (a canon-level prohibition or limitation). Return a JSON "
+    "array whose items are {type, name, statement, evidence}. Keep these stable English keys. "
+    "Write statement in natural English using the project's selected regional variant, "
+    "preserve proper nouns exactly, and copy evidence as one continuous verbatim substring "
+    "from the chapter. Do not infer. Return [] when evidence is insufficient. Return JSON only."
+)
 
-def scan_canon_signals(text: str, known_entity_names: Optional[set] = None) -> list[dict]:
+
+def scan_canon_signals(
+    text: str,
+    known_entity_names: Optional[set] = None,
+    *,
+    language: Optional[str] = None,
+    writing_profile: Optional[Mapping[str, Any]] = None,
+) -> list[dict]:
     """确定性扫 canon 信号。返回 [{type, anchor}]，无信号返回 []。"""
     known = known_entity_names or set()
     text = text or ""
     sigs: list[dict] = []
 
-    def _hit(markers, typ):
+    profile = _normalize_explicit_profile(writing_profile)
+    selected_language = str(language or profile.get("content_language") or "zh-CN")
+    english = selected_language.lower().replace("_", "-").startswith("en")
+
+    def _hit(markers, typ, *, casefold: bool = False):
+        haystack = text.casefold() if casefold else text
         for m in markers:
-            if m in text:
-                sigs.append({"type": typ, "anchor": m})
+            needle = m.casefold() if casefold else m
+            if needle in haystack:
+                start = haystack.find(needle)
+                sigs.append({"type": typ, "anchor": text[start:start + len(m)]})
                 break
 
-    _hit(_WORLD_RULE_MARKERS, "world_rule")
-    _hit(_FORESHADOW_MARKERS, "foreshadowing")
-    _hit(_CONSTRAINT_MARKERS, "constraint")
-
-    for m in _NAME_RE.finditer(text):
-        name = m.group(1).strip()
-        if name and name not in known:
-            sigs.append({"type": "new_entity", "anchor": name})
+    if english:
+        _hit(_WORLD_RULE_MARKERS_EN, "world_rule", casefold=True)
+        _hit(_FORESHADOW_MARKERS_EN, "foreshadowing", casefold=True)
+        _hit(_CONSTRAINT_MARKERS_EN, "constraint", casefold=True)
+        known_folded = {str(name).casefold() for name in known}
+        for match in _EN_NEW_ENTITY_RE.finditer(text):
+            name = match.group(1).strip().rstrip(".,;:!?")
+            if name and name.casefold() not in known_folded:
+                sigs.append({"type": "new_entity", "anchor": name})
+    else:
+        _hit(_WORLD_RULE_MARKERS, "world_rule")
+        _hit(_FORESHADOW_MARKERS, "foreshadowing")
+        _hit(_CONSTRAINT_MARKERS, "constraint")
+        for match in _NAME_RE.finditer(text):
+            name = match.group(1).strip()
+            if name and name not in known:
+                sigs.append({"type": "new_entity", "anchor": name})
     return sigs
 
 
@@ -84,15 +137,25 @@ def extract_canon_events(
     *,
     known_entity_names: Optional[set] = None,
     tier: str = "mid",
+    writing_profile: Optional[Mapping[str, Any]] = None,
 ) -> list[dict]:
     """扫信号→（有信号才）LLM 归一化→证据校验→去重→proposal dicts。"""
+    profile = _resolve_writing_profile(conn, writing_profile)
+    language = str(profile.get("content_language") or "zh-CN")
     if known_entity_names is None:
         known_entity_names = _load_known_entities(conn)
-    signals = scan_canon_signals(draft_text, known_entity_names)
+    signals = scan_canon_signals(
+        draft_text,
+        known_entity_names,
+        language=language,
+        writing_profile=profile,
+    )
     if not signals:
         return []          # 零信号零 LLM 成本
 
-    atoms = _llm_normalize(gateway, tier, draft_text, signals)
+    atoms = _llm_normalize(
+        gateway, tier, draft_text, signals, writing_profile=profile,
+    )
     if not atoms:
         return []
 
@@ -100,7 +163,7 @@ def extract_canon_events(
     proposals: list[dict] = []
     seen: set = set()
     for a in atoms:
-        prop = _to_proposal(a, chapter, draft_text)
+        prop = _to_proposal(a, chapter, draft_text, writing_profile=profile)
         if prop is None:
             continue
         key = (prop["fact_type"], (prop.get("entity") or "").strip())
@@ -113,19 +176,38 @@ def extract_canon_events(
 
 # ── 私有 ──────────────────────────────────────────────────────────────────────
 
-def _llm_normalize(gateway, tier: str, draft_text: str, signals: list[dict]) -> list[dict]:
+def _llm_normalize(
+    gateway,
+    tier: str,
+    draft_text: str,
+    signals: list[dict],
+    *,
+    writing_profile: Optional[Mapping[str, Any]] = None,
+) -> list[dict]:
     from ..control_plane.llm.provider import Message
     from ..control_plane.llm.tiers import ModelTier
+    from ..writing_profiles import compile_system_prompt
 
     mt = getattr(ModelTier, {"fast": "FAST", "mid": "MID", "strong": "STRONG"}.get(tier, "MID"))
-    hint = "、".join(sorted({s["type"] for s in signals}))
+    profile = _normalize_explicit_profile(writing_profile)
+    language = str(profile.get("content_language") or "zh-CN")
+    english = language.lower().replace("_", "-").startswith("en")
+    hint = (", " if english else "、").join(sorted({s["type"] for s in signals}))
+    user_content = (
+        f"Detected possible canon signal classes: {hint}. Chapter source:\n\n{draft_text[:8000]}"
+        if english else f"本章疑似含 canon 信号（{hint}）。正文：\n\n{draft_text[:6000]}"
+    )
+    system = compile_system_prompt(
+        _L3_SYSTEM,
+        profile,
+        english_system=_L3_SYSTEM_EN,
+    )
     try:
         resp = gateway.generate(
             mt,
-            [Message(role="user",
-                     content=f"本章疑似含 canon 信号（{hint}）。正文：\n\n{draft_text[:6000]}")],
-            system=_L3_SYSTEM,
-            max_tokens=800,
+            [Message(role="user", content=user_content)],
+            system=system,
+            max_tokens=1200 if english else 800,
         )
         return _parse_atoms(resp.text)
     except Exception:
@@ -151,7 +233,13 @@ def _parse_atoms(text: str) -> list[dict]:
     return [a for a in data if isinstance(a, dict)] if isinstance(data, list) else []
 
 
-def _to_proposal(atom: dict, chapter: int, draft_text: str) -> Optional[dict]:
+def _to_proposal(
+    atom: dict,
+    chapter: int,
+    draft_text: str,
+    *,
+    writing_profile: Optional[Mapping[str, Any]] = None,
+) -> Optional[dict]:
     from ..contracts import normalize_proposal_fact_type
 
     typ = atom.get("type")
@@ -163,13 +251,21 @@ def _to_proposal(atom: dict, chapter: int, draft_text: str) -> Optional[dict]:
         return None
     if evidence not in draft_text:           # §06.3.1 证据后验校验
         return None
+    profile = _normalize_explicit_profile(writing_profile)
+    language = str(profile.get("content_language") or "zh-CN")
+    english = language.lower().replace("_", "-").startswith("en")
+    if english and not language_matches(statement, language):
+        return None
     entity = (atom.get("name") or None)
     return normalize_proposal_fact_type({
         "op": "add",
         "fact_type": _TYPE_TO_FACT[typ],
         "entity": entity,
         "new": {"statement": statement, "canon_kind": typ},
-        "reason": f"L3 事件驱动抽取（{typ}）",
+        "reason": (
+            f"L3 event-driven canonical extraction ({typ})"
+            if english else f"L3 事件驱动抽取（{typ}）"
+        ),
         "evidence_refs": [{"chapter": chapter, "quote": evidence}],
         "valid_from_chapter": chapter,
         "risk_tier": "medium",               # canon 级 → 人审兜底
@@ -205,3 +301,38 @@ def _load_known_entities(conn: sqlite3.Connection) -> set:
         return {r["canonical_name"] for r in rows if r["canonical_name"]}
     except Exception:
         return set()
+
+
+def _resolve_writing_profile(
+    conn: sqlite3.Connection,
+    writing_profile: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if writing_profile is not None:
+        return _normalize_explicit_profile(writing_profile)
+    try:
+        from ..writing_profiles import get_project_writing_profile
+
+        return get_project_writing_profile(conn)
+    except Exception:
+        return {"content_language": "zh-CN", "prompt_rules": {}, "quality_rules": {}}
+
+
+def _normalize_explicit_profile(
+    writing_profile: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    profile = dict(writing_profile or {})
+    if "content_language" not in profile and profile.get("language"):
+        profile["content_language"] = profile["language"]
+    if "writing_profile_id" not in profile:
+        profile["writing_profile_id"] = profile.get("profile_id") or profile.get("id")
+    if "writing_profile_version" not in profile and profile.get("profile_version") is not None:
+        profile["writing_profile_version"] = profile["profile_version"]
+    profile.setdefault("content_language", "zh-CN")
+    profile.setdefault("prompt_rules", {})
+    profile.setdefault("quality_rules", {})
+    if not profile.get("cache_key") and profile.get("writing_profile_id"):
+        profile["cache_key"] = (
+            f"{profile['content_language']}:{profile['writing_profile_id']}:"
+            f"{profile.get('writing_profile_version', 0)}:{profile.get('prompt_version', 0)}"
+        )
+    return profile

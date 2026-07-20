@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from typing import Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from ..ids import new_id
+from ..text_metrics import iter_words, language_matches
 from .embedding import Embedder
 from .vector_store import SceneVectorStore
 
@@ -24,6 +25,15 @@ _PARA_SPLIT_RE = re.compile(r"\n\s*\n")
 _L2_SCENE_SYSTEM = (
     "你是 NovelForge 的场景速记助手。把给定的小说场景原文压缩成不超过 80 字的"
     "客观摘要：发生地点、在场人物、关键动作或转折。只输出摘要正文，不要点评。"
+)
+
+_L2_SCENE_SYSTEM_EN = (
+    "You are zi's scene continuity summarizer. Compress the supplied fiction scene into "
+    "an objective summary of no more than 80 words. Preserve the original proper nouns "
+    "and cover location, present characters, decisive action, state change, and any turn "
+    "that later chapters must remember. Follow the locked writing profile, but do not "
+    "imitate the scene's prose or add facts. Return only a natural-English summary in the "
+    "project's selected regional variant, with no heading or commentary."
 )
 
 _TIER_MAP = {"fast": "FAST", "mid": "MID", "strong": "STRONG"}
@@ -109,11 +119,14 @@ def aggregate_chapter_scenes(
     summarize: bool = True,
     preserve_existing_summaries: bool = False,
     invalidate_vectors: bool = True,
+    writing_profile: Optional[Mapping[str, Any]] = None,
 ) -> int:
     """把一章切场景、生成摘要写 l2_scenes（幂等）；embedder 给定则同步建向量。
 
     Returns 写入的场景数（空正文返回 0）。
     """
+    profile = _resolve_writing_profile(conn, writing_profile)
+    language = str(profile.get("content_language") or "zh-CN")
     scenes = split_scenes(draft_text, max_scenes=max_scenes)
 
     try:
@@ -126,7 +139,9 @@ def aggregate_chapter_scenes(
                 (chapter, seq),
             ).fetchone()
             if summarize and gateway is not None:
-                summary = _summarize(gateway, tier, scene_text) or _fallback_summary(scene_text)
+                summary = _summarize(
+                    gateway, tier, scene_text, writing_profile=profile,
+                ) or _fallback_summary(scene_text, language=language)
             elif (
                 preserve_existing_summaries
                 and existing is not None
@@ -136,7 +151,7 @@ def aggregate_chapter_scenes(
                 # 无 gateway 的维护重建不应把已有高质量摘要静默降级为截断原文。
                 summary = existing["summary"]
             else:
-                summary = _fallback_summary(scene_text)
+                summary = _fallback_summary(scene_text, language=language)
             content_changed = (
                 existing is None
                 or existing["scene_text"] != scene_text
@@ -209,26 +224,58 @@ def aggregate_chapter_scenes(
         raise
 
 
-def _summarize(gateway, tier: str, scene_text: str) -> str:
+def _summarize(
+    gateway,
+    tier: str,
+    scene_text: str,
+    *,
+    writing_profile: Optional[Mapping[str, Any]] = None,
+) -> str:
     from ..control_plane.llm.provider import Message
     from ..control_plane.llm.tiers import ModelTier
+    from ..writing_profiles import compile_system_prompt
 
     mt = getattr(ModelTier, _TIER_MAP.get(tier, "FAST"))
+    profile = _normalize_explicit_profile(writing_profile)
+    language = str(profile.get("content_language") or "zh-CN")
+    english = language.lower().replace("_", "-").startswith("en")
+    system = compile_system_prompt(
+        _L2_SCENE_SYSTEM,
+        profile,
+        english_system=_L2_SCENE_SYSTEM_EN,
+    )
+    user_content = (
+        f"Scene source (preserve names and facts):\n\n{scene_text[:6000]}"
+        if english else f"场景原文：\n\n{scene_text[:4000]}"
+    )
     try:
         resp = gateway.generate(
             mt,
-            [Message(role="user", content=f"场景原文：\n\n{scene_text[:4000]}")],
-            system=_L2_SCENE_SYSTEM,
-            max_tokens=200,
+            [Message(role="user", content=user_content)],
+            system=system,
+            max_tokens=300 if english else 200,
         )
-        return resp.text.strip()
+        summary = resp.text.strip()
+        if english and summary and not language_matches(summary, language):
+            return ""
+        return summary
     except Exception:
         return ""
 
 
-def _fallback_summary(scene_text: str, limit: int = 80) -> str:
+def _fallback_summary(
+    scene_text: str,
+    limit: int = 80,
+    *,
+    language: str = "zh-CN",
+) -> str:
     """LLM 不可用时：取首段压平为单行截断当摘要。"""
     flat = " ".join(scene_text.split())
+    if str(language or "").lower().replace("_", "-").startswith("en"):
+        matches = list(iter_words(flat))
+        if len(matches) > limit:
+            return flat[:matches[limit - 1].end()].rstrip()
+        return flat
     return flat[:limit]
 
 
@@ -292,8 +339,13 @@ def run_l2_window(
     force: bool = False,
     preserve_existing_summaries: bool = False,
     invalidate_vectors: bool = True,
+    writing_profile: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """回填窗口内所有缺 L2 的章。draft_loader(chapter)→正文（None 则跳过）。"""
+    explicit_profile = (
+        _normalize_explicit_profile(writing_profile)
+        if writing_profile is not None else None
+    )
     processed = scenes = missing_files = 0
     for ch in pending_l2_chapters(conn, up_to_chapter, force=force):
         text = draft_loader(ch)
@@ -315,7 +367,48 @@ def run_l2_window(
             embedder=embedder,
             preserve_existing_summaries=preserve_existing_summaries,
             invalidate_vectors=invalidate_vectors,
+            writing_profile=(
+                explicit_profile
+                or _resolve_writing_profile(conn, None, chapter=ch)
+            ),
         )
         processed += 1
         scenes += n
     return {"processed": processed, "scenes": scenes, "missing_files": missing_files}
+
+
+def _resolve_writing_profile(
+    conn: sqlite3.Connection,
+    writing_profile: Optional[Mapping[str, Any]],
+    *,
+    chapter: Optional[int] = None,
+) -> dict[str, Any]:
+    if writing_profile is not None:
+        return _normalize_explicit_profile(writing_profile)
+    try:
+        from ..writing_profiles import get_project_writing_profile
+
+        return get_project_writing_profile(conn, chapter=chapter)
+    except Exception:
+        return {"content_language": "zh-CN", "prompt_rules": {}, "quality_rules": {}}
+
+
+def _normalize_explicit_profile(
+    writing_profile: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    profile = dict(writing_profile or {})
+    if "content_language" not in profile and profile.get("language"):
+        profile["content_language"] = profile["language"]
+    if "writing_profile_id" not in profile:
+        profile["writing_profile_id"] = profile.get("profile_id") or profile.get("id")
+    if "writing_profile_version" not in profile and profile.get("profile_version") is not None:
+        profile["writing_profile_version"] = profile["profile_version"]
+    profile.setdefault("content_language", "zh-CN")
+    profile.setdefault("prompt_rules", {})
+    profile.setdefault("quality_rules", {})
+    if not profile.get("cache_key") and profile.get("writing_profile_id"):
+        profile["cache_key"] = (
+            f"{profile['content_language']}:{profile['writing_profile_id']}:"
+            f"{profile.get('writing_profile_version', 0)}:{profile.get('prompt_version', 0)}"
+        )
+    return profile

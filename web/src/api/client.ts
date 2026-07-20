@@ -25,6 +25,7 @@ import type {
   ChapterReplanResponse,
   ForeshadowHealth,
   GeneratedPlanWindow,
+  GenreCatalogItem,
   HealthResponse,
   MemoryHealth,
   MemoryRebuildRequest,
@@ -41,6 +42,9 @@ import type {
   PlanningWindowGenerateRequest,
   ProjectCreateRequest,
   ProjectResponse,
+  ProjectWritingProfilePatch,
+  ProjectWritingProfileResponse,
+  WritingProfileVersion,
   RejectRequest,
   ReviewQueueItem,
   SearchFactsResponse,
@@ -62,6 +66,7 @@ import type {
   VolumeWizardRequest,
   VolumeWizardResponse,
   WorldStateSnapshot,
+  WritingProfileCatalogItem,
 } from './types';
 
 // Empty string = relative path; in dev Vite proxy forwards to the backend.
@@ -72,12 +77,14 @@ const API_KEY_STORAGE = 'nf_api_key';
 export class ApiError extends Error {
   status: number;
   code?: string;
+  details?: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -146,6 +153,7 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
   if (!res.ok) {
     let message = res.statusText || 'Request failed';
     let code: string | undefined;
+    let details: Record<string, unknown> | undefined;
     try {
       const text = await res.text();
       if (text) {
@@ -154,11 +162,21 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
           if (data && typeof data === 'object' && data.error && typeof data.error === 'object') {
             message = data.error.message ?? message;
             code = data.error.code;
+            if (data.error.details && typeof data.error.details === 'object') {
+              details = data.error.details as Record<string, unknown>;
+            } else if (data.error.params && typeof data.error.params === 'object') {
+              details = data.error.params as Record<string, unknown>;
+            }
           } else if (data && typeof data === 'object' && typeof data.message === 'string') {
             message = data.message;
             code = typeof data.code === 'string' ? data.code : undefined;
           } else if (data && typeof data === 'object' && 'detail' in data) {
+            const detail = record(data.detail);
             message = fastApiDetailMessage(data.detail) ?? text;
+            code = stringOrNull(detail.code) ?? undefined;
+            if (detail.params && typeof detail.params === 'object') {
+              details = detail.params as Record<string, unknown>;
+            }
           } else {
             message = text;
           }
@@ -169,7 +187,7 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
     } catch {
       // body unreadable — keep statusText.
     }
-    throw new ApiError(message, res.status, code);
+    throw new ApiError(message, res.status, code, details);
   }
 
   // 204 No Content or empty body → no JSON to parse.
@@ -191,6 +209,136 @@ function record(value: unknown): Record<string, unknown> {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function catalogItems(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const envelope = record(value);
+  return Array.isArray(envelope.items) ? envelope.items : [];
+}
+
+export function normalizeWritingProfileCatalog(value: unknown): WritingProfileCatalogItem[] {
+  return catalogItems(value).map((entry) => {
+    const item = record(entry);
+    const defaults = record(item.defaults);
+    const promptRules = { ...defaults, ...record(item.prompt_rules) };
+    const qualityRules = { ...record(item.quality_rules) };
+    const chapterRange = Array.isArray(defaults.chapter_word_range)
+      ? defaults.chapter_word_range.map(Number).filter(Number.isFinite)
+      : Array.isArray(qualityRules.chapter_word_range)
+        ? (qualityRules.chapter_word_range as unknown[]).map(Number).filter(Number.isFinite)
+        : [];
+    if (chapterRange.length >= 2) qualityRules.chapter_word_range = chapterRange.slice(0, 2);
+    return {
+      id: stringOrNull(item.id) ?? '',
+      version: stringOrNull(item.version) ?? '1.0.0',
+      name:
+        stringOrNull(item.display_name)
+        ?? stringOrNull(item.name)
+        ?? stringOrNull(item.label)
+        ?? stringOrNull(item.id)
+        ?? '',
+      description: stringOrNull(item.description),
+      preview: stringOrNull(item.preview) ?? stringOrNull(item.example),
+      language: stringOrNull(item.language) ?? 'zh-CN',
+      market: stringOrNull(item.market) ?? 'cn_web',
+      format:
+        stringOrNull(item.format) ?? stringOrNull(item.publication_format) ?? 'web_serial',
+      primary_genre: stringOrNull(item.primary_genre),
+      compatible_genres: stringList(item.compatible_genres),
+      story_tags: stringList(item.story_tags),
+      default_story_tags: stringList(item.default_story_tags),
+      audience_rating: stringOrNull(item.audience_rating),
+      prompt_rules: promptRules,
+      quality_rules: qualityRules,
+      prompt_version: stringOrNull(item.prompt_version),
+    };
+  }).filter((item) => item.id.length > 0);
+}
+
+export function normalizeGenreCatalog(value: unknown): GenreCatalogItem[] {
+  return catalogItems(value).map((entry) => {
+    const item = record(entry);
+    const id = stringOrNull(item.id) ?? stringOrNull(item.value) ?? '';
+    return {
+      id,
+      label: stringOrNull(item.label) ?? stringOrNull(item.name) ?? id,
+      description: stringOrNull(item.description),
+      language: stringOrNull(item.language),
+      market: stringOrNull(item.market),
+      story_tags: stringList(item.story_tags),
+    };
+  }).filter((item) => item.id.length > 0);
+}
+
+function normalizeWritingProfileVersion(value: unknown): WritingProfileVersion {
+  const item = record(value);
+  const resolved = record(item.resolved_profile);
+  return {
+    content_language: stringOrNull(item.content_language) ?? 'zh-CN',
+    target_market: stringOrNull(item.target_market) ?? 'cn_web',
+    publication_format: stringOrNull(item.publication_format) ?? 'web_serial',
+    primary_genre: stringOrNull(item.primary_genre),
+    story_tags: stringList(item.story_tags),
+    audience_rating: stringOrNull(item.audience_rating),
+    content_warnings: stringList(item.content_warnings),
+    writing_profile_id:
+      stringOrNull(item.writing_profile_id)
+      ?? stringOrNull(item.profile_id)
+      ?? stringOrNull(resolved.id)
+      ?? 'cn_web_novel_v1',
+    writing_profile_version:
+      Number(item.writing_profile_version ?? item.revision ?? item.profile_version) || 0,
+    writing_profile_overrides:
+      Object.keys(record(item.writing_profile_overrides)).length > 0
+        ? record(item.writing_profile_overrides)
+        : record(item.overrides),
+    writing_profile_effective_from_chapter:
+      Number(item.writing_profile_effective_from_chapter ?? item.effective_from_chapter) || 1,
+    created_at: stringOrNull(item.created_at),
+    changed_by: stringOrNull(item.changed_by),
+    change_reason: stringOrNull(item.change_reason),
+    prompt_version: stringOrNull(item.prompt_version) ?? stringOrNull(resolved.prompt_version),
+  };
+}
+
+export function normalizeProjectWritingProfile(value: unknown): ProjectWritingProfileResponse {
+  const envelope = record(value);
+  const current = Object.keys(record(envelope.current)).length > 0
+    ? record(envelope.current)
+    : envelope;
+  const selection = normalizeWritingProfileVersion(current);
+  let resolved: unknown = Object.keys(record(current.resolved_profile)).length > 0
+    ? current.resolved_profile
+    : current.profile;
+  if (!resolved && stringOrNull(current.writing_profile_id)) {
+    resolved = {
+      ...current,
+      id: current.writing_profile_id,
+      version: current.writing_profile_catalog_version ?? current.catalog_version ?? '1.0.0',
+      language: current.content_language,
+      market: current.target_market,
+      format: current.publication_format,
+    };
+  }
+  const normalizedProfiles = resolved ? normalizeWritingProfileCatalog([resolved]) : [];
+  return {
+    ...selection,
+    project_id:
+      stringOrNull(current.project_id) ?? stringOrNull(envelope.project_id) ?? '',
+    profile: normalizedProfiles[0] ?? null,
+    history: Array.isArray(envelope.history)
+      ? envelope.history.map(normalizeWritingProfileVersion)
+      : Array.isArray(current.history)
+        ? current.history.map(normalizeWritingProfileVersion)
+        : [],
+  };
 }
 
 function normalizeChapterCard(value: unknown): ChapterCard {
@@ -408,6 +556,26 @@ export const api = {
     return request<ProjectResponse>('POST', '/v1/projects', req);
   },
 
+  async listWritingProfiles(
+    language: string,
+    format: string,
+    market?: string,
+  ): Promise<WritingProfileCatalogItem[]> {
+    const params = new URLSearchParams({ language, format });
+    if (market) params.set('market', market);
+    const response = await request<unknown>(
+      'GET',
+      `/v1/catalogs/writing-profiles?${params.toString()}`,
+    );
+    return normalizeWritingProfileCatalog(response);
+  },
+
+  async listGenres(language: string, market: string): Promise<GenreCatalogItem[]> {
+    const params = new URLSearchParams({ language, market });
+    const response = await request<unknown>('GET', `/v1/catalogs/genres?${params.toString()}`);
+    return normalizeGenreCatalog(response);
+  },
+
   startAgent(id: string, req: AgentStartRequest): Promise<AgentSessionResponse> {
     return request<AgentSessionResponse>(
       'POST',
@@ -545,6 +713,26 @@ export const api = {
 
   getProject(id: string): Promise<ProjectResponse> {
     return request<ProjectResponse>('GET', `/v1/projects/${encodeURIComponent(id)}`);
+  },
+
+  async getWritingProfile(id: string): Promise<ProjectWritingProfileResponse> {
+    const response = await request<unknown>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/writing-profile`,
+    );
+    return normalizeProjectWritingProfile(response);
+  },
+
+  async updateWritingProfile(
+    id: string,
+    patch: ProjectWritingProfilePatch,
+  ): Promise<ProjectWritingProfileResponse> {
+    const response = await request<unknown>(
+      'PATCH',
+      `/v1/${encodeURIComponent(id)}/writing-profile`,
+      patch,
+    );
+    return normalizeProjectWritingProfile(response);
   },
 
   archiveProject(id: string): Promise<void> {
