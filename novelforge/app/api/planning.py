@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from ...planning.context import gather_plan_context
 from ...planning.replanner import build_replan_context, render_replan_hints
-from ...planning.repository import load_decision, resolve_decision
+from ...planning.repository import DecisionConflictError, load_decision, resolve_decision
 from ...planning.service import PlanningService
 from ..deps import ProjectRegistry, get_registry
 from ..security import sanitize_user_text
@@ -135,6 +135,9 @@ def approve_planning_window(
     except KeyError as exc:
         conn.rollback()
         raise HTTPException(404, str(exc)) from exc
+    except DecisionConflictError as exc:
+        conn.rollback()
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         conn.rollback()
         raise HTTPException(422, str(exc)) from exc

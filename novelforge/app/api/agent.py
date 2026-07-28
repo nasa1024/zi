@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..agent_runtime import AgentRuntime
 from ..deps import ProjectRegistry, get_registry
+from ...planning.repository import DecisionConflictError
 from ..models import AgentChoiceRequest, AgentSessionResponse, AgentStartRequest
 from ..security import sanitize_user_text
 
@@ -82,6 +83,8 @@ def choose_agent_option(
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except DecisionConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

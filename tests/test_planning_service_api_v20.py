@@ -756,3 +756,91 @@ class TestPlanningHttpWorkflow:
             assert revisions[-1]["id"] == accepted
         finally:
             conn.close()
+
+    def test_concurrent_decision_selection_accepts_exactly_one_option(self, tmp_path):
+        """Both requests may read a pending decision; only one may own it."""
+        from novelforge.db.connection import init_db
+        from novelforge.planning.repository import (
+            DecisionConflictError,
+            create_decision,
+            resolve_decision,
+        )
+
+        db_path = tmp_path / "decisions.db"
+        setup = init_db(db_path)
+        try:
+            setup.execute(
+                "INSERT INTO sessions(id, client, actor) VALUES(?, 'api', 'test')",
+                ("session-concurrent",),
+            )
+            decision = create_decision(
+                setup,
+                session_id="session-concurrent",
+                stage="story_plan",
+                scope_type="story",
+                question="choose one",
+                options=[
+                    DecisionOptionDraft(title="A", summary="A", payload={}),
+                    DecisionOptionDraft(title="B", summary="B", payload={}),
+                ],
+            )
+        finally:
+            setup.close()
+
+        # Make both workers complete the vulnerable read before either can
+        # perform the conditional write. This reproduces the stale-read race
+        # that previously let the later writer replace the selected option.
+        read_barrier = threading.Barrier(2)
+
+        class BarrierConnection:
+            def __init__(self, conn):
+                self._conn = conn
+                self._paused_once = False
+
+            def execute(self, sql, parameters=()):
+                cursor = self._conn.execute(sql, parameters)
+                if (
+                    not self._paused_once
+                    and "SELECT status, selected_option_id FROM decision_sets" in sql
+                ):
+                    self._paused_once = True
+                    read_barrier.wait(timeout=5)
+                return cursor
+
+            def commit(self):
+                self._conn.commit()
+
+        def select(option_id: str):
+            raw = sqlite3.connect(db_path)
+            raw.row_factory = sqlite3.Row
+            raw.execute("PRAGMA busy_timeout=5000")
+            conn = BarrierConnection(raw)
+            try:
+                resolved = resolve_decision(conn, decision["decision_id"], option_id)
+                return "selected", resolved["selected_option_id"]
+            except DecisionConflictError:
+                return "conflict", option_id
+            finally:
+                raw.close()
+
+        option_ids = [option["id"] for option in decision["options"]]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(select, option_ids))
+
+        assert sorted(status for status, _ in results) == ["conflict", "selected"]
+        selected_id = next(value for status, value in results if status == "selected")
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT status, selected_option_id FROM decision_sets WHERE id=?",
+                (decision["decision_id"],),
+            ).fetchone()
+            flags = conn.execute(
+                "SELECT id, selected FROM decision_options WHERE decision_id=?",
+                (decision["decision_id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert dict(row) == {"status": "selected", "selected_option_id": selected_id}
+        assert [item["id"] for item in flags if item["selected"]] == [selected_id]

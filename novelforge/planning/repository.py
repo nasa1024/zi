@@ -11,6 +11,10 @@ from ..ids import new_id
 from .models import ChapterPlanDraft, DecisionEnvelope, DecisionOptionDraft
 
 
+class DecisionConflictError(ValueError):
+    """A concurrent request selected a different option first."""
+
+
 _CONTRACT_JSON_FIELDS = (
     "arc_targets",
     "volume_kr_targets",
@@ -169,7 +173,7 @@ def resolve_decision(
     if decision_row["status"] != "awaiting_choice":
         if decision_row["selected_option_id"] == option_id:
             return load_decision(conn, decision_id)
-        raise ValueError(
+        raise DecisionConflictError(
             f"decision {decision_id} already resolved with "
             f"{decision_row['selected_option_id']}"
         )
@@ -181,11 +185,28 @@ def resolve_decision(
     if row is None:
         raise KeyError(f"option {option_id} not in decision {decision_id}")
     status = "auto_selected" if auto else "selected"
-    conn.execute(
+    # The status check must be part of the write, rather than only the
+    # preceding read: two request connections can both observe awaiting_choice.
+    # Only the connection whose conditional update affects one row owns the
+    # decision and may update the option flags or project its plan.
+    update = conn.execute(
         "UPDATE decision_sets SET status=?, selected_option_id=?, resolved_at=datetime('now')"
         " WHERE id=? AND status='awaiting_choice'",
         (status, option_id, decision_id),
     )
+    if update.rowcount != 1:
+        current = conn.execute(
+            "SELECT status, selected_option_id FROM decision_sets WHERE id=?",
+            (decision_id,),
+        ).fetchone()
+        if current is None:
+            raise KeyError(f"decision not found: {decision_id}")
+        if current["selected_option_id"] == option_id:
+            return load_decision(conn, decision_id)
+        raise DecisionConflictError(
+            f"decision {decision_id} already resolved with "
+            f"{current['selected_option_id']}"
+        )
     conn.execute(
         "UPDATE decision_options SET selected=CASE WHEN id=? THEN 1 ELSE 0 END"
         " WHERE decision_id=?",

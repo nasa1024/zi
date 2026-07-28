@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -61,7 +63,23 @@ class TestAtomicWriteL0:
         outside = tmp_path / "outside"
         project.mkdir()
         outside.mkdir()
-        (project / "l0").symlink_to(outside, target_is_directory=True)
+        link = project / "l0"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            # Windows normally requires Developer Mode or elevated privileges
+            # for symlinks. A directory junction exercises the same resolve()
+            # escape path without that privilege.
+            if os.name != "nt":
+                raise
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                pytest.skip("Windows account cannot create a symlink or junction")
         with pytest.raises(ValueError, match="越出项目根目录"):
             atomic_write_l0(project / "l0", "ch0001.txt", "secret")
 
