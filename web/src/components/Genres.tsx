@@ -3,9 +3,9 @@ export function Genres() {
     <section className="section genres" id="genres">
       <div className="wrap" style={{ textAlign: 'center' }}>
         <div className="reveal" style={{ display: 'inline-block' }}>
-          <span className="eyebrow">FULL-SPECTRUM</span>
+          <span className="eyebrow">题材全覆盖</span>
           <h2 className="cn" style={{ fontSize: 'clamp(2rem,4.6vw,3.2rem)', margin: '16px 0 12px' }}>一套引擎，<br />吃下全题材。</h2>
-          <p style={{ color: 'var(--ink-soft)', maxWidth: '38em', margin: '0 auto 10px' }}>玄幻修仙的境界体系、都市言情的人物关系、悬疑无限流的伏笔回收——结构化 canon 通吃。</p>
+          <p style={{ color: 'var(--ink-soft)', maxWidth: '38em', margin: '0 auto 10px' }}>玄幻修仙的境界体系、都市言情的人物关系、悬疑无限流的伏笔回收——结构化设定都能记住。</p>
         </div>
         <div className="pill-wall reveal">
           <span className="pill big c1"><span className="emo">⚔️</span> 玄幻</span>
@@ -24,13 +24,13 @@ export function Genres() {
           <span className="pill c6"><span className="emo">🌌</span> 星际</span>
         </div>
         <div className="tech-row reveal">
-          <span className="tech-pill"><span className="gd"></span>Python 3.13</span>
-          <span className="tech-pill"><span className="gd"></span>FastAPI</span>
-          <span className="tech-pill"><span className="gd"></span>SQLite · WAL</span>
-          <span className="tech-pill"><span className="gd"></span>FTS5 + jieba</span>
-          <span className="tech-pill"><span className="gd"></span>SSE 流式</span>
-          <span className="tech-pill"><span className="gd"></span>多供应商 LLM</span>
-          <span className="tech-pill"><span className="gd"></span>SCHEMA v7</span>
+          <span className="tech-pill"><span className="gd"></span>稳定运行（Python 3.13）</span>
+          <span className="tech-pill"><span className="gd"></span>快速接口（FastAPI）</span>
+          <span className="tech-pill"><span className="gd"></span>本地账本（SQLite）</span>
+          <span className="tech-pill"><span className="gd"></span>中文全文检索</span>
+          <span className="tech-pill"><span className="gd"></span>实时流式反馈</span>
+          <span className="tech-pill"><span className="gd"></span>多模型支持</span>
+          <span className="tech-pill"><span className="gd"></span>数据结构第 7 版</span>
         </div>
       </div>
     </section>

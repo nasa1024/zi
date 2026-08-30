@@ -1,4 +1,10 @@
 import type { ChapterContract, ContractItem } from '../../api/types';
+import {
+  beatTypeLabel,
+  systemCopyText,
+  targetStateKeyLabel,
+  targetStateValueLabel,
+} from '../../utils/uiText';
 
 interface ContractInspectorProps {
   contract: ChapterContract | null;
@@ -6,8 +12,26 @@ interface ContractInspectorProps {
 }
 
 function itemText(item: ContractItem): string {
-  if (typeof item === 'string') return item;
-  return item.text || item.label || item.id || '未命名契约项';
+  if (typeof item === 'string') return systemCopyText(item, '未命名契约项');
+  return systemCopyText(item.text || item.label, '未命名契约项');
+}
+
+function targetStateLabel(key: string): string {
+  return /[\u3400-\u9fff]/u.test(key) ? key : targetStateKeyLabel(key);
+}
+
+function targetStateValue(value: unknown): string {
+  if (value == null || value === '') return '未设置';
+  if (typeof value === 'string') return targetStateValueLabel(value);
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (Array.isArray(value)) return value.map(targetStateValue).join('、');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) => `${targetStateLabel(key)}：${targetStateValue(nested)}`)
+      .join('；');
+  }
+  return '已记录';
 }
 
 function ContractList({
@@ -50,7 +74,7 @@ export default function ContractInspector({ contract, loading }: ContractInspect
   if (!contract) {
     return (
       <section className="contract-empty">
-        <span>NO CONTRACT</span>
+        <span>暂无契约</span>
         <h3>本章还没有锁定路线</h3>
         <p>先到「规划」生成未来窗口；仍可直接写作，正文不会被空契约阻塞。</p>
       </section>
@@ -70,11 +94,11 @@ export default function ContractInspector({ contract, loading }: ContractInspect
     <>
       <section className="contract-overview">
         <div className="contract-stamp">
-          <span>{contract.locked ? 'LOCKED' : 'OPEN'}</span>
-          <b>v{contract.plan_version ?? 1}</b>
+          <span>{contract.locked ? '已锁定' : '可修改'}</span>
+          <b>第 {contract.plan_version ?? 1} 版</b>
         </div>
         <div>
-          <span>CHAPTER CONTRACT</span>
+          <span>本章写作约定</span>
           <h2>章节契约</h2>
           <p>{contract.goal || '等待定义本章在全书中的作用'}</p>
         </div>
@@ -90,9 +114,9 @@ export default function ContractInspector({ contract, loading }: ContractInspect
 
       {contract.volume && (
         <section className="volume-contract-card">
-          <span>VOL.{contract.volume.volume_no ?? '—'}</span>
+          <span>第 {contract.volume.volume_no ?? '—'} 卷</span>
           <h3>{contract.volume.title || '当前卷'}</h3>
-          <p>{contract.volume.objective || '本卷 Objective 尚未填写'}</p>
+          <p>{contract.volume.objective || '本卷目标尚未填写'}</p>
           {(contract.volume.key_results ?? []).length > 0 && (
             <div className="contract-chips">
               {(contract.volume.key_results ?? []).map((kr) => <span key={kr.id}>{kr.text}</span>)}
@@ -123,7 +147,7 @@ export default function ContractInspector({ contract, loading }: ContractInspect
             {contract.beats.map((beat) => (
               <li className={beat.constraint_level === 'hard' ? 'hard' : ''} key={`${beat.seq}-${beat.summary}`}>
                 <span>{beat.seq}</span>
-                <div><b>{beat.beat_type}</b><p>{beat.summary}</p></div>
+                <div><b>{beatTypeLabel(beat.beat_type)}</b><p>{beat.summary}</p></div>
               </li>
             ))}
           </ol>
@@ -134,7 +158,7 @@ export default function ContractInspector({ contract, loading }: ContractInspect
         <section className="target-state-card">
           <h4>写完后应达到</h4>
           {Object.entries(contract.target_state).map(([key, value]) => (
-            <p key={key}><b>{key}</b><span>{typeof value === 'string' ? value : JSON.stringify(value)}</span></p>
+            <p key={key}><b>{targetStateLabel(key)}</b><span>{targetStateValue(value)}</span></p>
           ))}
         </section>
       )}

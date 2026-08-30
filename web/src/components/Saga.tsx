@@ -38,21 +38,21 @@ export default function Saga() {
             {/* 文案 */}
             <div className="saga-text">
               <div className={`saga-scene-txt${curScene === 0 ? ' on' : ''}`} data-n="0">
-                <span className="saga-act a0">ACT 01 · 混乱 / CHAOS</span>
+                <span className="saga-act a0">第 1 幕 · 混乱</span>
                 <h3 className="cn">设定在脑子里<br />打架。</h3>
                 <p>写到第 47 章——「等等，主角第 3 章不是炼气期吗？怎么这里成了筑基，下一章又掉回炼气？」</p>
                 <p>跨越几十万字、几百个设定，人脑根本记不住。前后矛盾、人设崩塌、世界观漏洞，是连载写作最致命的「混乱」。</p>
-                <div className="micro">❌ ch3: 炼气期 &nbsp;→&nbsp; ch47: 筑基期 &nbsp;→&nbsp; ch48: 炼气期 ??</div>
+                <div className="micro">❌ 第 3 章：炼气期 &nbsp;→&nbsp; 第 47 章：筑基期 &nbsp;→&nbsp; 第 48 章：炼气期？</div>
               </div>
               <div className={`saga-scene-txt${curScene === 1 ? ' on' : ''}`} data-n="1">
-                <span className="saga-act a1">ACT 02 · 接管 / ENGINE</span>
+                <span className="saga-act a1">第 2 幕 · 接管</span>
                 <h3 className="cn">引擎，<br />悄悄接住了。</h3>
-                <p>每一条设定都进入只追加的 <b>canon 账本</b>。World State Store 用确定性 validator 做 as-of 投影——写第 48 章时，系统精确知道「此刻主角应是筑基」。</p>
+                <p>每一条已确认设定都会进入只追加的<b>设定档案</b>。系统按章节还原当时状态——写第 48 章时，会精确知道「此刻主角应是筑基」。</p>
                 <p>矛盾在落笔前就被拦下，飞舞的散稿被收进秩序井然的状态表。</p>
-                <div className="micro">✓ validator.power_rank · as_of=48 · status=canon</div>
+                <div className="micro">✓ 境界校验通过 · 第 48 章 · 设定已确认</div>
               </div>
               <div className={`saga-scene-txt${curScene === 2 ? ' on' : ''}`} data-n="2">
-                <span className="saga-act a2">ACT 03 · 和谐 / HARMONY</span>
+                <span className="saga-act a2">第 3 幕 · 和谐</span>
                 <h3 className="cn">读者一口气，<br />追到大结局。</h3>
                 <p>前后自洽、伏笔回收、节奏带爽点。读者不再被低级错误劝退，而是沉浸在你的世界里疯狂追更。</p>
                 <p>一致性是<b>不扣分项</b>，追更力是<b>得分项</b>——zi 两手都抓。</p>
@@ -111,7 +111,7 @@ export default function Saga() {
                     <rect x="266" y="222" width="94" height="14" rx="4" fill="#C6F500" />
                     <rect x="266" y="246" width="64" height="14" rx="4" fill="#FF3D8B" />
                   </g>
-                  <text x="262" y="100" fontFamily="DM Mono" fontSize="13" fill="#181624">CANON LEDGER ✓</text>
+                  <text x="262" y="100" fontFamily="DM Mono" fontSize="13" fill="#181624">设定档案 ✓</text>
                   {/* 机器人引擎角色 */}
                   <ellipse cx="130" cy="332" rx="100" ry="14" fill="#181624" opacity=".12" />
                   <rect x="74" y="200" width="112" height="120" rx="22" fill="#C6F500" stroke="#181624" strokeWidth="4" />

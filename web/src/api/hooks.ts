@@ -1,8 +1,9 @@
 // React hooks over the zi API client. See SHARED CONTRACT.
 
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, api } from './client';
+import { api } from './client';
 import type { ProjectResponse } from './types';
+import { userFacingError } from '../utils/uiText';
 
 export interface UseHealthResult {
   online: boolean | null;
@@ -87,7 +88,7 @@ export function useProject(projectId: string): UseProjectResult {
       .catch((err: unknown) => {
         if (cancelled) return;
         setProject(null);
-        setError(err instanceof Error ? err.message : '加载项目失败');
+        setError(userFacingError(err, '作品加载失败，请稍后重试。'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -130,13 +131,7 @@ export function useProjects(): UseProjectsResult {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (err instanceof ApiError) {
-          setError(err.message);
-        } else if (err instanceof Error) {
-          setError(err.message);
-        } else {
-          setError('加载项目失败');
-        }
+        setError(userFacingError(err, '作品列表加载失败，请稍后重试。'));
       })
       .finally(() => {
         if (cancelled) return;

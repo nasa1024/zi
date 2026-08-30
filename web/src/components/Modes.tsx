@@ -11,28 +11,28 @@ interface ModeData {
 
 const MODES: Record<ModeKey, ModeData> = {
   gate: {
-    title: 'human_gate · 人审模式',
+    title: '人工审核',
     tag: '每一条新设定都等你点头',
     lines: [
-      ['same', 'plan / recall / draft / check 完全一致'],
-      ['gate', '低风险 fact 也进审核队列'],
+      ['same', '规划、召回、起草、校验流程完全一致'],
+      ['gate', '低风险新设定也进入审核队列'],
       ['gate', '中 / 高风险必须人工批准'],
-      ['gate', '你拥有 canon 的最终决定权'],
+      ['gate', '你决定哪些设定可以被确认'],
     ],
   },
   auto: {
-    title: 'auto_promote · 全自动',
+    title: '自动确认',
     tag: '低风险设定自动晋升，你只管写',
     lines: [
-      ['same', 'plan / recall / draft / check 完全一致'],
-      ['auto', '低风险 fact 直接晋升 canon'],
-      ['auto', '中风险按 hybrid 策略自动放行'],
+      ['same', '规划、召回、起草、校验流程完全一致'],
+      ['auto', '低风险新设定自动成为已确认设定'],
+      ['auto', '中风险按人机协作规则自动处理'],
       ['gate', '仅高风险才停下等你'],
     ],
   },
 };
 
-const labelMap: Record<BadgeKey, string> = { auto: 'AUTO', gate: 'GATE', same: 'SAME' };
+const labelMap: Record<BadgeKey, string> = { auto: '自动确认', gate: '人工审核', same: '共同流程' };
 
 export function Modes() {
   const [active, setActive] = useState<ModeKey>('gate');
@@ -42,8 +42,8 @@ export function Modes() {
     <section className="section" id="modes">
       <div className="wrap modes-grid">
         <div className="switch-wrap reveal">
-          <span className="eyebrow" style={{ marginBottom: 18 }}>DUAL MODE</span>
-          <h2 className="cn" style={{ fontSize: '2.6rem', margin: '14px 0 26px' }}>一行 config，<br />两种活法。</h2>
+          <span className="eyebrow" style={{ marginBottom: 18 }}>两种审核方式</span>
+          <h2 className="cn" style={{ fontSize: '2.6rem', margin: '14px 0 26px' }}>一处设置，<br />两种活法。</h2>
           <div className="switch">
             <button
               className={active === 'gate' ? 'act' : undefined}
@@ -56,7 +56,7 @@ export function Modes() {
               onClick={() => setActive('auto')}
             >🤖 全自动</button>
           </div>
-          <p style={{ color: 'var(--ink-soft)', maxWidth: '24em', margin: '0 auto' }}>同一条管线、同一套 canon 账本。区别只在那道「晋升闸门」放不放行。</p>
+          <p style={{ color: 'var(--ink-soft)', maxWidth: '24em', margin: '0 auto' }}>同一套写作流程、同一份已确认设定档案。区别只在新设定由你逐条确认，还是由系统按风险自动处理。</p>
         </div>
 
         <div className="mode-panel reveal">

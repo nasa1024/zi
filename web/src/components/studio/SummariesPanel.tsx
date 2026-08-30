@@ -3,13 +3,12 @@
 // 改过的章摘要被后续 recall 前情窗口与卷 rollup 消费）。
 
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type { SummaryBoardResponse, SummaryChapterItem, SummaryVolumeItem } from '../../api/types';
+import { userFacingError } from '../../utils/uiText';
 
 function errMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
-  return fallback;
+  return userFacingError(err, fallback);
 }
 
 // 可就地编辑的摘要块：点「编辑」展开 textarea，保存后回调

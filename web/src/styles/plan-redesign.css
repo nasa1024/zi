@@ -1,0 +1,159 @@
+/* Direction 2 — a calm, checkpoint-led planning room. */
+
+.plan-route-page {
+  padding-top: 34px;
+}
+
+.plan-route-page .route-page-head {
+  max-width: 1180px;
+  margin-inline: auto;
+}
+
+.plan-next-strip {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  max-width: 1180px;
+  margin: 0 auto 30px;
+  padding: 15px 17px;
+  border: 2px solid var(--ink);
+  border-radius: 16px;
+  background: var(--cream);
+  box-shadow: 5px 5px 0 var(--blue);
+}
+
+.plan-next-index {
+  display: grid;
+  place-items: center;
+  min-height: 54px;
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--lime);
+  font: 800 .62rem/1 var(--font-mono);
+  letter-spacing: .12em;
+}
+
+.plan-next-strip > div:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.plan-next-strip > div:nth-child(2) > span {
+  color: var(--blue-text);
+  font: 700 .56rem/1 var(--font-mono);
+  letter-spacing: .1em;
+}
+
+.plan-next-strip strong {
+  font: 400 1.18rem/1.2 var(--font-cn);
+}
+
+.plan-next-strip p {
+  color: var(--ink-soft);
+  font-size: .74rem;
+  line-height: 1.45;
+}
+
+.plan-next-link {
+  padding: 10px 13px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--cream-2);
+  font: 400 .74rem/1 var(--font-cn);
+  white-space: nowrap;
+  transition: transform .12s, background .12s;
+}
+
+.plan-next-link:hover {
+  transform: translateY(-2px);
+  background: var(--lime);
+}
+
+.plan-stage {
+  max-width: 1180px;
+  margin: 0 auto 32px;
+}
+
+.plan-stage-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 13px;
+}
+
+.plan-stage-head span {
+  color: var(--pink-text);
+  font: 700 .59rem/1 var(--font-mono);
+  letter-spacing: .14em;
+}
+
+.plan-stage-head h2 {
+  margin-top: 7px;
+  font: 400 clamp(1.55rem, 3vw, 2.2rem)/1.05 var(--font-cn);
+}
+
+.plan-stage-head p {
+  max-width: 450px;
+  color: var(--ink-soft);
+  font-size: .77rem;
+  line-height: 1.5;
+}
+
+.plan-stage > .agent-panel,
+.plan-stage > .plan-window-board,
+.plan-stage > .review-card,
+.plan-stage > .studio-panel {
+  margin-inline: 0;
+}
+
+.plan-direction-stage .agent-panel {
+  box-shadow: 8px 8px 0 var(--ink);
+}
+
+.plan-future-stage {
+  scroll-margin-top: 120px;
+}
+
+.plan-future-stage .plan-window-board {
+  box-shadow: 8px 8px 0 var(--lime);
+}
+
+.plan-volume-stage {
+  padding-bottom: 20px;
+}
+
+.plan-volume-stage .review-card {
+  box-shadow: 6px 6px 0 var(--ink);
+}
+
+@media (max-width: 720px) {
+  .plan-route-page {
+    padding-top: 26px;
+  }
+
+  .plan-next-strip {
+    grid-template-columns: 52px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .plan-next-index {
+    min-height: 46px;
+    font-size: .53rem;
+  }
+
+  .plan-next-link {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .plan-stage-head {
+    align-items: start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

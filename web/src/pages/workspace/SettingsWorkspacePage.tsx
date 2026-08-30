@@ -8,13 +8,76 @@ import type {
 } from '../../api/types';
 import MemoryPanel from '../../components/studio/MemoryPanel';
 import { useWorkspaceOutlet } from '../../components/workspace/WorkspaceShell';
+import {
+  audienceRatingLabel,
+  contentLanguageLabel,
+  contentWarningLabel,
+  genreLabel,
+  publicationFormatLabel,
+  storyTagLabel,
+  systemCopyText,
+  targetMarketLabel,
+  userFacingError,
+  writingProfileDescription,
+  writingProfileLabel,
+  writingRuleLabel,
+} from '../../utils/uiText';
 
 function message(error: unknown, fallback: string): string {
-  return error instanceof ApiError || error instanceof Error ? error.message : fallback;
+  return userFacingError(error, fallback);
 }
 
 function splitList(value: string): string[] {
   return Array.from(new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean)));
+}
+
+const KNOWN_STORY_TAG_VALUES = [
+  'progression_fantasy',
+  'litrpg',
+  'cozy',
+  'cultivation',
+  'system',
+  'romance',
+  'mystery',
+  'action',
+];
+const KNOWN_CONTENT_WARNING_VALUES = [
+  'graphic_violence',
+  'profanity',
+  'sexual_content',
+  'self_harm',
+];
+
+function catalogGenreLabel(genre: GenreCatalogItem): string {
+  const mapped = genreLabel(genre.id);
+  return mapped === '自定义类型' ? genreLabel(genre.id, genre.label) : mapped;
+}
+
+function profileLabel(identifier: unknown, displayName?: string | null): string {
+  const mapped = writingProfileLabel(identifier);
+  return mapped === '自定义写作风格'
+    ? writingProfileLabel(identifier, displayName)
+    : mapped;
+}
+
+function mappedListText(values: string[], labeler: (value: unknown) => string): string {
+  return values.map(labeler).join(', ');
+}
+
+function parseMappedList(
+  value: string,
+  knownValues: string[],
+  existingValues: string[],
+  labeler: (item: unknown) => string,
+): string[] {
+  const valuesByLabel = new Map<string, string[]>();
+  [...knownValues, ...existingValues].forEach((item) => {
+    const label = labeler(item);
+    valuesByLabel.set(label, [...(valuesByLabel.get(label) ?? []), item]);
+  });
+  return Array.from(new Set(
+    splitList(value).flatMap((item) => valuesByLabel.get(item) ?? [item]),
+  ));
 }
 
 export default function SettingsWorkspacePage(): JSX.Element {
@@ -48,9 +111,9 @@ export default function SettingsWorkspacePage(): JSX.Element {
     setPrimaryGenre(profile.primary_genre ?? project.primary_genre ?? project.genre);
     setProfileId(profile.writing_profile_id);
     setProfileOverrides(profile.writing_profile_overrides ?? {});
-    setStoryTagsText(profile.story_tags.join(', '));
+    setStoryTagsText(mappedListText(profile.story_tags, storyTagLabel));
     setAudienceRating(profile.audience_rating ?? 'general');
-    setContentWarningsText(profile.content_warnings.join(', '));
+    setContentWarningsText(mappedListText(profile.content_warnings, contentWarningLabel));
     setEffectiveFromChapter(Math.max(
       project.chapter_count + 1,
       profile.writing_profile_effective_from_chapter ?? project.chapter_count + 1,
@@ -111,9 +174,19 @@ export default function SettingsWorkspacePage(): JSX.Element {
       target_market: targetMarket,
       publication_format: publicationFormat,
       primary_genre: primaryGenre || null,
-      story_tags: splitList(storyTagsText),
+      story_tags: parseMappedList(
+        storyTagsText,
+        KNOWN_STORY_TAG_VALUES,
+        current.story_tags,
+        storyTagLabel,
+      ),
       audience_rating: audienceRating,
-      content_warnings: splitList(contentWarningsText),
+      content_warnings: parseMappedList(
+        contentWarningsText,
+        KNOWN_CONTENT_WARNING_VALUES,
+        current.content_warnings,
+        contentWarningLabel,
+      ),
       writing_profile_id: profileId,
       writing_profile_overrides: profileOverrides,
       effective_from_chapter: effectiveFromChapter,
@@ -127,7 +200,7 @@ export default function SettingsWorkspacePage(): JSX.Element {
         });
         applyCurrent(updated);
         setEditing(false);
-        setSavedMessage(`写作配置 v${updated.writing_profile_version} 已保存，从第 ${updated.writing_profile_effective_from_chapter ?? effectiveFromChapter} 章生效。`);
+        setSavedMessage(`写作配置第 ${updated.writing_profile_version} 版已保存，从第 ${updated.writing_profile_effective_from_chapter ?? effectiveFromChapter} 章生效。`);
         refetchProjects();
       };
       await commit(false);
@@ -135,7 +208,7 @@ export default function SettingsWorkspacePage(): JSX.Element {
       if (
         saveError instanceof ApiError
         && saveError.code === 'high_risk_confirmation_required'
-        && window.confirm('这次修改会改变 POV 或时态，只能从下一章起生效。仍要保存新版本吗？')
+        && window.confirm('这次修改会改变叙事视角或时态，只能从下一章起生效。仍要保存新版本吗？')
       ) {
         try {
           const selectedProfileVersion = profiles.find((profile) => profile.id === profileId);
@@ -147,7 +220,7 @@ export default function SettingsWorkspacePage(): JSX.Element {
           const updated = await api.updateWritingProfile(project.project_id, confirmed);
           applyCurrent(updated);
           setEditing(false);
-          setSavedMessage(`写作配置 v${updated.writing_profile_version} 已保存，从第 ${updated.writing_profile_effective_from_chapter ?? effectiveFromChapter} 章生效。`);
+          setSavedMessage(`写作配置第 ${updated.writing_profile_version} 版已保存，从第 ${updated.writing_profile_effective_from_chapter ?? effectiveFromChapter} 章生效。`);
           refetchProjects();
         } catch (confirmedError) {
           setError(message(confirmedError, '写作配置保存失败'));
@@ -187,13 +260,13 @@ export default function SettingsWorkspacePage(): JSX.Element {
   return (
     <main className="routed-workspace-page settings-route-page">
       <header className="route-page-head">
-        <div><span>ENGINE ROOM · PROJECT SCOPE</span><h1>项目设置</h1></div>
-        <p>写作配置按版本保存，只影响生效章节之后的生成；已有正文与 Canon 不会被改写。</p>
+        <div><span>项目配置 · 仅影响本作品</span><h1>项目设置</h1></div>
+        <p>写作配置按版本保存，只影响生效章节之后的生成；已有正文与已确认设定不会被改写。</p>
       </header>
 
       <section className="writing-profile-panel">
         <div className="panel-head">
-          <div><span>LANGUAGE · MARKET · STYLE</span><h2>写作配置</h2><p>后端版本化目录是唯一事实源。</p></div>
+          <div><span>语言 · 市场 · 风格</span><h2>写作配置</h2><p>这里显示当前采用的配置；修改后只影响未来章节。</p></div>
           {!loading && current && !editing && <button type="button" className="nf-btn" onClick={() => { setEditing(true); setSavedMessage(null); }}>修改未来章节配置</button>}
         </div>
 
@@ -202,25 +275,25 @@ export default function SettingsWorkspacePage(): JSX.Element {
         {loading ? <div className="workspace-loading"><span className="nf-spin" /> 正在读取写作配置…</div> : current && (
           <>
             <div className="profile-current-card">
-              <div><span>CONTENT LANGUAGE</span><b>{current.content_language}</b><small>{canEditLanguage ? '尚无正文，可直接修改作品语言' : '已有正文；MVP 不支持自动迁移语言'}</small></div>
-              <div><span>TARGET MARKET</span><b>{current.target_market}</b><small>{current.publication_format}</small></div>
-              <div><span>WRITING PROFILE</span><b>{current.profile?.name ?? current.writing_profile_id}</b><small>v{current.writing_profile_version}</small></div>
-              <div><span>EFFECTIVE FROM</span><b>CH. {current.writing_profile_effective_from_chapter ?? 1}</b><small>{current.primary_genre || project.genre}</small></div>
+              <div><span>作品语言</span><b>{contentLanguageLabel(current.content_language, true)}</b><small>{canEditLanguage ? '尚无正文，可直接修改作品语言' : '已有正文；当前版本暂不支持自动迁移作品语言'}</small></div>
+              <div><span>目标市场</span><b>{targetMarketLabel(current.target_market)}</b><small>{publicationFormatLabel(current.publication_format)}</small></div>
+              <div><span>写作风格</span><b>{profileLabel(current.writing_profile_id, current.profile?.name)}</b><small>第 {current.writing_profile_version} 版</small></div>
+              <div><span>生效章节</span><b>第 {current.writing_profile_effective_from_chapter ?? 1} 章</b><small>{genreLabel(current.primary_genre || project.genre)}</small></div>
             </div>
 
             {editing && (
               <div className="profile-settings-form">
-                <div className="nf-field"><label htmlFor="settings-language">作品语言</label><select id="settings-language" className="nf-select" value={contentLanguage} onChange={(event) => handleContentLanguageChange(event.target.value)} disabled={saving || !canEditLanguage}><option value="zh-CN">简体中文 · zh-CN</option><option value="en-US">English (US) · en-US</option></select></div>
-                <div className="nf-field"><label htmlFor="settings-market">目标市场</label><select id="settings-market" className="nf-select" value={targetMarket} onChange={(event) => setTargetMarket(event.target.value)} disabled={saving}>{contentLanguage.startsWith('en') ? <option value="global_english">全球英文读者</option> : <option value="cn_web">中文网文</option>}</select></div>
-                <div className="nf-field"><label htmlFor="settings-format">发布形态</label><select id="settings-format" className="nf-select" value={publicationFormat} onChange={(event) => setPublicationFormat(event.target.value)} disabled={saving}><option value="web_serial">Web Serial</option><option value="novel" disabled>Novel（P1）</option></select></div>
-                <div className="nf-field"><label htmlFor="settings-genre">主类型</label><select id="settings-genre" className="nf-select" value={primaryGenre} onChange={(event) => setPrimaryGenre(event.target.value)} disabled={saving}>{genres.map((genre) => <option key={genre.id} value={genre.id}>{genre.label}</option>)}</select></div>
-                <div className="nf-field"><label htmlFor="settings-profile">风格预设</label><select id="settings-profile" className="nf-select" value={profileId} onChange={(event) => { setProfileId(event.target.value); setProfileOverrides({}); }} disabled={saving}>{profiles.map((profile) => <option key={`${profile.id}:${profile.version}`} value={profile.id}>{profile.name} · v{profile.version}</option>)}</select></div>
-                <div className="nf-field full"><label htmlFor="settings-tags">子类型 / 标签</label><input id="settings-tags" className="nf-input" value={storyTagsText} onChange={(event) => setStoryTagsText(event.target.value)} placeholder="progression_fantasy, litrpg" disabled={saving} /></div>
-                <div className="nf-field"><label htmlFor="settings-rating">读者分级</label><select id="settings-rating" className="nf-select" value={audienceRating} onChange={(event) => setAudienceRating(event.target.value)} disabled={saving}><option value="general">General</option><option value="young_adult">Young Adult</option><option value="adult">Adult</option></select></div>
+                <div className="nf-field"><label htmlFor="settings-language">作品语言</label><select id="settings-language" className="nf-select" value={contentLanguage} onChange={(event) => handleContentLanguageChange(event.target.value)} disabled={saving || !canEditLanguage}><option value="zh-CN">{contentLanguageLabel('zh-CN', true)}</option><option value="en-US">{contentLanguageLabel('en-US', true)}</option></select></div>
+                <div className="nf-field"><label htmlFor="settings-market">目标市场</label><select id="settings-market" className="nf-select" value={targetMarket} onChange={(event) => setTargetMarket(event.target.value)} disabled={saving}>{contentLanguage.startsWith('en') ? <option value="global_english">{targetMarketLabel('global_english')}</option> : <option value="cn_web">{targetMarketLabel('cn_web')}</option>}</select></div>
+                <div className="nf-field"><label htmlFor="settings-format">发布形态</label><select id="settings-format" className="nf-select" value={publicationFormat} onChange={(event) => setPublicationFormat(event.target.value)} disabled={saving}><option value="web_serial">{publicationFormatLabel('web_serial')}</option><option value="novel" disabled>{publicationFormatLabel('novel')}（暂未开放）</option></select></div>
+                <div className="nf-field"><label htmlFor="settings-genre">主类型</label><select id="settings-genre" className="nf-select" value={primaryGenre} onChange={(event) => setPrimaryGenre(event.target.value)} disabled={saving}>{genres.map((genre) => <option key={genre.id} value={genre.id}>{catalogGenreLabel(genre)}</option>)}</select></div>
+                <div className="nf-field"><label htmlFor="settings-profile">写作风格</label><select id="settings-profile" className="nf-select" value={profileId} onChange={(event) => { setProfileId(event.target.value); setProfileOverrides({}); }} disabled={saving}>{profiles.map((profile) => <option key={`${profile.id}:${profile.version}`} value={profile.id}>{profileLabel(profile.id, profile.name)} · 第 {profile.version} 版</option>)}</select></div>
+                <div className="nf-field full"><label htmlFor="settings-tags">子类型 / 标签</label><input id="settings-tags" className="nf-input" value={storyTagsText} onChange={(event) => setStoryTagsText(event.target.value)} placeholder="例如：成长奇幻、游戏化冒险" disabled={saving} /></div>
+                <div className="nf-field"><label htmlFor="settings-rating">读者分级</label><select id="settings-rating" className="nf-select" value={audienceRating} onChange={(event) => setAudienceRating(event.target.value)} disabled={saving}><option value="general">{audienceRatingLabel('general')}</option><option value="young_adult">{audienceRatingLabel('young_adult')}</option><option value="adult">{audienceRatingLabel('adult')}</option></select></div>
                 <div className="nf-field"><label htmlFor="settings-warnings">内容警告<span className="setting-optional">（逗号分隔）</span></label><input id="settings-warnings" className="nf-input" value={contentWarningsText} onChange={(event) => setContentWarningsText(event.target.value)} disabled={saving} /></div>
                 <div className="nf-field"><label htmlFor="settings-effective">生效章节</label><input id="settings-effective" className="nf-input" type="number" min={project.chapter_count + 1} value={effectiveFromChapter} onChange={(event) => setEffectiveFromChapter(Math.max(project.chapter_count + 1, Number(event.target.value) || project.chapter_count + 1))} disabled={saving} /></div>
                 <div className="nf-field"><label htmlFor="settings-reason">变更原因<span className="setting-optional">（选填）</span></label><input id="settings-reason" className="nf-input" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} disabled={saving} /></div>
-                {selectedProfile && <div className="profile-settings-preview full"><b>{selectedProfile.name}</b><p>{selectedProfile.description || selectedProfile.preview || '此配置将用于未来的规划、起草与质量检查。'}</p><small>{String(resolvedRules.pov ?? '—')} · {String(resolvedRules.tense ?? '—')} · {String(resolvedRules.pace ?? '—')}</small></div>}
+                {selectedProfile && <div className="profile-settings-preview full"><b>{profileLabel(selectedProfile.id, selectedProfile.name)}</b><p>{writingProfileDescription(selectedProfile.id, selectedProfile.description || selectedProfile.preview)}</p><small>{writingRuleLabel(resolvedRules.pov)} · {writingRuleLabel(resolvedRules.tense)} · {writingRuleLabel(resolvedRules.pace)}</small></div>}
                 {[
                   ['pov', '叙事人称', ['third_person_limited', 'first_person', 'third_person_omniscient']],
                   ['tense', '时态', ['past', 'present']],
@@ -231,8 +304,8 @@ export default function SettingsWorkspacePage(): JSX.Element {
                   <div className="nf-field" key={key as string}>
                     <label htmlFor={`settings-profile-${key}`}>{label as string}</label>
                     <select id={`settings-profile-${key}`} className="nf-select" value={String(profileOverrides[key as string] ?? '')} onChange={(event) => setProfileOverride(key as string, event.target.value)} disabled={saving}>
-                      <option value="">使用预设（{String(selectedProfile?.prompt_rules[key as string] ?? '—')}）</option>
-                      {(values as string[]).map((value) => <option key={value} value={value}>{value}</option>)}
+                      <option value="">使用预设（{writingRuleLabel(selectedProfile?.prompt_rules[key as string])}）</option>
+                      {(values as string[]).map((value) => <option key={value} value={value}>{writingRuleLabel(value)}</option>)}
                     </select>
                   </div>
                 ))}
@@ -241,9 +314,9 @@ export default function SettingsWorkspacePage(): JSX.Element {
             )}
 
             <div className="profile-history">
-              <div><span>VERSION HISTORY</span><h3>配置历史</h3></div>
+              <div><span>配置历史</span><h3>历史版本</h3></div>
               {current.history.length === 0 ? <p>当前为首个配置版本。</p> : (
-                <ol>{current.history.map((version, index) => <li key={`${version.writing_profile_id}:${version.writing_profile_version}:${version.created_at ?? index}`}><b>{version.writing_profile_id} · v{version.writing_profile_version}</b><span>从第 {version.writing_profile_effective_from_chapter ?? 1} 章生效</span><small>{version.change_reason || version.created_at || '初始配置'}</small></li>)}</ol>
+                <ol>{current.history.map((version, index) => <li key={`${version.writing_profile_id}:${version.writing_profile_version}:${version.created_at ?? index}`}><b>{profileLabel(version.writing_profile_id)} · 第 {version.writing_profile_version} 版</b><span>从第 {version.writing_profile_effective_from_chapter ?? 1} 章生效</span><small>{version.change_reason ? systemCopyText(version.change_reason, '初始配置') : (version.created_at || '初始配置')}</small></li>)}</ol>
               )}
             </div>
           </>

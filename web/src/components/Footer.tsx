@@ -19,7 +19,7 @@ export default function Footer() {
               zi
             </a>
             <p>
-              面向网文 / 长篇连载的 AI 写作「记忆 + 一致性 + 工艺」引擎。本地优先，单一 SQLite，单人可维护。
+              面向网文与长篇连载的 AI 写作「记忆 + 一致性 + 工艺」引擎。本地优先，单人也能轻松维护。
             </p>
           </div>
           <div className="foot-cols">
@@ -33,13 +33,13 @@ export default function Footer() {
             <div className="foot-col">
               <h5>文档</h5>
               <a href="#">设计文档 §00–14</a>
-              <a href="#">实现规格 impl/</a>
-              <a href="#">REST API 一览</a>
-              <a href="#">README</a>
+              <a href="#">实现规格</a>
+              <a href="#">接口说明（API）</a>
+              <a href="#">项目说明（README）</a>
             </div>
             <div className="foot-col">
               <h5>开发</h5>
-              <a href="#">GitHub</a>
+              <a href="#">源代码（GitHub）</a>
               <a href="#">快速开始</a>
               <a href="#">迁移指南</a>
               <a href="#">贡献</a>
@@ -48,7 +48,7 @@ export default function Footer() {
         </div>
         <div className="foot-bottom">
           <span>© 2026 zi · 让冷引擎写出滚烫的故事</span>
-          <span>MVP v0.3 · 726 tests green · made with ⚡ &amp; dopamine</span>
+          <span>体验版 v0.3 · 726 项测试通过 · 为灵感与热爱打造</span>
         </div>
       </div>
     </footer>

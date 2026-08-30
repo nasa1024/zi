@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type {
   AgentChoiceRequest,
   AgentDecisionOption,
@@ -8,10 +8,23 @@ import type {
   AgentSessionResponse,
   StoryMap,
 } from '../../api/types';
+import {
+  agentStageLabel,
+  arcTypeLabel,
+  contentUnitLabel,
+  governanceModeLabel,
+  interactionModeLabel,
+  keyResultStatusLabel,
+  planReasonLabel,
+  sessionStatusLabel,
+  systemCopyText,
+  userFacingError,
+} from '../../utils/uiText';
 
 
 interface AgentPanelProps {
   projectId: string;
+  contentLanguage?: string | null;
   onChanged: () => void;
 }
 
@@ -20,68 +33,135 @@ const EMPTY_MAP: StoryMap = { plan: null, arcs: [], volumes: [], chapters: [] };
 
 const MODE_OPTIONS: Array<{
   value: AgentInteractionMode;
-  label: string;
   description: string;
 }> = [
   {
     value: 'guided',
-    label: '逐步选择',
     description: '每个关键节点都停下来，由你选择一项。',
   },
   {
     value: 'copilot',
-    label: '协作模式',
-    description: '模型给出推荐，你可一键让 AI 决定，也可自己改选。',
+    description: '系统给出推荐，你可一键采用，也可自己改选。',
   },
   {
     value: 'autonomous',
-    label: '模型决定',
     description: '自动选择并生成指定章数，达到上限后保存退出。',
   },
 ];
 
-const STAGE_LABELS: Record<string, string> = {
-  bootstrap: '准备创作',
-  story_plan: '选择全书路线',
-  volume_plan: '选择下一卷',
-  chapter_route: '选择未来章节路线',
-  chapter_action: '确认章节动作',
-  draft_choice: '选择正文候选稿',
-  post_chapter: '本章完成',
-  finished: '会话已保存',
-};
-
 const IMPACT_LABELS: Record<string, string> = {
   ending_direction: '终局方向',
-  arc_count: '情节弧',
-  milestone_count: '里程碑',
+  arc_count: '情节线数量',
+  milestone_count: '关键节点数量',
   chapter_range: '章节范围',
-  chapter_count: '规划章数',
-  key_results: '关键结果',
-  candidate_count: '候选稿',
-  length: '字数',
-  score: '评分',
-  hard_blocks: '硬冲突',
-  proposal_count: '设定提案',
+  chapter_count: '规划章节数',
+  key_results: '本卷目标',
+  candidate_count: '候选稿数量',
+  length: '正文长度',
+  score: '综合评分',
+  hard_blocks: '必须解决的问题',
+  proposal_count: '待确认设定数量',
+  uses_future_guardrails: '后续规划约束',
+  canon_changed: '已确认设定',
+  reversible: '此选择',
+  future_plan_changed: '后续计划',
+  is_current_winner: '候选状态',
+  source: '方案来源',
+};
+
+const VALUE_FIELD_LABELS: Record<string, string> = {
+  text: '内容',
+  title: '标题',
+  name: '名称',
+  goal: '目标',
+  objective: '目标',
+  status: '状态',
+  chapter: '章节',
+  description: '说明',
+  summary: '概要',
+  evidence: '依据',
 };
 
 
 function errorMessage(error: unknown, fallback: string): string {
-  if (error instanceof ApiError || error instanceof Error) return error.message;
-  return fallback;
+  return userFacingError(error, fallback);
 }
 
 
-function displayValue(value: unknown): string {
+function agentCopyText(
+  value: unknown,
+  fallback: string,
+  contentLanguage?: string | null,
+): string {
+  const localized = systemCopyText(value, fallback);
+  if (contentLanguage?.startsWith('en')) return localized;
+  return /[A-Za-z]/.test(localized) ? fallback : localized;
+}
+
+
+function displayValue(
+  value: unknown,
+  key?: string,
+  contentLanguage?: string | null,
+  depth = 0,
+): string {
   if (value === null || value === undefined || value === '') return '—';
-  if (typeof value === 'boolean') return value ? '是' : '否';
-  if (Array.isArray(value)) return value.map(displayValue).join(' · ');
-  if (typeof value === 'object') return JSON.stringify(value);
+  if (typeof value === 'boolean') {
+    if (key === 'uses_future_guardrails') return value ? '会遵守' : '不会遵守';
+    if (key === 'canon_changed') return value ? '会改变' : '不会改变';
+    if (key === 'reversible') return value ? '可以撤回' : '不可撤回';
+    if (key === 'future_plan_changed') return value ? '会调整' : '不会调整';
+    if (key === 'is_current_winner') return value ? '当前推荐稿' : '备选稿';
+    return value ? '是' : '否';
+  }
+  if (key === 'source') return planReasonLabel(value, 'active');
+  if (key === 'status') return keyResultStatusLabel(value);
+  if (key === 'chapter_range' && Array.isArray(value) && value.length >= 2) {
+    return `第 ${displayValue(value[0])}–${displayValue(value[1])} 章`;
+  }
+  if (typeof value === 'number') {
+    if (key === 'candidate_count') return `${value} 稿`;
+    if (key === 'proposal_count' || key === 'hard_blocks') return `${value} 项`;
+    if (key === 'chapter_count') return `${value} 章`;
+    if (key === 'length') return `${value.toLocaleString()} ${contentUnitLabel(contentLanguage)}`;
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '暂无';
+    return value.map((item) => displayValue(item, key, contentLanguage, depth + 1)).join('；');
+  }
+  if (typeof value === 'object') {
+    if (depth >= 3) return '详细信息已记录';
+    const record = value as Record<string, unknown>;
+    const primary = record.text ?? record.title ?? record.name ?? record.goal ?? record.objective;
+    if (primary != null) {
+      const details = [
+        record.status == null ? '' : keyResultStatusLabel(record.status),
+        record.evidence == null || record.evidence === ''
+          ? ''
+          : `依据：${displayValue(record.evidence, 'evidence', contentLanguage, depth + 1)}`,
+      ].filter(Boolean);
+      return `${displayValue(primary, undefined, contentLanguage, depth + 1)}${details.length ? `（${details.join('；')}）` : ''}`;
+    }
+    const details = Object.entries(record)
+      .filter(([nestedKey, nested]) => (
+        nested !== null
+        && nested !== undefined
+        && nested !== ''
+        && nestedKey !== 'id'
+        && !nestedKey.endsWith('_id')
+      ))
+      .slice(0, 6)
+      .map(([nestedKey, nested]) => (
+        `${VALUE_FIELD_LABELS[nestedKey] ?? '补充信息'}：${displayValue(nested, nestedKey, contentLanguage, depth + 1)}`
+      ));
+    return details.join('；') || '详细信息已记录';
+  }
   return String(value);
 }
 
 
-function optionPreview(option: AgentDecisionOption): string | null {
+function optionPreview(option: AgentDecisionOption, contentLanguage?: string | null): string | null {
   const payload = option.payload;
   const plan = payload.plan;
   if (plan && typeof plan === 'object') {
@@ -99,7 +179,7 @@ function optionPreview(option: AgentDecisionOption): string | null {
   }
   const keyResults = payload.key_results;
   if (Array.isArray(keyResults) && keyResults.length > 0) {
-    return `关键结果：${keyResults.map(displayValue).join('；')}`;
+    return `本卷目标：${keyResults.map((item) => displayValue(item, 'key_results', contentLanguage)).join('；')}`;
   }
   return null;
 }
@@ -109,34 +189,36 @@ function DecisionCard({
   option,
   recommended,
   busy,
+  contentLanguage,
   onSelect,
 }: {
   option: AgentDecisionOption;
   recommended: boolean;
   busy: boolean;
+  contentLanguage?: string | null;
   onSelect: () => void;
 }): JSX.Element {
-  const preview = optionPreview(option);
+  const preview = optionPreview(option, contentLanguage);
   const impact = Object.entries(option.impact || {}).filter(([, value]) => (
-    value !== null && value !== undefined && value !== false
+    value !== null && value !== undefined && value !== ''
   ));
 
   return (
     <article className={`agent-option${recommended ? ' recommended' : ''}`}>
       <div className="agent-option-top">
         <span className="agent-option-index">方案 {option.option_index + 1}</span>
-        {recommended && <span className="agent-badge">AI 推荐</span>}
+        {recommended && <span className="agent-badge">智能推荐</span>}
         {option.score != null && <span className="agent-score">★ {option.score.toFixed(1)}</span>}
       </div>
-      <h4>{option.title}</h4>
-      <p>{option.summary}</p>
-      {option.rationale && <div className="agent-rationale">为什么：{option.rationale}</div>}
+      <h4>{agentCopyText(option.title, '未命名方案', contentLanguage)}</h4>
+      <p>{agentCopyText(option.summary, '方案说明待补充', contentLanguage)}</p>
+      {option.rationale && <div className="agent-rationale">为什么：{agentCopyText(option.rationale, '推荐理由待补充', contentLanguage)}</div>}
       {preview && <div className="agent-option-preview">{preview}</div>}
       {impact.length > 0 && (
         <div className="agent-impact-list">
-          {impact.slice(0, 6).map(([key, value]) => (
+          {impact.map(([key, value]) => (
             <span key={key}>
-              <b>{IMPACT_LABELS[key] ?? key}</b> {displayValue(value)}
+              <b>{IMPACT_LABELS[key] ?? '补充影响'}</b> {displayValue(value, key, contentLanguage)}
             </span>
           ))}
         </div>
@@ -155,7 +237,7 @@ function StoryMapPanel({ map }: { map: StoryMap }): JSX.Element {
     <section className="agent-map">
       <div className="panel-section-head">
         <span className="cn">🧭 未来故事地图</span>
-        <span className="ph-hint">计划是作者意图，不会提前写入 canon</span>
+        <span className="ph-hint">计划是作者意图，不会提前写入已确认设定</span>
       </div>
 
       {!hasMap ? (
@@ -164,7 +246,7 @@ function StoryMapPanel({ map }: { map: StoryMap }): JSX.Element {
         <>
           {map.plan && (
             <div className="agent-plan-hero">
-              <span>全书路线 · v{map.plan.version}</span>
+              <span>全书路线 · 第 {map.plan.version} 版</span>
               <h4>{map.plan.title}</h4>
               {map.plan.phase_summary && <p>{map.plan.phase_summary}</p>}
               {map.plan.ending_direction && (
@@ -192,9 +274,9 @@ function StoryMapPanel({ map }: { map: StoryMap }): JSX.Element {
               {map.arcs.map((arc) => (
                 <article className="agent-arc" key={arc.id}>
                   <div className="agent-arc-head">
-                    <span>{arc.arc_type}</span>
+                    <span>{arcTypeLabel(arc.arc_type)}</span>
                     <b>{arc.title}</b>
-                    <small>P{arc.priority}</small>
+                    <small>优先级 {arc.priority}</small>
                   </div>
                   <p>{arc.summary}</p>
                   {arc.milestones.length > 0 && (
@@ -244,7 +326,7 @@ function StoryMapPanel({ map }: { map: StoryMap }): JSX.Element {
 }
 
 
-export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): JSX.Element {
+export default function AgentPanel({ projectId, contentLanguage, onChanged }: AgentPanelProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSession = searchParams.get('session');
   const [mode, setMode] = useState<AgentInteractionMode>('guided');
@@ -296,7 +378,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
         }
       })
       .catch((err) => {
-        if (alive) setError(errorMessage(err, 'Agent 会话加载失败'));
+        if (alive) setError(errorMessage(err, '创作记录加载失败，请稍后重试。'));
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -319,7 +401,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
       acceptSession(next);
       onChanged();
     } catch (err) {
-      setError(errorMessage(err, 'Agent 启动失败'));
+      setError(errorMessage(err, '创作助手启动失败，请稍后重试。'));
     } finally {
       setBusy(false);
     }
@@ -334,7 +416,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
       acceptSession(next);
       onChanged();
     } catch (err) {
-      setError(errorMessage(err, 'Agent 操作失败'));
+      setError(errorMessage(err, '创作助手操作失败，请稍后重试。'));
     } finally {
       setBusy(false);
     }
@@ -349,7 +431,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
       acceptSession(recovered);
       setMode(recovered.interaction_mode);
     } catch (err) {
-      setError(errorMessage(err, '恢复 Agent 会话失败'));
+      setError(errorMessage(err, '恢复创作记录失败，请稍后重试。'));
     } finally {
       setBusy(false);
     }
@@ -378,9 +460,9 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
     <div className="studio-panel agent-panel">
       <div className="panel-head agent-panel-head">
         <div>
-          <span className="panel-kicker">CHOICE-DRIVEN AUTHOR AGENT</span>
+          <span className="panel-kicker">作者选择驱动</span>
           <h3 className="cn">✨ 选择，而不是填表</h3>
-          <p>Agent 先生成可比较的路线，你选择一项，或直接让模型替你决定。</p>
+          <p>创作助手先生成可比较的路线，你选择一项，或直接采用智能推荐。</p>
         </div>
         {recent.length > 0 && (
           <label className="agent-session-picker">
@@ -391,10 +473,10 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
               onChange={(event) => void openRecent(event.target.value)}
               disabled={busy}
             >
-              <option value="">选择历史 checkpoint…</option>
-              {recent.map((item) => (
+              <option value="">选择历史创作记录…</option>
+              {recent.map((item, index) => (
                 <option key={item.session_id} value={item.session_id}>
-                  {STAGE_LABELS[item.stage] ?? item.stage} · {item.status} · {item.session_id.slice(-6)}
+                  {agentStageLabel(item.stage)} · {sessionStatusLabel(item.status)} · 记录 {recent.length - index}
                 </option>
               ))}
             </select>
@@ -413,7 +495,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                   <span>✓</span>
                   <div>
                     <b>本次创作会话已保存</b>
-                    <p>正文、选择、未来计划和 checkpoint 都已保留，可以开始下一次会话。</p>
+                    <p>正文、选择、未来计划和当前进度都已保留，可以开始下一次会话。</p>
                   </div>
                 </div>
               )}
@@ -427,7 +509,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                     onClick={() => setMode(item.value)}
                     disabled={busy}
                   >
-                    <b>{item.label}</b>
+                    <b>{interactionModeLabel(item.value)}</b>
                     <span>{item.description}</span>
                   </button>
                 ))}
@@ -459,16 +541,16 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                   </select>
                 </label>
                 <label className="nf-field">
-                  <span>Canon 治理</span>
+                  <span>设定确认方式</span>
                   <select
                     className="nf-select"
                     value={governanceMode}
                     onChange={(event) => setGovernanceMode(event.target.value as typeof governanceMode)}
                     disabled={busy}
                   >
-                    <option value="human_gate">human_gate · 人审</option>
-                    <option value="hybrid">hybrid · 混合</option>
-                    <option value="auto_promote">auto_promote · 自动晋升</option>
+                    {(['human_gate', 'hybrid', 'auto_promote'] as const).map((value) => (
+                      <option key={value} value={value}>{governanceModeLabel(value)}</option>
+                    ))}
                   </select>
                 </label>
                 {mode === 'autonomous' && (
@@ -489,7 +571,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
 
               <div className="agent-launch-actions">
                 <button type="button" className="nf-btn pink" onClick={() => void start()} disabled={busy}>
-                  {busy ? <><span className="nf-spin" /> Agent 运行中…</> : '开始生成选项'}
+                  {busy ? <><span className="nf-spin" /> 创作助手运行中…</> : '开始生成选项'}
                 </button>
                 <span>{modeInfo.description}</span>
               </div>
@@ -500,12 +582,12 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
             <section className="agent-workflow">
               <div className="agent-status-strip">
                 <span className="agent-live-dot" />
-                <b>{STAGE_LABELS[session.stage] ?? session.stage}</b>
-                <span>{session.interaction_mode}</span>
+                <b>{agentStageLabel(session.stage)}</b>
+                <span>{interactionModeLabel(session.interaction_mode)} · {sessionStatusLabel(session.status)}</span>
                 {session.state.current_chapter != null && (
                   <span>第 {session.state.current_chapter} 章</span>
                 )}
-                <small>checkpoint · {session.session_id.slice(-8)}</small>
+                <small>创作记录已保留</small>
                 <button type="button" className="nf-btn-sm" onClick={newSession} disabled={busy}>
                   新会话
                 </button>
@@ -513,10 +595,10 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
 
               {lastOption && (
                 <div className={`agent-choice-recap${lastDecision?.status === 'auto_selected' ? ' auto' : ''}`}>
-                  <span>{lastDecision?.status === 'auto_selected' ? '✨ AI 已选择' : '✓ 已选择'}</span>
+                  <span>{lastDecision?.status === 'auto_selected' ? '✨ 已自动选择' : '✓ 已选择'}</span>
                   <div>
-                    <b>{lastOption.title}</b>
-                    {autoReason && <p>{autoReason}</p>}
+                    <b>{agentCopyText(lastOption.title, '已选方案', contentLanguage)}</b>
+                    {autoReason && <p>{agentCopyText(autoReason, '已根据候选评分自动选择。', contentLanguage)}</p>}
                   </div>
                 </div>
               )}
@@ -525,8 +607,8 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                 <>
                   <div className="agent-question">
                     <span>当前决策</span>
-                    <h4>{decision.question}</h4>
-                    <p>以下方案只改变未来创作意图；已经发生的故事事实仍由 canon 治理。</p>
+                    <h4>{agentCopyText(decision.question, '请选择下一步', contentLanguage)}</h4>
+                    <p>以下方案只改变未来创作意图；已经发生的内容仍按已确认设定管理。</p>
                   </div>
                   <div className="agent-options">
                     {decision.options.map((option) => (
@@ -535,6 +617,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                         option={option}
                         recommended={option.id === decision.recommended_option_id}
                         busy={busy}
+                        contentLanguage={contentLanguage}
                         onSelect={() => void choose({ action: 'select', option_id: option.id })}
                       />
                     ))}
@@ -546,7 +629,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                       onClick={() => void choose({ action: 'auto' })}
                       disabled={busy}
                     >
-                      ✨ 让 AI 决定
+                      ✨ 采用智能推荐
                     </button>
                     {canReroll && (
                       <button
@@ -561,7 +644,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
                   </div>
                 </>
               ) : (
-                <div className="nf-loading"><span className="nf-spin" /> Agent 正在推进下一阶段…</div>
+                <div className="nf-loading"><span className="nf-spin" /> 创作助手正在推进下一阶段…</div>
               )}
             </section>
           )}
@@ -576,7 +659,7 @@ export default function AgentPanel({ projectId, onChanged }: AgentPanelProps): J
 
           <div className="agent-advanced-note">
             <b>高级模式仍然保留：</b>
-            世界圣经、审核队列、卷 OKR 和传统章节流水线仍可在其他标签中直接编辑与检查。
+            世界设定、审核队列、卷目标与关键结果，以及传统章节流水线仍可在其他标签中直接编辑与检查。
           </div>
         </>
       )}

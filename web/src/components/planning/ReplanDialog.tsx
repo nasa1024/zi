@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type { ChapterReplanResponse } from '../../api/types';
+import { userFacingError } from '../../utils/uiText';
 
 interface ReplanDialogProps {
   projectId: string;
@@ -11,8 +12,7 @@ interface ReplanDialogProps {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof ApiError || error instanceof Error) return error.message;
-  return '重规划失败';
+  return userFacingError(error, '重规划失败，请稍后重试。');
 }
 
 export default function ReplanDialog({
@@ -86,9 +86,9 @@ export default function ReplanDialog({
     }}>
       <section className="replan-dialog" role="dialog" aria-modal="true" aria-labelledby="replan-title">
         <button type="button" className="replan-close" onClick={onClose} aria-label="关闭重规划对话框">×</button>
-        <span className="replan-kicker">PLAN REVISION · APPEND ONLY</span>
+        <span className="replan-kicker">计划修订 · 只追加不覆盖</span>
         <h2 id="replan-title">接受第 {chapter} 章，重排未来</h2>
-        <p>已写正文与 Canon 不会改变；旧计划会保留为 superseded，新路线从下一章开始。</p>
+        <p>已写正文与已确认设定不会改变；旧计划会作为历史版本保留，新路线从下一章开始。</p>
 
         <div className="replan-mode-row">
           <button type="button" className={mode === 'patch' ? 'active' : ''} onClick={() => setMode('patch')}>

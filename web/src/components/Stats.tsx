@@ -51,11 +51,11 @@ export default function Stats() {
           </div>
           <div className="stat-cell">
             <b data-count="7">0</b>
-            <span>SCHEMA 版本</span>
+            <span>数据结构版本</span>
           </div>
           <div className="stat-cell">
             <b data-count="5">0</b>
-            <span>核心 Skill</span>
+            <span>核心创作能力</span>
           </div>
           <div className="stat-cell">
             <b data-count="13">0</b>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type {
   ContentLanguage,
   GenreCatalogItem,
@@ -9,6 +9,19 @@ import type {
   ProjectResponse,
   WritingProfileCatalogItem,
 } from '../../api/types';
+import {
+  audienceRatingLabel,
+  contentLanguageLabel,
+  contentWarningLabel,
+  genreLabel,
+  publicationFormatLabel,
+  storyTagLabel,
+  targetMarketLabel,
+  userFacingError,
+  writingProfileDescription,
+  writingProfileLabel,
+  writingRuleLabel,
+} from '../../utils/uiText';
 import SettingOptionCards from './SettingOptionCards';
 
 export interface CreateProjectModalProps {
@@ -44,19 +57,19 @@ interface LanguageDefaults {
   genre: string;
 }
 
-const STEP_LABELS = ['基础信息', '语言、市场与风格', '情节设定'];
+const STEP_LABELS = ['基础信息', '语言 · 市场 · 风格', '情节设定'];
 const LANGUAGE_DEFAULTS: Record<ContentLanguage, LanguageDefaults> = {
   'zh-CN': { market: 'cn_web', format: 'web_serial', genre: 'xuanhuan' },
   'en-US': { market: 'global_english', format: 'web_serial', genre: 'fantasy' },
   'en-GB': { market: 'global_english', format: 'web_serial', genre: 'fantasy' },
 };
 
-const MARKET_OPTIONS: Record<string, { value: string; label: string; disabled?: boolean }[]> = {
-  'zh-CN': [{ value: 'cn_web', label: '中文网文' }],
+const MARKET_OPTIONS: Record<string, { value: string; disabled?: boolean }[]> = {
+  'zh-CN': [{ value: 'cn_web' }],
   'en-US': [
-    { value: 'global_english', label: '全球英文读者' },
-    { value: 'us', label: '美国市场（预留）', disabled: true },
-    { value: 'uk', label: '英国市场（预留）', disabled: true },
+    { value: 'global_english' },
+    { value: 'us', disabled: true },
+    { value: 'uk', disabled: true },
   ],
 };
 
@@ -110,12 +123,20 @@ const RANK_TEMPLATES = [
 ];
 
 const SENTINEL_PREFIXES = ['（示例）', '(Example)', '[Example]'];
-const CONTENT_WARNING_OPTIONS = [
-  { value: 'graphic_violence', label: '写实暴力' },
-  { value: 'profanity', label: '粗口' },
-  { value: 'sexual_content', label: '性内容' },
-  { value: 'self_harm', label: '自伤相关' },
+const CONTENT_WARNING_OPTIONS = ['graphic_violence', 'profanity', 'sexual_content', 'self_harm'];
+const KNOWN_STORY_TAG_VALUES = [
+  'progression_fantasy',
+  'litrpg',
+  'cozy',
+  'cultivation',
+  'system',
+  'romance',
+  'mystery',
+  'action',
 ];
+const STORY_TAG_VALUE_BY_LABEL = new Map(
+  KNOWN_STORY_TAG_VALUES.map((value) => [storyTagLabel(value), value]),
+);
 
 function emptyDraft(genre: string): PlotSetting {
   return { genre, power_ranks: [] };
@@ -144,8 +165,25 @@ function parseTags(value: string): string[] {
   ));
 }
 
+function parseStoryTags(value: string): string[] {
+  return parseTags(value).map((tag) => STORY_TAG_VALUE_BY_LABEL.get(tag) ?? tag);
+}
+
+function catalogGenreLabel(genre: GenreCatalogItem): string {
+  const mapped = genreLabel(genre.id);
+  return mapped === '自定义类型' ? genreLabel(genre.id, genre.label) : mapped;
+}
+
+function catalogProfileLabel(profile: WritingProfileCatalogItem | null): string {
+  if (!profile) return '等待写作风格';
+  const mapped = writingProfileLabel(profile.id);
+  return mapped === '自定义写作风格'
+    ? writingProfileLabel(profile.id, profile.name)
+    : mapped;
+}
+
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError || error instanceof Error ? error.message : fallback;
+  return userFacingError(error, fallback);
 }
 
 export default function CreateProjectModal({
@@ -161,6 +199,7 @@ export default function CreateProjectModal({
   const [publicationFormat, setPublicationFormat] = useState(defaults.format);
   const [primaryGenre, setPrimaryGenre] = useState(defaults.genre);
   const [storyTags, setStoryTags] = useState<string[]>([]);
+  const [storyTagsText, setStoryTagsText] = useState('');
   const [audienceRating, setAudienceRating] = useState('general');
   const [contentWarnings, setContentWarnings] = useState<string[]>([]);
   const [profileId, setProfileId] = useState('');
@@ -203,6 +242,7 @@ export default function CreateProjectModal({
     setPublicationFormat(initial.format);
     setPrimaryGenre(initial.genre);
     setStoryTags([]);
+    setStoryTagsText('');
     setAudienceRating('general');
     setContentWarnings([]);
     setProfileId('');
@@ -300,6 +340,7 @@ export default function CreateProjectModal({
     setPublicationFormat(next.format);
     setPrimaryGenre(next.genre);
     setStoryTags([]);
+    setStoryTagsText('');
     setAudienceRating('general');
     setContentWarnings([]);
     setProfileId('');
@@ -313,6 +354,7 @@ export default function CreateProjectModal({
     setProfileId('');
     setPrimaryGenre('');
     setStoryTags([]);
+    setStoryTagsText('');
     setProfileOverrides({});
     clearCandidates('');
   };
@@ -328,7 +370,9 @@ export default function CreateProjectModal({
     const profile = profiles.find((item) => item.id === id);
     setProfileId(id);
     setProfileOverrides({});
-    setStoryTags(profile?.default_story_tags ?? profile?.story_tags ?? []);
+    const nextStoryTags = profile?.default_story_tags ?? profile?.story_tags ?? [];
+    setStoryTags(nextStoryTags);
+    setStoryTagsText(nextStoryTags.map(storyTagLabel).join(', '));
     clearCandidates(primaryGenre);
   };
 
@@ -439,7 +483,7 @@ export default function CreateProjectModal({
         setEdited(true);
       }
     } catch (rerollError) {
-      setGenError(errorMessage(rerollError, '重生失败'));
+      setGenError(errorMessage(rerollError, '重新生成失败'));
     } finally {
       setRerollKey(null);
     }
@@ -483,7 +527,7 @@ export default function CreateProjectModal({
                 className={`nf-btn-sm${locked ? ' on' : ''}`}
                 aria-pressed={locked}
                 aria-label={`${locked ? '已锁定' : '锁定'}：${label}`}
-                title={locked ? '已锁定（重生时保持不变）' : '锁定此字段'}
+                title={locked ? '已锁定（重新生成时保持不变）' : '锁定此字段'}
                 onClick={() => toggleLock(key)}
                 disabled={busy}
               >
@@ -556,9 +600,9 @@ export default function CreateProjectModal({
 
   return (
     <div className="modal-overlay" onMouseDown={() => { if (!busy) onClose(); }}>
-      <div className="modal-card project-wizard" role="dialog" aria-modal="true" aria-label="新建项目" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal-card project-wizard" role="dialog" aria-modal="true" aria-label="新建作品" onMouseDown={(event) => event.stopPropagation()}>
         <div className="mc-head">
-          <div><span className="mc-eyebrow">NEW PROJECT · STEP {step + 1}/3</span><h3 className="cn">＋ 开一本新书</h3></div>
+          <div><span className="mc-eyebrow">新建作品 · 第 {step + 1}/3 步</span><h3 className="cn">＋ 开一本新书</h3></div>
           <button type="button" className="modal-close" aria-label="关闭" onClick={onClose} disabled={busy}>✕</button>
         </div>
 
@@ -573,16 +617,16 @@ export default function CreateProjectModal({
         <form className="nf-form single" onSubmit={(event) => void handleSubmit(event)}>
           {step === 0 && (
             <section className="wizard-pane" aria-labelledby="wizard-basics-title">
-              <div className="wizard-pane-head"><span>BASICS</span><h4 id="wizard-basics-title">基础信息</h4><p>界面语言与作品语言彼此独立；这里选择模型最终写作的语言。</p></div>
+              <div className="wizard-pane-head"><span>基础信息</span><h4 id="wizard-basics-title">先确定作品语言</h4><p>界面语言与作品语言彼此独立；这里选择创作助手最终写作的语言。</p></div>
               <div className="nf-field full">
-                <label htmlFor="cp-name">书名 / NAME<span className="setting-optional">（可留空，由系统生成）</span></label>
-                <input id="cp-name" className="nf-input" type="text" placeholder={isEnglish ? 'Optional working title' : '可留空；例如：万古第一剑修'} value={name} onChange={(event) => setName(event.target.value)} autoFocus disabled={busy} />
+                <label htmlFor="cp-name">书名<span className="setting-optional">（可留空，由系统生成）</span></label>
+                <input id="cp-name" className="nf-input" type="text" placeholder={isEnglish ? '可留空；例如：The Lost Crown' : '可留空；例如：万古第一剑修'} value={name} onChange={(event) => setName(event.target.value)} autoFocus disabled={busy} />
               </div>
               <div className="nf-field full">
-                <label htmlFor="cp-language">作品语言 / CONTENT LANGUAGE</label>
+                <label htmlFor="cp-language">作品语言</label>
                 <select id="cp-language" className="nf-select" value={contentLanguage} onChange={(event) => handleLanguageChange(event.target.value as ContentLanguage)} disabled={busy}>
-                  <option value="zh-CN">简体中文 · zh-CN</option>
-                  <option value="en-US">English (US) · en-US</option>
+                  <option value="zh-CN">{contentLanguageLabel('zh-CN', true)}</option>
+                  <option value="en-US">{contentLanguageLabel('en-US', true)}</option>
                 </select>
                 <small className="field-help">不会跟随浏览器地区自动写入；创建前由你明确确认。</small>
               </div>
@@ -591,7 +635,7 @@ export default function CreateProjectModal({
 
           {step === 1 && (
             <section className="wizard-pane" aria-labelledby="wizard-style-title">
-              <div className="wizard-pane-head"><span>LANGUAGE · MARKET · STYLE</span><h4 id="wizard-style-title">语言、市场与风格</h4><p>目录来自后端版本化配置，后续设定、规划和正文将共享同一份规则。</p></div>
+              <div className="wizard-pane-head"><span>语言 · 市场 · 风格</span><h4 id="wizard-style-title">选择读者与写作风格</h4><p>目录来自版本化配置，后续设定、规划和正文将共享同一份规则。</p></div>
               {catalogError && <div className="nf-msg err full" role="alert"><span>⚠</span><span>{catalogError}</span><button type="button" className="nf-btn-sm" onClick={() => setCatalogNonce((value) => value + 1)}>重试</button></div>}
               {catalogLoading && <div className="workspace-loading"><span className="nf-spin" /> 正在加载兼容风格…</div>}
               <div className="wizard-style-grid">
@@ -599,46 +643,58 @@ export default function CreateProjectModal({
                   <div className="nf-field">
                     <label htmlFor="cp-market">目标市场</label>
                     <select id="cp-market" className="nf-select" value={targetMarket} onChange={(event) => handleMarketChange(event.target.value)} disabled={busy || catalogLoading}>
-                      {(MARKET_OPTIONS[contentLanguage] ?? MARKET_OPTIONS['en-US']).map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+                      {(MARKET_OPTIONS[contentLanguage] ?? MARKET_OPTIONS['en-US']).map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{targetMarketLabel(option.value)}{option.disabled ? '（暂未开放）' : ''}</option>)}
                     </select>
                   </div>
                   <div className="nf-field">
                     <label htmlFor="cp-format">发布形态</label>
                     <select id="cp-format" className="nf-select" value={publicationFormat} onChange={(event) => { setPublicationFormat(event.target.value); setProfileId(''); clearCandidates(primaryGenre); }} disabled={busy || catalogLoading}>
-                      <option value="web_serial">Web Serial · 连载</option>
-                      <option value="novel" disabled>Novel · 完整长篇（P1）</option>
+                      <option value="web_serial">{publicationFormatLabel('web_serial')}</option>
+                      <option value="novel" disabled>{publicationFormatLabel('novel')}（暂未开放）</option>
                     </select>
                   </div>
                   <div className="nf-field">
                     <label htmlFor="cp-primary-genre">主类型</label>
                     <select id="cp-primary-genre" className="nf-select" value={primaryGenre} onChange={(event) => handleGenreChange(event.target.value)} disabled={busy || catalogLoading || genres.length === 0}>
-                      {genres.map((genre) => <option key={genre.id} value={genre.id}>{genre.label}</option>)}
+                      {genres.map((genre) => <option key={genre.id} value={genre.id}>{catalogGenreLabel(genre)}</option>)}
                     </select>
                   </div>
                   <div className="nf-field">
                     <label htmlFor="cp-audience-rating">读者分级</label>
                     <select id="cp-audience-rating" className="nf-select" value={audienceRating} onChange={(event) => setAudienceRating(event.target.value)} disabled={busy}>
-                      <option value="general">General · 大众</option>
-                      <option value="young_adult">Young Adult · 青少年</option>
-                      <option value="adult">Adult · 成人</option>
+                      <option value="general">{audienceRatingLabel('general')}</option>
+                      <option value="young_adult">{audienceRatingLabel('young_adult')}</option>
+                      <option value="adult">{audienceRatingLabel('adult')}</option>
                     </select>
                   </div>
                   <div className="nf-field full">
                     <label htmlFor="cp-story-tags">子类型 / 标签<span className="setting-optional">（逗号分隔）</span></label>
-                    <input id="cp-story-tags" className="nf-input" value={storyTags.join(', ')} onChange={(event) => setStoryTags(parseTags(event.target.value))} placeholder={isEnglish ? 'progression_fantasy, litrpg, cozy' : '升级流, 群像, 轻松'} disabled={busy} />
+                    <input
+                      id="cp-story-tags"
+                      className="nf-input"
+                      value={storyTagsText}
+                      onChange={(event) => {
+                        setStoryTagsText(event.target.value);
+                        setStoryTags(parseStoryTags(event.target.value));
+                      }}
+                      placeholder={isEnglish ? '例如：成长奇幻、游戏化冒险、温馨治愈' : '例如：升级流、群像、轻松'}
+                      disabled={busy}
+                    />
                   </div>
                 </div>
 
                 <aside className="profile-preview" aria-live="polite">
-                  <span>SELECTED PROFILE</span>
-                  <h5>{selectedProfile?.name ?? '等待目录'}</h5>
-                  <p>{selectedProfile?.preview || selectedProfile?.description || '选择风格后，这里会显示写作规则和效果说明。'}</p>
+                  <span>已选写作风格</span>
+                  <h5>{catalogProfileLabel(selectedProfile)}</h5>
+                  <p>{selectedProfile
+                    ? writingProfileDescription(selectedProfile.id, selectedProfile.preview || selectedProfile.description)
+                    : '选择风格后，这里会显示写作规则和效果说明。'}</p>
                   {selectedProfile && (
                     <dl>
-                      <div><dt>POV</dt><dd>{String(profileRules.pov ?? '—')}</dd></div>
-                      <div><dt>时态</dt><dd>{String(profileRules.tense ?? '—')}</dd></div>
-                      <div><dt>节奏</dt><dd>{String(profileRules.pace ?? '—')}</dd></div>
-                      <div><dt>章节长度</dt><dd>{chapterRange?.length ? `${chapterRange[0]}–${chapterRange[1]} words` : '—'}</dd></div>
+                      <div><dt>叙事视角</dt><dd>{writingRuleLabel(profileRules.pov)}</dd></div>
+                      <div><dt>时态</dt><dd>{writingRuleLabel(profileRules.tense)}</dd></div>
+                      <div><dt>节奏</dt><dd>{writingRuleLabel(profileRules.pace)}</dd></div>
+                      <div><dt>章节长度</dt><dd>{chapterRange?.length ? `${chapterRange[0]}–${chapterRange[1]} ${isEnglish ? '词' : '字'}` : '—'}</dd></div>
                     </dl>
                   )}
                 </aside>
@@ -649,14 +705,14 @@ export default function CreateProjectModal({
                   {profiles.map((profile) => (
                     <label key={`${profile.id}:${profile.version}`} className={profile.id === profileId ? 'selected' : ''}>
                       <input type="radio" name="writing-profile" value={profile.id} checked={profile.id === profileId} onChange={() => handleProfileChange(profile.id)} disabled={busy} />
-                      <span><b>{profile.name}</b><small>{profile.description}</small><em>v{profile.version}</em></span>
+                      <span><b>{catalogProfileLabel(profile)}</b><small>{writingProfileDescription(profile.id, profile.description)}</small><em>第 {profile.version} 版</em></span>
                     </label>
                   ))}
                 </div>
               )}
 
               <button type="button" className="nf-btn-sm profile-advanced-toggle" onClick={() => setShowProfileAdvanced((value) => !value)} disabled={busy}>
-                {showProfileAdvanced ? '− 收起高级设置' : '＋ 覆盖 POV、时态与节奏'}
+                {showProfileAdvanced ? '− 收起高级设置' : '＋ 调整叙事视角、时态与节奏'}
               </button>
               {showProfileAdvanced && (
                 <div className="profile-advanced-grid">
@@ -670,8 +726,8 @@ export default function CreateProjectModal({
                     <div className="nf-field" key={key as string}>
                       <label htmlFor={`cp-profile-${key}`}>{label as string}</label>
                       <select id={`cp-profile-${key}`} className="nf-select" value={String(profileOverrides[key as string] ?? '')} onChange={(event) => setOverride(key as string, event.target.value)} disabled={busy}>
-                        <option value="">使用预设（{String(selectedProfile?.prompt_rules[key as string] ?? '—')}）</option>
-                        {(values as string[]).map((value) => <option key={value} value={value}>{value}</option>)}
+                        <option value="">使用预设（{writingRuleLabel(selectedProfile?.prompt_rules[key as string])}）</option>
+                        {(values as string[]).map((value) => <option key={value} value={value}>{writingRuleLabel(value)}</option>)}
                       </select>
                     </div>
                   ))}
@@ -681,13 +737,13 @@ export default function CreateProjectModal({
               <fieldset className="content-warning-fieldset">
                 <legend>内容警告<span>（可选）</span></legend>
                 {CONTENT_WARNING_OPTIONS.map((option) => (
-                  <label key={option.value} className="nf-check">
+                  <label key={option} className="nf-check">
                     <input
                       type="checkbox"
-                      checked={contentWarnings.includes(option.value)}
-                      onChange={(event) => setContentWarnings((current) => event.target.checked ? [...current, option.value] : current.filter((item) => item !== option.value))}
+                      checked={contentWarnings.includes(option)}
+                      onChange={(event) => setContentWarnings((current) => event.target.checked ? [...current, option] : current.filter((item) => item !== option))}
                     />
-                    {option.label}
+                    {contentWarningLabel(option)}
                   </label>
                 ))}
               </fieldset>
@@ -696,10 +752,10 @@ export default function CreateProjectModal({
 
           {step === 2 && (
             <section className="wizard-pane" aria-labelledby="wizard-plot-title">
-              <div className="wizard-pane-head"><span>PLOT SETUP</span><h4 id="wizard-plot-title">情节设定</h4><p>{isEnglish ? '候选内容将使用英文，并锁定上一步选择的市场与风格。' : '可以自己填写，也可以让系统生成三套候选再逐字段调整。'}</p></div>
-              <div className="setup-context-summary"><span>{contentLanguage}</span><span>{targetMarket}</span><span>{primaryGenre}</span><span>{selectedProfile?.name ?? profileId}</span></div>
+              <div className="wizard-pane-head"><span>情节设定</span><h4 id="wizard-plot-title">把脑洞变成可选择的开场</h4><p>{isEnglish ? '候选内容将使用英文，并锁定上一步选择的市场与风格。' : '可以自己填写，也可以让创作助手生成三套候选再逐字段调整。'}</p></div>
+              <div className="setup-context-summary"><span>{contentLanguageLabel(contentLanguage, true)}</span><span>{targetMarketLabel(targetMarket)}</span><span>{genreLabel(primaryGenre)}</span><span>{catalogProfileLabel(selectedProfile)}</span></div>
               <div className="nf-field full">
-                <label>情节设定 / PLOT SETTING<span className="setting-optional">（均为选填）</span></label>
+                <label>情节设定<span className="setting-optional">（均为选填）</span></label>
                 <div className="setup-mode-seg" role="tablist" aria-label="设定模式">
                   <button type="button" role="tab" aria-selected={mode === 'manual'} className={mode === 'manual' ? 'active' : ''} onClick={() => setMode('manual')} disabled={busy}>✍️ 自己填</button>
                   <button type="button" role="tab" aria-selected={mode === 'generate'} className={mode === 'generate' ? 'active' : ''} onClick={() => setMode('generate')} disabled={busy}>✨ 系统生成选项</button>
@@ -710,7 +766,7 @@ export default function CreateProjectModal({
                 <>
                   <div className="nf-field full">
                     <label htmlFor="cp-hints">脑洞 / 要求（可选）</label>
-                    <textarea id="cp-hints" className="nf-textarea" rows={2} placeholder={isEnglish ? 'Example: an underdog progression story with a costly magic system…' : '例如：废柴流，开局获得吞噬天赋，复仇主线…'} value={hints} onChange={(event) => setHints(event.target.value)} disabled={busy} />
+                    <textarea id="cp-hints" className="nf-textarea" rows={2} placeholder={isEnglish ? '例如：弱者成长路线，魔法每次使用都要付出代价……' : '例如：废柴流，开局获得吞噬天赋，复仇主线…'} value={hints} onChange={(event) => setHints(event.target.value)} disabled={busy} />
                   </div>
                   {(candidates.length === 0 || selectedIdx === null) && (
                     <button type="button" className="nf-btn blue" onClick={() => void handleGenerate()} disabled={busy}>
@@ -733,7 +789,7 @@ export default function CreateProjectModal({
                   {showAdvanced && <>{ADVANCED_FIELDS.map(renderField)}{renderRanks()}<button type="button" className="nf-btn-sm" onClick={() => setShowAdvanced(false)} disabled={busy}>− 收起</button></>}
                   {showFieldTools && lockedKeys.size > 0 && (
                     <button type="button" className="nf-btn blue" onClick={() => void handleGenerate()} disabled={busy}>
-                      {generating ? <><span className="nf-spin" /> 生成中…</> : `🔄 重生未锁定字段（保留 ${lockedKeys.size} 个锁定）`}
+                      {generating ? <><span className="nf-spin" /> 生成中…</> : `🔄 重新生成未锁定字段（保留 ${lockedKeys.size} 个锁定）`}
                     </button>
                   )}
                 </>
@@ -748,7 +804,7 @@ export default function CreateProjectModal({
               {step < 2 && <button type="button" className="nf-btn pink" onClick={() => setStep((step + 1) as WizardStep)} disabled={busy || (step === 1 && !catalogReady)}>下一步 →</button>}
               {step === 2 && (
                 <button type="submit" className="nf-btn pink" disabled={busy || !catalogReady}>
-                  {submitting ? <><span className="nf-spin" /> 创建中…</> : trimmedName ? '⚡ 创建项目' : '✨ 零输入开始创作'}
+                  {submitting ? <><span className="nf-spin" /> 创建中…</> : trimmedName ? '⚡ 创建作品' : '✨ 零输入开始创作'}
                 </button>
               )}
               <button type="button" className="nf-btn ghost" onClick={onClose} disabled={busy}>取消</button>

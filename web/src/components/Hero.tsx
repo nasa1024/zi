@@ -12,7 +12,7 @@ export default function Hero({ onStart }: HeroProps) {
       <div className="wrap hero-grid">
         <div className="hero-copy">
           <div className="hero-tag">
-            <span className="dot" /> AI 网文写作引擎 · MVP v0.3
+            <span className="dot" /> AI 小说创作助手 · 体验版 v0.3
           </div>
           <h1>
             <span>
@@ -35,7 +35,7 @@ export default function Hero({ onStart }: HeroProps) {
             </span>
           </h1>
           <p className="hero-sub">
-            SQLite 账本、确定性 validator、as-of 投影 —— 听起来很硬核？
+            本地设定档案、确定性校验、按章节还原状态 —— 听起来很硬核？
             它们只为一件事服务：让你的主角<b>境界不倒退</b>、伏笔<b>必回收</b>、世界观<b>永不崩塌</b>，
             同时把每一章都写出<b>追更的爽感</b>。
           </p>
@@ -236,7 +236,7 @@ export default function Hero({ onStart }: HeroProps) {
             <span className="ic" style={{ background: 'var(--lime)' }}>
               ✓
             </span>{' '}
-            一致性 PASS
+            一致性通过
           </div>
           <div className="float-card fc3" style={{ ['--r' as any]: '6deg' }}>
             <span className="ic" style={{ background: 'var(--orange)' }}>

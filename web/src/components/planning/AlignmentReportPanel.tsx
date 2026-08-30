@@ -1,4 +1,5 @@
 import type { AlignmentReport, DivergenceLevel } from '../../api/types';
+import { alignmentEvidenceLabel, divergenceLevelLabel, planActionLabel } from '../../utils/uiText';
 
 interface AlignmentReportPanelProps {
   report: AlignmentReport | null;
@@ -7,13 +8,6 @@ interface AlignmentReportPanelProps {
   onReplan: () => void;
   onKeep: () => void;
 }
-
-const LEVEL_LABELS: Record<string, string> = {
-  normal: '正常',
-  minor: '轻微偏航',
-  major: '明显偏航',
-  severe: '严重偏航',
-};
 
 function inferLevel(score: number): DivergenceLevel {
   if (score < 0.15) return 'normal';
@@ -40,14 +34,16 @@ export default function AlignmentReportPanel({
   if (!report) {
     return (
       <section className="alignment-empty">
-        <span>PLAN ↔ ACTUAL</span>
+        <span>计划 ↔ 实际</span>
         <h3>等待正文验收</h3>
         <p>生成或保存正文后，这里会显示契约完成度、偏航证据和下一步建议。</p>
       </section>
     );
   }
 
-  const level = report.level || inferLevel(report.divergence_score);
+  const level = report.level && ['normal', 'minor', 'major', 'severe'].includes(report.level)
+    ? report.level as DivergenceLevel
+    : inferLevel(report.divergence_score);
   const score = Math.max(0, Math.min(1, report.divergence_score));
   const metrics = [
     ['本章目标', report.goal_score],
@@ -65,9 +61,9 @@ export default function AlignmentReportPanel({
           <b>{percent(score)}</b>
         </div>
         <div>
-          <span>PLAN / ACTUAL PROOF</span>
-          <h2 id="alignment-title">{LEVEL_LABELS[level] ?? level}</h2>
-          <p>{report.decision || `建议动作：${report.recommended_plan_action ?? 'keep'}`}</p>
+          <span>计划与实际对照</span>
+          <h2 id="alignment-title">{divergenceLevelLabel(level)}</h2>
+          <p>建议动作：{planActionLabel(report.decision ?? report.recommended_plan_action ?? 'keep')}</p>
         </div>
       </div>
 
@@ -96,7 +92,7 @@ export default function AlignmentReportPanel({
           <h3>原文证据</h3>
           {(report.evidence_spans ?? []).slice(0, 4).map((evidence, index) => (
             <blockquote key={`${evidence.start ?? index}-${evidence.quote ?? ''}`}>
-              {evidence.label && <b>{evidence.label}</b>}
+              {evidence.label && <b>{alignmentEvidenceLabel(evidence.label)}</b>}
               <p>{evidence.quote || '证据位置已记录'}</p>
               {evidence.confidence != null && <small>置信度 {percent(evidence.confidence)}</small>}
             </blockquote>

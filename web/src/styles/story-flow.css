@@ -1,0 +1,223 @@
+/* Direction 2: a quiet, paper-coloured checkpoint rail above the desk. */
+
+.story-flow-rail {
+  position: sticky;
+  top: var(--desk-topbar, 64px);
+  z-index: 70;
+  width: min(calc(100% - 40px), 1040px);
+  min-height: 58px;
+  margin: 20px auto 18px clamp(40px, 3.2vw, 48px);
+  padding: 5px 18px;
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  background: var(--cream);
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: 0 4px 0 var(--ink);
+}
+
+/* The rail is part of the writing desk's fixed viewport budget. Keeping the
+   budget explicit prevents the editor from gaining a second vertical scroll
+   after the checkpoint strip is added. */
+:root {
+  --desk-flow-space: 96px;
+}
+
+.workspace-shell > .writing-workspace {
+  height: calc(100vh - var(--desk-topbar) - var(--desk-flow-space));
+}
+
+/* Context is useful to assistive technology through each link's label, but
+   the reference rail intentionally keeps the visual strip free of chrome. */
+.story-flow-context {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.story-flow-list {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.story-flow-item {
+  min-width: 0;
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+}
+
+.story-flow-link {
+  min-width: 0;
+  min-height: 42px;
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 5px 10px;
+  color: var(--ink);
+  border: 2px solid transparent;
+  border-radius: 7px;
+  font: 500 0.86rem/1.15 var(--font-cn);
+  white-space: nowrap;
+  transition: transform 0.14s ease, background 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.story-flow-link:hover {
+  background: var(--cream-2);
+  border-color: color-mix(in srgb, var(--ink) 45%, transparent);
+  transform: translateY(-1px);
+}
+
+.story-flow-link:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.story-flow-link.is-current {
+  background: var(--lime);
+  border-color: var(--lime);
+  box-shadow: 3px 3px 0 var(--ink);
+  transform: translateY(-1px);
+}
+
+.story-flow-link.is-complete {
+  color: var(--ink);
+}
+
+.story-flow-link.is-pending {
+  opacity: 0.68;
+}
+
+.story-flow-marker {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  font: 700 0.67rem/1 var(--font-mono);
+}
+
+.story-flow-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-flow-connector {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  margin: 0 clamp(4px, 1.2vw, 16px);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+}
+
+@media (max-width: 900px) {
+  .story-flow-rail {
+    width: min(calc(100% - 28px), 760px);
+    margin-inline: auto;
+    padding-inline: 10px;
+  }
+
+  .story-flow-link {
+    gap: 5px;
+    padding-inline: 6px;
+    font-size: 0.78rem;
+  }
+
+  .story-flow-marker {
+    width: 20px;
+    height: 20px;
+    flex-basis: 20px;
+    font-size: 0.6rem;
+  }
+
+  .story-flow-connector {
+    margin-inline: 3px;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 860px) {
+  .workspace-shell > .writing-workspace {
+    height: auto;
+  }
+
+  .workspace-shell .story-spine {
+    top: calc(var(--desk-topbar) + var(--desk-flow-space));
+    height: calc(100vh - var(--desk-topbar) - var(--desk-flow-space));
+  }
+}
+
+@media (max-width: 640px) {
+  .story-flow-rail {
+    position: sticky;
+    top: var(--desk-topbar, 58px);
+    width: calc(100% - 20px);
+    min-height: 56px;
+    margin: 12px auto 14px;
+    padding: 4px 7px;
+  }
+
+  .workspace-shell > .writing-workspace {
+    height: auto;
+  }
+
+  .story-flow-list {
+    justify-content: flex-start;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    padding: 1px 2px 4px;
+  }
+
+  .story-flow-list.has-current::before,
+  .story-flow-list.has-current::after {
+    content: '';
+    flex: 0 0 calc(50% - 24px);
+  }
+
+  .story-flow-item {
+    flex: 0 0 auto;
+  }
+
+  .story-flow-link {
+    min-height: 42px;
+    gap: 4px;
+    padding-inline: 5px;
+    font-size: .74rem;
+  }
+
+  .story-flow-marker {
+    width: 18px;
+    height: 18px;
+    flex-basis: 18px;
+  }
+
+  .story-flow-connector {
+    width: 5px;
+    height: 5px;
+    flex-basis: 5px;
+    margin-inline: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .story-flow-link {
+    transition: none;
+  }
+}

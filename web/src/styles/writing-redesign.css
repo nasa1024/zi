@@ -1,0 +1,895 @@
+/*
+ * Direction 2 — focused manuscript desk
+ *
+ * This file is intentionally scoped to the editor and proofing components.
+ * The existing workspace.css remains the source of truth for the shell and
+ * inspector; these rules only sharpen the author-facing center column.
+ */
+
+.writing-workspace .manuscript-desk {
+  max-width: 980px;
+}
+
+.writing-workspace .manuscript-head {
+  min-height: 116px;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+}
+
+.writing-workspace .manuscript-number {
+  color: color-mix(in srgb, var(--pink) 16%, var(--cream-2));
+  font-size: clamp(4.2rem, 7vw, 5.7rem);
+  line-height: .72;
+}
+
+.writing-workspace .manuscript-title {
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.writing-redesign-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.writing-workspace .manuscript-title > .writing-redesign-kicker > span:first-child {
+  color: var(--blue-text);
+  font: 700 .6rem/1 var(--font-mono);
+  letter-spacing: .13em;
+}
+
+.writing-draft-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 21px;
+  padding: 4px 7px;
+  color: var(--ink);
+  background: var(--lime);
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  font: 700 .53rem/1 var(--font-mono);
+  letter-spacing: .04em;
+}
+
+.writing-draft-state.is-dirty {
+  background: var(--orange);
+}
+
+.writing-workspace .manuscript-title h1 {
+  margin: 9px 0 7px;
+  font-size: clamp(1.75rem, 3.1vw, 2.65rem);
+  line-height: 1.05;
+}
+
+.writing-workspace .manuscript-title p {
+  max-width: 620px;
+  font-size: .79rem;
+  line-height: 1.55;
+}
+
+.writing-workspace .manuscript-actions {
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 260px;
+}
+
+.writing-workspace .desk-button {
+  min-height: 42px;
+  padding: 10px 13px;
+  transition: transform .12s, box-shadow .12s, background .12s;
+}
+
+.writing-workspace .desk-button:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0 var(--ink);
+}
+
+.writing-workspace .desk-button:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.writing-workspace .desk-button.primary {
+  color: var(--cream);
+  background: var(--pink);
+}
+
+.writing-workspace .desk-button.continue {
+  color: var(--ink);
+  background: var(--pink);
+}
+
+.writing-workspace .manuscript-meta.writing-redesign-meta {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px 15px;
+  margin: 0 0 10px 0;
+  padding: 8px 12px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 28%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--cream) 70%, var(--cream-2));
+}
+
+.writing-stat {
+  display: inline-grid;
+  gap: 3px;
+  min-width: 64px;
+  padding-right: 14px;
+  border-right: 1px dashed color-mix(in srgb, var(--ink) 35%, transparent);
+}
+
+.writing-stat span {
+  color: var(--ink-soft);
+  font: 600 .53rem/1 var(--font-mono);
+  letter-spacing: .06em;
+}
+
+.writing-stat strong {
+  color: var(--ink);
+  font: 800 .92rem/1 var(--font-disp);
+}
+
+.writing-save-message {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 .6rem/1.2 var(--font-mono);
+}
+
+.writing-shortcut {
+  margin-left: auto;
+  color: color-mix(in srgb, var(--ink-soft) 74%, transparent);
+  font: 500 .56rem/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.writing-context-strip {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+  color: var(--ink-soft);
+  font: 500 .59rem/1.2 var(--font-mono);
+}
+
+.writing-context-strip > span:not(.writing-context-label) {
+  padding: 5px 8px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cream) 72%, transparent);
+}
+
+.writing-context-label {
+  color: var(--blue-text);
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+/* ── Generation rail ─────────────────────────────────────────── */
+.writing-generation-rail {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 15px;
+  padding: 13px 15px 12px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--cream) 82%, var(--cream-2));
+}
+
+.writing-generation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.writing-generation-title,
+.writing-generation-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.writing-generation-title > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.writing-generation-title strong {
+  font: 700 .8rem/1.2 var(--font-body);
+}
+
+.writing-generation-title > div > span {
+  overflow: hidden;
+  color: var(--ink-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 .57rem/1.2 var(--font-mono);
+}
+
+.writing-generation-mark {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--ink);
+  background: var(--lime);
+  border: 2px solid var(--ink);
+  border-radius: 9px;
+  font: 800 .55rem/1 var(--font-mono);
+}
+
+.writing-generation-actions {
+  flex-shrink: 0;
+}
+
+.writing-generation-actions > strong {
+  min-width: 38px;
+  color: var(--ink);
+  font: 800 1rem/1 var(--font-disp);
+  text-align: right;
+}
+
+.writing-generation-eta {
+  color: var(--ink-soft);
+  font: 500 .57rem/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.writing-generation-stop {
+  min-height: 33px;
+  padding: 7px 12px;
+  color: var(--ink);
+  background: var(--cream);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  cursor: pointer;
+  font: 700 .65rem/1 var(--font-cn);
+}
+
+.writing-generation-stop:hover {
+  color: var(--cream);
+  background: var(--ink);
+}
+
+.writing-generation-progress {
+  position: relative;
+  height: 12px;
+  overflow: hidden;
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  background: var(--cream-2);
+}
+
+.writing-generation-progress > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 4px;
+  background: var(--lime);
+  transition: width .25s ease;
+}
+
+.writing-generation-stages {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 2px;
+  scrollbar-width: thin;
+}
+
+.writing-generation-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font: 500 .54rem/1.2 var(--font-mono);
+  white-space: nowrap;
+}
+
+.writing-generation-stage:not(:last-child)::after {
+  width: 13px;
+  height: 1px;
+  display: inline-block;
+  margin-left: 1px;
+  content: '';
+  background: color-mix(in srgb, var(--ink) 27%, transparent);
+}
+
+.writing-generation-stage-dot {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  flex: none;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.writing-generation-stage.done {
+  color: var(--ink);
+}
+
+.writing-generation-stage.done .writing-generation-stage-dot {
+  border-color: var(--lime);
+  background: var(--lime);
+}
+
+.writing-generation-stage.active {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.writing-generation-stage.active .writing-generation-stage-dot {
+  border-color: var(--orange);
+  background: var(--orange);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 24%, transparent);
+}
+
+.writing-generation-stage.blocked {
+  color: var(--pink-text);
+}
+
+.writing-generation-stage.blocked .writing-generation-stage-dot {
+  border-color: var(--pink);
+  background: var(--pink);
+}
+
+.writing-generation-stage.muted {
+  opacity: .56;
+}
+
+/* ── Manuscript paper ────────────────────────────────────────── */
+.writing-workspace .manuscript-paper {
+  min-height: clamp(380px, 40vh, 520px);
+  border-radius: 8px 18px 18px 8px;
+  box-shadow: 7px 7px 0 var(--ink);
+}
+
+.writing-paper-topline {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  margin-left: 29px;
+  padding: 8px 18px 5px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+  color: var(--ink-soft);
+  font: 500 .57rem/1 var(--font-mono);
+}
+
+.writing-paper-topline span:last-child {
+  color: var(--blue-text);
+}
+
+.writing-workspace .manuscript-paper textarea {
+  min-height: clamp(330px, 35vh, 470px);
+  padding-top: 27px;
+  font-size: 1.03rem;
+  line-height: 2.05;
+}
+
+/* While AI is working the manuscript is read-only. Use it as a compact
+   context preview so the author can still see the previous proofing set in
+   the same viewport instead of losing the comparison table below the fold. */
+.writing-workspace .manuscript-desk:has(.writing-generation-rail) .manuscript-paper {
+  min-height: 278px;
+}
+
+.writing-workspace .manuscript-desk:has(.writing-generation-rail) .manuscript-paper textarea {
+  min-height: 228px;
+}
+
+.writing-workspace .manuscript-paper textarea:read-only {
+  color: color-mix(in srgb, var(--ink) 72%, var(--cream));
+  cursor: default;
+}
+
+.writing-paper-footer {
+  position: absolute;
+  right: 19px;
+  bottom: 12px;
+  left: 43px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  color: var(--ink-soft);
+  font: 500 .57rem/1 var(--font-mono);
+}
+
+/* ── Candidate comparison ────────────────────────────────────── */
+.writing-workspace .candidate-proofs.writing-candidate-proofs {
+  max-width: none;
+  margin-top: 27px;
+}
+
+.writing-workspace .writing-candidate-proofs .candidate-proof-head {
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.writing-workspace .writing-candidate-proofs .candidate-proof-head h3 {
+  margin-top: 6px;
+  font-size: 1.55rem;
+}
+
+.writing-candidate-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.writing-candidate-head-actions p {
+  max-width: 30ch;
+  color: var(--ink-soft);
+  font-size: .69rem;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.writing-candidate-readonly {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 13px;
+  padding: 9px 11px;
+  border: 1.5px solid var(--ink);
+  border-left: 6px solid var(--orange);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--cream-2);
+}
+
+.writing-candidate-readonly strong {
+  font: 800 .62rem/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.writing-candidate-readonly span {
+  color: var(--ink-soft);
+  font-size: .68rem;
+  line-height: 1.45;
+}
+
+.writing-candidate-expand-all,
+.writing-candidate-expand {
+  min-height: 32px;
+  padding: 6px 10px;
+  color: var(--ink);
+  background: transparent;
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  cursor: pointer;
+  font: 700 .61rem/1 var(--font-cn);
+  white-space: nowrap;
+}
+
+.writing-candidate-expand-all:hover,
+.writing-candidate-expand:hover {
+  color: var(--cream);
+  background: var(--ink);
+}
+
+.writing-workspace .writing-candidate-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+}
+
+.writing-workspace .writing-candidate-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 13px;
+  padding: 14px;
+  border: 2px solid var(--ink);
+  border-radius: 16px;
+  background: var(--cream);
+  box-shadow: 4px 4px 0 var(--ink);
+  transition: transform .12s, box-shadow .12s, background .12s;
+}
+
+.writing-workspace .writing-candidate-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 5px 6px 0 var(--ink);
+}
+
+.writing-workspace .writing-candidate-card.selected {
+  transform: translateY(-3px);
+  background: color-mix(in srgb, var(--lime) 22%, var(--cream));
+  box-shadow: 5px 7px 0 var(--ink);
+}
+
+.writing-workspace .writing-candidate-card.blocked {
+  border-top: 7px solid var(--pink);
+  border-left: 2px solid var(--ink);
+}
+
+.writing-candidate-card-head {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 17px;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+}
+
+.writing-workspace .writing-candidate-card .candidate-proof-index {
+  display: grid;
+  place-items: center;
+  min-height: 38px;
+  border: 1.5px solid var(--ink);
+  border-radius: 9px;
+  background: var(--cream-2);
+}
+
+.writing-workspace .writing-candidate-card .candidate-proof-index span {
+  font-size: .5rem;
+}
+
+.writing-workspace .writing-candidate-card .candidate-proof-index b {
+  font-size: 1.18rem;
+}
+
+.writing-candidate-name {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.writing-candidate-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 .82rem/1.1 var(--font-cn);
+}
+
+.writing-candidate-name span {
+  color: var(--ink-soft);
+  font: 500 .56rem/1 var(--font-mono);
+}
+
+.writing-candidate-radio {
+  width: 15px;
+  height: 15px;
+  display: inline-block;
+  border: 1.5px solid var(--ink);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.writing-candidate-radio.is-selected {
+  border: 4px solid var(--pink);
+  background: var(--cream);
+}
+
+.writing-workspace .writing-candidate-copy {
+  min-height: 154px;
+  display: flex;
+  flex-direction: column;
+}
+
+.writing-workspace .writing-candidate-copy .candidate-proof-badges {
+  min-height: 20px;
+  align-items: center;
+}
+
+.writing-workspace .writing-candidate-copy p {
+  flex: 1;
+  max-height: 9.2em;
+  overflow: hidden;
+  margin: 8px 0 4px;
+  color: var(--ink);
+  font-size: .79rem;
+  line-height: 1.72;
+  white-space: pre-wrap;
+}
+
+.writing-workspace .writing-candidate-copy p.is-expanded {
+  max-height: none;
+}
+
+.writing-candidate-expand {
+  align-self: flex-start;
+  min-height: 28px;
+  padding: 5px 8px;
+  border-color: color-mix(in srgb, var(--ink) 45%, transparent);
+  font-size: .57rem;
+}
+
+.writing-workspace .writing-candidate-scores {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: auto;
+}
+
+.writing-workspace .writing-candidate-scores > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 7px 6px;
+  border: 1px solid color-mix(in srgb, var(--ink) 24%, transparent);
+  border-radius: 8px;
+  text-align: left;
+}
+
+.writing-workspace .writing-candidate-scores dt {
+  color: var(--ink-soft);
+  font: 600 .51rem/1 var(--font-mono);
+}
+
+.writing-workspace .writing-candidate-scores dd {
+  font: 800 .8rem/1 var(--font-disp);
+}
+
+.writing-score-meter {
+  height: 4px;
+  display: block;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--cream-2);
+}
+
+.writing-score-meter i {
+  height: 100%;
+  display: block;
+  background: var(--blue);
+}
+
+.writing-workspace .writing-candidate-card.selected .writing-score-meter i {
+  background: var(--ink);
+}
+
+.writing-candidate-actions {
+  display: flex;
+  justify-content: stretch;
+  margin-top: auto;
+}
+
+.writing-workspace .writing-candidate-actions .proof-adopt {
+  width: 100%;
+  min-height: 40px;
+  color: var(--ink);
+  background: var(--lime);
+  border: 2px solid var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  font-size: .74rem;
+  transition: transform .12s, box-shadow .12s, background .12s;
+}
+
+.writing-workspace .writing-candidate-actions .proof-adopt:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.writing-workspace .writing-candidate-proofs.is-read-only .proof-adopt:disabled {
+  background: var(--cream-2);
+  box-shadow: none;
+}
+
+.writing-workspace .writing-candidate-actions .proof-adopt:disabled {
+  color: var(--ink-soft);
+  background: var(--cream-2);
+}
+
+.writing-workspace .writing-candidate-card.blocked .writing-candidate-actions .proof-adopt {
+  background: var(--cream-2);
+}
+
+/* ── Safe route transition ───────────────────────────────────── */
+.writing-navigation-guard {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: color-mix(in srgb, var(--ink) 68%, transparent);
+}
+
+.writing-navigation-guard > section {
+  width: min(100%, 470px);
+  padding: 26px;
+  color: var(--ink);
+  background: var(--cream);
+  border: 3px solid var(--ink);
+  border-radius: 18px;
+  box-shadow: 9px 9px 0 var(--pink);
+}
+
+.writing-navigation-guard > section > span {
+  color: var(--pink-text, #ad154f);
+  font: 700 .58rem/1 var(--font-mono);
+  letter-spacing: .14em;
+}
+
+.writing-navigation-guard h2 {
+  margin: 11px 0 10px;
+  font-family: var(--font-cn);
+  font-size: 1.65rem;
+  font-weight: 500;
+}
+
+.writing-navigation-guard p {
+  color: var(--ink-soft);
+  font-size: .82rem;
+  line-height: 1.65;
+}
+
+.writing-navigation-guard section > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 22px;
+}
+
+.writing-navigation-guard button {
+  min-height: 40px;
+  padding: 9px 14px;
+  color: var(--ink);
+  background: var(--lime);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  cursor: pointer;
+  font: 600 .75rem/1 var(--font-cn);
+}
+
+.writing-navigation-guard button.danger {
+  color: var(--cream);
+  background: var(--pink-text, #ad154f);
+}
+
+/* ── Responsive center column ────────────────────────────────── */
+@media (max-width: 1080px) {
+  .writing-workspace .manuscript-head {
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+
+  .writing-workspace .manuscript-number {
+    font-size: 5.3rem;
+  }
+
+  .writing-workspace .manuscript-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .writing-workspace .writing-candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .writing-workspace .manuscript-head {
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .writing-workspace .manuscript-number {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: auto;
+    font-size: 4rem;
+  }
+
+  .writing-workspace .manuscript-title {
+    grid-column: 1;
+    padding-right: 76px;
+  }
+
+  .writing-workspace .manuscript-title h1 {
+    font-size: 1.75rem;
+  }
+
+  .writing-workspace .manuscript-actions {
+    grid-column: 1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+  }
+
+  .writing-workspace .manuscript-actions .desk-button {
+    width: 100%;
+  }
+
+  .writing-workspace .manuscript-actions .desk-button.primary {
+    grid-column: 1 / -1;
+  }
+
+  .writing-shortcut {
+    display: none;
+  }
+
+  .writing-paper-topline {
+    margin-left: 24px;
+    padding-inline: 12px;
+  }
+
+  .writing-paper-topline span:last-child {
+    display: none;
+  }
+
+  .writing-workspace .manuscript-paper textarea {
+    min-height: 52vh;
+    padding: 22px 25px 65px 47px;
+    font-size: .98rem;
+    line-height: 1.95;
+  }
+
+  .writing-paper-footer {
+    right: 12px;
+    left: 35px;
+  }
+
+  .writing-generation-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .writing-generation-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .writing-candidate-head-actions {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .writing-candidate-head-actions p {
+    text-align: right;
+  }
+
+  .writing-workspace .writing-candidate-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .writing-workspace .writing-candidate-copy {
+    min-height: 0;
+  }
+
+  .writing-workspace .writing-candidate-copy p {
+    max-height: 10.5em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .writing-workspace .desk-button,
+  .writing-workspace .writing-generation-progress > span,
+  .writing-workspace .writing-candidate-card,
+  .writing-workspace .writing-candidate-actions .proof-adopt {
+    transition: none;
+  }
+}

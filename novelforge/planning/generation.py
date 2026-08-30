@@ -852,7 +852,7 @@ def _fallback_routes(
                 "must_not_resolve": ["当前卷终局冲突"],
                 "forbidden_state_changes": [],
                 "target_state": {"route_step": phase, "momentum": "advanced"},
-                "success_criteria": ["至少完成一项 must_advance", "章末形成下一步行动动力"],
+                "success_criteria": ["至少完成一项本章必须推进的内容", "章末形成下一步行动动力"],
                 "hook_text": hook,
                 "target_emotion": emotion,
                 "opening_hook_type": "conflict" if variant_index == 1 else "suspense",

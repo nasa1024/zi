@@ -34,13 +34,13 @@ export default function CTA({ onStart }: CTAProps) {
             />
           </svg>
           <span className="eyebrow" style={{ color: 'var(--cream)', justifyContent: 'center' }}>
-            START NOW
+            现在开始
           </span>
           <h2>
             准备好让你的世界观<br />
             <span className="cn">永不崩塌</span>了吗？
           </h2>
-          <p>本地优先、零外网即可建库与跑测。一条 uvicorn 命令，引擎就位。</p>
+          <p>本地优先，作品与设定都留在自己的创作空间里。打开工作台，引擎就位。</p>
           <div className="hero-cta">
             <button type="button" className="btn" onClick={onStart}>
               ⚡ 开始创作
@@ -67,7 +67,7 @@ export default function CTA({ onStart }: CTAProps) {
               border: 'var(--bd)',
             }}
           >
-            $ uvicorn novelforge.app.main:app --port 8787
+            写下第一个念头，剩下的交给 zi 协助推进。
           </div>
         </div>
       </div>

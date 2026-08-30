@@ -4,20 +4,23 @@
 // - 「从设定生成首卷」向导：锁定的情节设定 → 建卷 + 预填前几章细纲
 
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type { KeyResult, VolumeInfo, VolumeWizardResponse } from '../../api/types';
+import {
+  keyResultStatusLabel,
+  userFacingError,
+  volumeStatusLabel,
+} from '../../utils/uiText';
 
 function errMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
-  return fallback;
+  return userFacingError(err, fallback);
 }
 
-const KR_STATUS_META: Record<string, { icon: string; color: string; label: string }> = {
-  met: { icon: '✅', color: '#4ade80', label: '兑现' },
-  partial: { icon: '🟡', color: '#fbbf24', label: '部分' },
-  missed: { icon: '🔴', color: '#f87171', label: '未兑现' },
-  pending: { icon: '⏳', color: 'rgba(255,255,255,0.5)', label: '待结算' },
+const KR_STATUS_META: Record<string, { icon: string; color: string }> = {
+  met: { icon: '✅', color: '#4ade80' },
+  partial: { icon: '🟡', color: '#fbbf24' },
+  missed: { icon: '🔴', color: '#f87171' },
+  pending: { icon: '⏳', color: 'rgba(255,255,255,0.5)' },
 };
 
 function KrStatusChip({ kr }: { kr: KeyResult }): JSX.Element {
@@ -28,7 +31,7 @@ function KrStatusChip({ kr }: { kr: KeyResult }): JSX.Element {
       style={{ color: meta.color }}
       title={kr.evidence ? `证据：${kr.evidence}` : '暂无剧情证据'}
     >
-      {meta.icon} {meta.label}
+      {meta.icon} {keyResultStatusLabel(kr.status)}
     </span>
   );
 }
@@ -90,10 +93,10 @@ function VolumeCard({
         setMsg(`结算完成：兑现 ${r.met ?? 0} · 部分 ${r.partial ?? 0} · 未兑现 ${r.missed ?? 0}`);
         onChanged();
       } else {
-        setError(`未结算：${r.reason ?? '未知原因'}`);
+        setError('尚未满足结算条件，请检查卷目标与关键结果是否完整。');
       }
     } catch (err) {
-      setError(errMessage(err, 'KR 结算失败（需 LLM key）'));
+      setError(errMessage(err, '关键结果结算失败，请检查模型服务设置后重试。'));
     } finally {
       setSettling(false);
     }
@@ -123,7 +126,7 @@ function VolumeCard({
     try {
       // status→completed 时后端自动结算 KR（best-effort）
       await api.updateVolume(projectId, vol.volume_no, { status: 'completed' });
-      setMsg('卷已完结，KR 自动结算已触发');
+      setMsg('卷已完结，关键结果自动结算已触发');
       onChanged();
     } catch (err) {
       setError(errMessage(err, '状态更新失败'));
@@ -137,7 +140,7 @@ function VolumeCard({
       <div className="rc-top">
         <span className="rc-type">第 {vol.volume_no} 卷 · {vol.title}</span>
         <span className={`risk-tag ${vol.status === 'completed' ? 'low' : 'medium'}`}>
-          {vol.status}
+          {volumeStatusLabel(vol.status)}
         </span>
         <span className="rc-spacer" />
         {vol.start_chapter != null && (
@@ -150,7 +153,7 @@ function VolumeCard({
       {vol.synopsis && <div className="ph-hint" style={{ margin: '0.3rem 0' }}>{vol.synopsis}</div>}
 
       <div className="nf-field full" style={{ marginTop: '0.5rem' }}>
-        <label>🎯 本卷目标 OBJECTIVE</label>
+        <label>🎯 本卷目标</label>
         <input
           className="nf-input"
           placeholder="例如：李云探索秘境并在外门立足"
@@ -161,9 +164,9 @@ function VolumeCard({
       </div>
 
       <div className="nf-field full" style={{ marginTop: '0.4rem' }}>
-        <label>📌 关键结果 KEY RESULTS</label>
+        <label>📌 关键结果</label>
         {krs.length === 0 && (
-          <div className="ph-hint">尚无 KR —— 在下方添加可判定的关键结果</div>
+          <div className="ph-hint">尚无关键结果 —— 在下方添加可判定的结果</div>
         )}
         {krs.map((kr) => (
           <div
@@ -183,7 +186,7 @@ function VolumeCard({
               className="nf-btn-sm"
               onClick={() => removeKr(kr.id)}
               disabled={busy}
-              title="删除此 KR"
+              title="删除此关键结果"
             >
               ✕
             </button>
@@ -193,7 +196,7 @@ function VolumeCard({
           <input
             className="nf-input"
             style={{ flex: 1 }}
-            placeholder="新 KR，例如：获得天道之眼"
+            placeholder="新的关键结果，例如：获得天道之眼"
             value={newKr}
             onChange={(e) => setNewKr(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addKr(); } }}
@@ -216,16 +219,16 @@ function VolumeCard({
 
       <div className="rc-actions" style={{ marginTop: '0.5rem' }}>
         <button type="button" className="nf-btn sm" onClick={() => void save()} disabled={busy || !dirty}>
-          {busy ? '保存中…' : '💾 保存 OKR'}
+          {busy ? '保存中…' : '💾 保存卷目标'}
         </button>
         <button
           type="button"
           className="nf-btn blue sm"
           onClick={() => void settle()}
           disabled={settling || !vol.objective || (vol.key_results ?? []).length === 0}
-          title="对照本卷章摘要判每条 KR 兑现度（met 需剧情证据，虚报自动降级 partial）"
+          title="对照本卷章摘要判定每条关键结果的兑现度；完全兑现需要剧情证据"
         >
-          {settling ? '结算中…' : '⚖️ 结算 KR'}
+          {settling ? '结算中…' : '⚖️ 结算关键结果'}
         </button>
         {vol.status === 'writing' && (
           <button
@@ -233,7 +236,7 @@ function VolumeCard({
             className="nf-btn pink sm"
             onClick={() => void markCompleted()}
             disabled={busy}
-            title="卷完结时自动触发 KR 结算"
+            title="卷完结时自动触发关键结果结算"
           >
             🏁 标记完结
           </button>
@@ -333,8 +336,8 @@ export default function VolumesPanel({
   return (
     <div className="studio-panel">
       <div className="panel-head">
-        <h3 className="cn">卷 · OKR</h3>
-        <span className="ph-hint">卷级 Objective + Key Results，卷末结算兑现度</span>
+        <h3 className="cn">卷目标</h3>
+        <span className="ph-hint">设定卷目标与可验证结果，卷末结算兑现度</span>
         <button type="button" className="nf-btn ghost sm" onClick={() => void load()} disabled={loading}>
           ↻ 刷新
         </button>
@@ -346,7 +349,7 @@ export default function VolumesPanel({
       </div>
       <div className="ph-hint">
         读取建项目时锁定的情节设定（主线冲突/力量阶梯/主角），一键生成下一卷的
-        大纲 + Objective/KR，并预填前 5 章细纲（chapter_cards + beats）——设定即细纲。
+        大纲与关键结果，并预填前 5 章的章节安排与故事节拍——设定即细纲。
       </div>
       <div className="nf-actions" style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
         <input
@@ -370,8 +373,8 @@ export default function VolumesPanel({
             {wizResult.plan && wizResult.plan.planned.length > 0 && (
               <>，预填 {wizResult.plan.planned.length} 章细纲（去「⚙️ 生成章节」查看）</>
             )}
-            {wizResult.degraded && <>。⚠ 无 LLM key，使用确定性兜底大纲——建议配置 key 后重试</>}
-            {wizResult.tier_used && <>（档位 {wizResult.tier_used}）</>}
+            {wizResult.degraded && <>。⚠ 未配置模型服务，已使用确定性兜底大纲；配置后可重试</>}
+            {wizResult.tier_used && <>（已使用配置的模型档位）</>}
           </span>
         </div>
       )}
@@ -404,7 +407,7 @@ export default function VolumesPanel({
             <input className="nf-input" type="number" min={1} value={cEnd} onChange={(e) => setCEnd(e.target.value)} disabled={creating} />
           </div>
           <div className="nf-field full">
-            <label>卷大纲 SYNOPSIS</label>
+            <label>卷大纲</label>
             <textarea className="nf-textarea" rows={2} value={cSynopsis} onChange={(e) => setCSynopsis(e.target.value)} disabled={creating} />
           </div>
           <div className="nf-actions" style={{ gridColumn: '1 / -1' }}>

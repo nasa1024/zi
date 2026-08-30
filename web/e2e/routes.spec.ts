@@ -143,7 +143,7 @@ test('the project wizard submits an explicit English writing profile', async ({ 
   await page.locator('#cp-language').selectOption('en-US');
   await page.getByRole('button', { name: '下一步 →' }).click();
 
-  await expect(page.getByText('Progression Fantasy Serial', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('成长奇幻连载', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: '下一步 →' })).toBeEnabled();
   await page.getByRole('button', { name: '下一步 →' }).click();
   await page.getByRole('tab', { name: '✍️ 自己填' }).click();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, api } from '../../api/client';
+import { api } from '../../api/client';
 import type {
   MemoryHealth,
   MemoryLayerHealth,
@@ -7,6 +7,7 @@ import type {
   MemorySettings,
   MemorySettingsPatch,
 } from '../../api/types';
+import { memorySettingLabel, memoryWarningText, userFacingError } from '../../utils/uiText';
 
 type BooleanSettingKey = 'enable_l2' | 'enable_vector' | 'enable_l3' | 'enable_summaries';
 type NumberSettingKey =
@@ -38,18 +39,18 @@ const BOOLEAN_SETTINGS: Array<{
   },
   {
     key: 'enable_l2',
-    title: 'L2 场景记忆',
+    title: '场景记忆层',
     description: '按章节聚合场景块，为跨章节剧情检索提供语料。',
   },
   {
     key: 'enable_vector',
     title: '场景向量召回',
-    description: '从 L2 场景中召回语义相近的历史片段。',
+    description: '从场景记忆中召回语义相近的历史片段。',
   },
   {
     key: 'enable_l3',
-    title: 'L3 Canon 事件提案',
-    description: '识别高价值设定变化并进入审核队列，不直接修改 Canon。',
+    title: '设定事件提案层',
+    description: '识别高价值设定变化并进入审核队列，不直接修改已确认设定。',
   },
 ];
 
@@ -62,7 +63,7 @@ const NUMBER_SETTINGS: Array<{
 }> = [
   {
     key: 'l2_every_n_chapters',
-    title: 'L2 聚合间隔',
+    title: '场景记忆聚合间隔',
     description: '每多少章自动补齐一次场景记忆。',
     min: 1,
     max: 50,
@@ -77,7 +78,7 @@ const NUMBER_SETTINGS: Array<{
   {
     key: 'vector_top_k',
     title: '向量召回条数',
-    description: '每次写作最多召回的相似 L2 场景数。',
+    description: '每次写作最多召回的相似场景记忆数量。',
     min: 1,
     max: 50,
   },
@@ -96,18 +97,18 @@ const LAYERS: Array<{
   icon: string;
   description: string;
 }> = [
-  { key: 'l0', label: 'L0 原始正文', icon: '📄', description: '草稿文件与全文检索索引' },
-  { key: 'l1', label: 'L1 证据原子', icon: '⚛️', description: '正文提案的可追溯审计记录，不等于 Canon' },
-  { key: 'l2', label: 'L2 场景记忆', icon: '🎞️', description: '场景摘要与语义向量' },
+  { key: 'l0', label: '原始正文层', icon: '📄', description: '草稿文件与全文检索索引' },
+  { key: 'l1', label: '证据层', icon: '⚛️', description: '正文提案的可追溯审计记录，不等于已确认设定' },
+  { key: 'l2', label: '场景记忆层', icon: '🎞️', description: '场景摘要与语义向量' },
   { key: 'summaries', label: '叙事摘要', icon: '🧭', description: '章摘要、卷概要与全书梗概' },
 ];
 
 const DETAIL_LABELS: Record<string, string> = {
   files_present: '正文文件',
   files_missing: '缺失文件',
-  fts_chunks: 'FTS 分块',
-  fts_chapters: 'FTS 章节',
-  fts_coverage_pct: 'FTS 覆盖',
+  fts_chunks: '全文检索分块',
+  fts_chapters: '全文检索章节',
+  fts_coverage_pct: '全文检索覆盖',
   anchored: '有证据原子',
   unanchored: '无锚点原子',
   total_rows: '含历史原子',
@@ -121,9 +122,17 @@ const DETAIL_LABELS: Record<string, string> = {
 };
 
 function errMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
-  return fallback;
+  return userFacingError(err, fallback);
+}
+
+function overrideSettingLabel(key: string): string {
+  return BOOLEAN_SETTINGS.find((item) => item.key === key)?.title
+    ?? NUMBER_SETTINGS.find((item) => item.key === key)?.title
+    ?? memorySettingLabel(key);
+}
+
+function warningMessage(warning: string): string {
+  return memoryWarningText(warning);
 }
 
 function coverageClass(value: number): string {
@@ -163,9 +172,9 @@ function rebuildSummary(result: MemoryRebuildResult): string {
   const atoms = resultNumber(result, 'l1', 'atoms');
   const chapters = resultNumber(result, 'l2', 'processed');
   const vectors = resultNumber(result, 'vectors', 'indexed');
-  if (drafts !== null) parts.push(`L0 ${drafts} 章已索引`);
-  if (atoms !== null) parts.push(`L1 ${atoms} 条原子`);
-  if (chapters !== null) parts.push(`L2 ${chapters} 章已聚合`);
+  if (drafts !== null) parts.push(`原始正文层 ${drafts} 章已索引`);
+  if (atoms !== null) parts.push(`证据层 ${atoms} 条记录`);
+  if (chapters !== null) parts.push(`场景记忆层 ${chapters} 章已聚合`);
   if (vectors !== null) parts.push(`${vectors} 条向量`);
   return parts.length > 0 ? parts.join(' · ') : '记忆重建已完成';
 }
@@ -212,7 +221,7 @@ function LayerCard({
         <div className="memory-detail-list">
           {Object.entries(layer.details).map(([key, value]) => (
             <span key={key}>
-              {DETAIL_LABELS[key] ?? key} <b>{formatDetail(key, value)}</b>
+              {DETAIL_LABELS[key] ?? '补充指标'} <b>{formatDetail(key, value)}</b>
             </span>
           ))}
         </div>
@@ -350,7 +359,7 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
 
   const rebuild = async () => {
     const accepted = window.confirm(
-      '将从现有正文重新生成 L0 全文索引、L1 原子、L2 场景与向量。过程可重放，但可能需要一些时间。继续吗？',
+      '将从现有正文重新生成全文索引、证据记录、场景记忆与向量。过程可重放，但可能需要一些时间。继续吗？',
     );
     if (!accepted) return;
     const seq = ++requestSeq.current;
@@ -432,7 +441,7 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
           {health.warnings.length > 0 ? (
             <div className="memory-warnings">
               <b>需要处理</b>
-              <ul>{health.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
+              <ul>{health.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warningMessage(warning)}</li>)}</ul>
             </div>
           ) : (
             <div className="nf-msg ok memory-healthy"><span>✓</span><span>当前没有记忆层告警。</span></div>
@@ -445,13 +454,13 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
           <div className="panel-section-head">
             <div>
               <h4 id="memory-settings-title">项目级策略</h4>
-              <span className="ph-hint">每个项目独立保存；环境变量拥有最高优先级</span>
+              <span className="ph-hint">每个项目独立保存；部分选项可能由管理员锁定</span>
             </div>
           </div>
 
           {draft.env_overrides.length > 0 && (
             <div className="nf-notice memory-env-notice">
-              <b>运维配置接管：</b>{draft.env_overrides.join('、')}。这些字段展示最终值，需修改服务端环境变量才能调整。
+              <b>管理员已锁定：</b>{draft.env_overrides.map(overrideSettingLabel).join('、')}。页面展示当前生效值；如需调整，请修改服务运行配置。
             </div>
           )}
 
@@ -469,7 +478,7 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
                   <span className="memory-toggle-copy">
                     <b>{item.title}</b>
                     <small>{item.description}</small>
-                    {overridden && <em>环境变量接管</em>}
+                    {overridden && <em>管理员已锁定</em>}
                   </span>
                 </label>
               );
@@ -481,7 +490,7 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
               const overridden = isOverridden(item.key);
               return (
                 <label className="nf-field" key={item.key}>
-                  <span>{item.title}{overridden && ' · 环境变量接管'}</span>
+                  <span>{item.title}{overridden && ' · 管理员已锁定'}</span>
                   <input
                     className="nf-input"
                     type="number"
@@ -499,9 +508,15 @@ export default function MemoryPanel({ projectId }: { projectId: string }): JSX.E
           </div>
 
           <div className="memory-runtime">
-            <span>Embedding</span>
-            <b>{draft.embedding_provider}</b>
-            <code>{draft.embedding_model}</code>
+            <span>向量服务</span>
+            <b>服务商：{draft.embedding_provider ? '已配置' : '未配置'}</b>
+            <span>模型：{draft.embedding_model ? '已配置' : '未配置'}</span>
+            {(draft.embedding_provider || draft.embedding_model) && (
+              <details>
+                <summary>查看技术标识</summary>
+                <code>服务商：{draft.embedding_provider || '未配置'} · 模型：{draft.embedding_model || '未配置'}</code>
+              </details>
+            )}
           </div>
 
           <div className="nf-actions memory-actions">

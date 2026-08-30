@@ -11,6 +11,8 @@
   --lime:     #C6F500;   /* 电光荧光绿 */
   --pink:     #FF3D8B;   /* 亮粉 */
   --blue:     #2F6BFF;   /* 电光蓝 */
+  --pink-text:#AD154F;   /* 小字号粉色文字：暖纸上保持可读 */
+  --blue-text:#174DB7;   /* 小字号蓝色文字：暖纸上保持可读 */
   --orange:   #FF6A2C;   /* 暖橙爆点 */
   --mint:     #16D6B4;   /* 薄荷青 */
   --purpleA:  #9B5CFF;   /* 仅作小面积点缀 */
@@ -18,10 +20,10 @@
   --shadow-sm:4px 4px 0 var(--ink);
   --shadow-lg:10px 10px 0 var(--ink);
   --bd:       3px solid var(--ink);
-  --font-disp:'Syne','ZCOOL QingKe HuangYou',sans-serif;
-  --font-cn:  'ZCOOL QingKe HuangYou','Syne',sans-serif;
-  --font-body:'Noto Sans SC','Syne',sans-serif;
-  --font-mono:'DM Mono','Noto Sans SC',monospace;
+  --font-disp:'Syne','PingFang SC','Hiragino Sans GB','Noto Sans SC',sans-serif;
+  --font-cn:  'PingFang SC','Hiragino Sans GB','Noto Sans SC','Microsoft YaHei',sans-serif;
+  --font-body:'PingFang SC','Hiragino Sans GB','Noto Sans SC','Microsoft YaHei',sans-serif;
+  --font-mono:'DM Mono','SFMono-Regular','PingFang SC','Noto Sans SC',monospace;
 }
 
 *{margin:0;padding:0;box-sizing:border-box}
@@ -338,6 +340,11 @@ h1,h2,h3{font-family:var(--font-disp);font-weight:800;line-height:.98;letter-spa
 }
 @media(max-width:560px){
   .wrap{padding:0 18px}
+  .marquee{width:100%;transform:none}
+  .float-card{max-width:calc(100% - 4px)}
+  .fc1,.fc3{left:0}
+  .fc2{right:0}
+  .fc4{right:4%}
   .hero-foot{gap:18px}
   .stats-grid{grid-template-columns:1fr}
   .stat-cell{border-right:none!important;border-bottom:var(--bd)}
