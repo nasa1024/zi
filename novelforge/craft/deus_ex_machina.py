@@ -12,7 +12,8 @@ Brooks 第二情节点后"no newcomers"。
 ``docs/NovelForge/v22/F2-deus-ex-machina.md``）：
 
 a) newcomer_resolver       高潮段由本章首次出现的具名实体解决
-b) undemonstrated_ability  高潮段动用此前从未展示/使用过的金手指（soft_magic 时措辞降级）
+b) undemonstrated_ability  高潮段动用（或仅出现）此前从未展示/使用过的金手指；明确动用与
+                           仅提及措辞不同，否定句（"没敢动用"）不报；soft_magic 时措辞降级
 c) unpaid_cost             有 cost_json 的金手指本章被使用，但提案与正文都没有兑现代价
 d) late_newcomer           卷进度超过阈值后首次出现的具名实体（跳过无名龙套，≤3 条）
 e) new_ability_ratio       本章新增能力，且本卷"新增能力数 ÷ 旧能力新用法数"超阈值
@@ -24,6 +25,9 @@ e) new_ability_ratio       本章新增能力，且本卷"新增能力数 ÷ 旧
 提案（且注册表无此金手指）直接判"新"；其余情况只有在 1..N-1 章已写草稿全部入了
 FTS 索引（能证明"从未提及"）时才判"新"，否则视为"未知"而静默。第 0 章（seed 默认章号）
 的 facts 是设定库而非读者可见的出场，不算铺垫。
+
+名字匹配：短名/别名落在更长的已知名字里不算命中（"老祖"不命中"血魔老祖"）；提案派生名字只取
+人物/道具/事件类提案的主语，地点、世界规则、文风等提案的主语不算"出手者"。
 """
 from __future__ import annotations
 
@@ -35,6 +39,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+from ..contracts import canonical_fact_type
+
 CHECK_NEWCOMER = "newcomer_resolver"
 CHECK_UNDEMONSTRATED = "undemonstrated_ability"
 CHECK_UNPAID_COST = "unpaid_cost"
@@ -45,6 +51,15 @@ _CATEGORY_PREFIX = "craft.deus_ex_machina."
 _MAX_ISSUES_PER_CHECK = 3
 # 能"出手解决冲突"的实体类型；地点不参与 a/d。
 _RESOLVER_TYPES = frozenset({"character", "item", "faction", "concept"})
+# 提案派生名字同理：只有这些 fact_type 的 entity/subject 指向人物、道具、势力；
+# location / world_rule / style / numeric / misc / constraint 提案的主语是地点、规则或设定，
+# 不会"出手"（每卷高潮换一个新秘境/新擂台是常态，不是天降外挂）。
+_RESOLVER_FACT_TYPES = frozenset({
+    "character_trait", "relationship", "event", "item", "power_system", "knowledge",
+})
+_NON_RESOLVER_FACETS = frozenset({"numeric"})
+# 这几类提案的主语本身就是地点/规则/设定：同一批提案里的同名者一并排除。
+_PLACE_OR_RULE_FACT_TYPES = frozenset({"location", "world_rule", "style", "constraint"})
 _PAYOFF_WINDOW_MARGIN = 0.1      # payoff beat 按序号比例估算正文窗口时两侧的余量
 _SPAN_RADIUS = 100               # 证据句向两侧最多延伸的字符数
 _MAX_HISTORY_TEXT_LOOKUPS = 16   # 单次检查最多扫描早前正文的次数（成本上界）
@@ -74,13 +89,16 @@ _EN_EXTRAS = frozenset({
 })
 _EN_ARTICLE = re.compile(r"^(a|an|the|some|this|that)\s", re.IGNORECASE)
 
-# ── 使用动词（c/e 判定"本章用过"；b 只要求出现在高潮段）──────────────────────
+# ── 使用动词（c/e 判定"本章用过"；b 区分"高潮段动用"与"仅在高潮段提及"）──────
 _ZH_USE_VERBS = (
     "施展", "催动", "发动", "使用", "动用", "使出", "激发", "激活", "祭出", "运转", "运起",
     "爆发", "开启", "释放", "引动", "召唤", "唤出", "斩出", "轰出", "打出", "劈出", "借助",
     "借用", "凭借", "启动", "调动", "燃烧", "献祭", "加持", "化作",
 )
 _ZH_NEGATION = ("没有", "并未", "不曾", "未曾", "无法", "不敢", "不能", "没", "未", "不", "别", "莫", "勿")
+# 动词前紧邻的这些词含否定字却不是否定："不得不施展"是被迫动用，"忍不住催动""不断催动"也是用了。
+_ZH_DOUBLE_NEGATION = ("不得不", "不能不", "不可不", "不敢不", "不会不")
+_ZH_PSEUDO_NEGATION = ("别人", "莫名", "不住", "不禁", "不由", "不断", "不停")
 _EN_USE_VERB = re.compile(
     r"\b(?:us(?:e|ed|es|ing)|invok(?:e|ed|es|ing)|activat(?:e|ed|es|ing)|unleash(?:ed|es|ing)?"
     r"|cast(?:s|ing)?|channel(?:l?ed|s|l?ing)?|summon(?:ed|s|ing)?|trigger(?:ed|s|ing)?"
@@ -217,12 +235,37 @@ class _Guard:
         self.gimmicks = _build_gimmicks(conn, proposals, entity_rows, alias_rows)
         gimmick_names = {n for g in self.gimmicks for n in g.names}
         self.entities = _build_entities(entity_rows, alias_rows, proposals, gimmick_names)
+        # 全部已知名字（含地点等非出手类型）：短名/别名落在更长名字里的命中要遮掉。
+        self._all_names = sorted(
+            {n for e in self.entities for n in e.names}
+            | gimmick_names
+            | {n for n in (str(r[1] or "").strip() for r in entity_rows) if _usable_name(n)}
+            | {a for _, a in alias_rows if _usable_name(a)}
+        )
 
     # ― 正文工具 ―
 
     def mentions(self, name: str) -> list[int]:
+        """name 在正文中的独立命中位置。
+
+        落在另一个更长的已知名字里的命中不算（别名"老祖"不能命中"血魔老祖"，"黑风"不能命中
+        地点"黑风谷"）——相当于先匹配长名、遮掉其区间，再匹配短名。
+        """
         if name not in self._mentions:
-            self._mentions[name] = _find_all(self.draft, name)
+            found = _find_all(self.draft, name)
+            if found:
+                covers = [
+                    (pos, pos + len(longer))
+                    for longer in self._all_names
+                    if len(longer) > len(name) and name in longer
+                    for pos in _find_all(self.draft, longer)
+                ]
+                if covers:
+                    found = [
+                        p for p in found
+                        if not any(lo <= p and p + len(name) <= hi for lo, hi in covers)
+                    ]
+            self._mentions[name] = found
         return self._mentions[name]
 
     def first_mention(
@@ -264,6 +307,33 @@ class _Guard:
                 if _sentence_uses(self.draft, pos, pos + len(name), self.english):
                     return True, (pos, pos + len(name))
         return False, None
+
+    def climax_use(self, gimmick: _Gimmick, regions: list[Region]) -> tuple[Optional[Region], bool]:
+        """高潮段里的该金手指：(位置, True)=动用；(位置, False)=仅提及；(None, False)=不在高潮段。
+
+        动用：gimmick_use 提案的 evidence 落在高潮段；或高潮段里"名字 + 未被否定的使用动词"
+        同分句；或有 use 提案但 evidence 定位不到时，高潮段里未被否定的提及。
+        仅提及：高潮段出现名字，且所在整句不是"只有被否定的使用动词"——"他想起血遁术的传说，
+        却终究没敢动用""林凡没有动用血遁术"都不算（主动放弃不是外挂）。
+        """
+        uses = self.uses(gimmick)
+        used = [u.span for u in uses if u.span is not None and _in_regions(u.span[0], regions)]
+        unlocated_use = any(u.span is None for u in uses)
+        mentioned: list[Region] = []
+        for name in gimmick.names:
+            for pos in self.mentions(name):
+                if not _in_regions(pos, regions):
+                    continue
+                loc = (pos, pos + len(name))
+                if _sentence_uses(self.draft, loc[0], loc[1], self.english):
+                    used.append(loc)
+                elif not _negated_use(self.draft, loc[0], loc[1], self.english):
+                    (used if unlocated_use else mentioned).append(loc)
+        if used:
+            return min(used), True
+        if mentioned:
+            return min(mentioned), False
+        return None, False
 
     # ― 判定 ―
 
@@ -321,22 +391,18 @@ class _Guard:
 
     def check_undemonstrated(self, regions: list[Region], flagged: set[str]) -> list[dict]:
         soft = bool(self.cfg.soft_magic)
-        hits: list[tuple[int, str, _Gimmick, Region]] = []
+        hits: list[tuple[int, str, _Gimmick, Region, bool]] = []
         for gimmick in self.gimmicks:
-            loc = self.first_mention(gimmick.names, regions) or next(
-                (u.span for u in self.uses(gimmick)
-                 if u.span is not None and _in_regions(u.span[0], regions)),
-                None,
-            )
+            loc, used = self.climax_use(gimmick, regions)
             if loc is not None and self.gimmick_undemonstrated(gimmick) is True:
-                hits.append((loc[0], gimmick.name, gimmick, loc))
+                hits.append((loc[0], gimmick.name, gimmick, loc, used))
         issues = []
-        for _, _, gimmick, loc in sorted(hits, key=lambda h: h[:2])[:_MAX_ISSUES_PER_CHECK]:
+        for _, _, gimmick, loc, used in sorted(hits, key=lambda h: h[:2])[:_MAX_ISSUES_PER_CHECK]:
             flagged.update(gimmick.names)
             issues.append(_issue(
                 CHECK_UNDEMONSTRATED, self.span(loc), "structural",
                 *_undemonstrated_text(
-                    gimmick.name, gimmick.new_at(self.chapter), soft, self.english,
+                    gimmick.name, gimmick.new_at(self.chapter), used, soft, self.english,
                 ),
             ))
         return issues
@@ -498,6 +564,7 @@ class _History:
         self._text_available: Optional[bool] = None
         self._text_cache: dict[str, Optional[bool]] = {}
         self._lookups = 0
+        self._bigram_index: Optional[bool] = None
 
     def _exists(self, sql: str, params: tuple) -> bool:
         if self.conn is None:
@@ -532,6 +599,23 @@ class _History:
                     self._text_available = False
         return self._text_available
 
+    def bigram_index(self) -> bool:
+        """中文 drafts_fts 是否（可能）由无 jieba 的回退分词建成：当前进程没有 jieba，
+        或库里记录的 tokenizer_version 是 fallback-bigram。"""
+        if self._bigram_index is None:
+            from .. import tokenizer
+            fallback = not getattr(tokenizer, "_HAS_JIEBA", False)
+            if not fallback and self.conn is not None:
+                try:
+                    row = self.conn.execute(
+                        "SELECT value FROM meta_kv WHERE key = 'tokenizer_version'"
+                    ).fetchone()
+                    fallback = row is not None and "fallback-bigram" in str(row[0])
+                except sqlite3.Error:
+                    pass
+            self._bigram_index = fallback
+        return self._bigram_index
+
     def text_mentions(self, names: Iterable[str]) -> Optional[bool]:
         """早前章节正文是否出现过任一名字：True / False / None（无法判断）。"""
         if self.conn is None or self.chapter <= 1:
@@ -547,6 +631,11 @@ class _History:
         return None if unknown else False
 
     def _scan_text(self, name: str) -> Optional[bool]:
+        compact = name.replace(" ", "")
+        if not self.english and len(compact) > 2 and self.bigram_index():
+            # 回退分词把正文存成"单字+bigram"重叠串（玄天老祖 → 玄玄天天天老老老祖祖），
+            # 3 字以上的名字去空格后必然搜不到；"没搜到"不能当"从未提及"。
+            return None
         if self._lookups >= _MAX_HISTORY_TEXT_LOOKUPS:
             return None
         self._lookups += 1
@@ -562,7 +651,7 @@ class _History:
         else:
             # 中文索引是分词后空格拼接的原文：去掉空格即可做与分词无关的精确子串匹配。
             cond = "instr(replace(body, ' ', ''), ?) > 0"
-            params = (self.chapter - 1, name.replace(" ", ""))
+            params = (self.chapter - 1, compact)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM drafts_fts WHERE CAST(chapter_no AS INTEGER) BETWEEN 1 AND ?"
@@ -824,17 +913,29 @@ def _proposal_new(proposal: Mapping) -> Mapping:
 
 
 def _proposal_entity_names(proposals: list[Mapping]) -> list[str]:
+    """本章提案里像"出手者"的具名实体（人物/道具/势力），按出现顺序去重。
+
+    只取 ``_RESOLVER_FACT_TYPES`` 提案的 entity / new.subject / new.user_entity / new.owner
+    （item 提案再加 new.object）；同一批提案里被 location / world_rule / style / constraint
+    提案当作主语的名字视为地点/设定，整批排除——宁漏勿误报。
+    """
     names: list[str] = []
+    non_resolvers: set[str] = set()
     for proposal in proposals:
         new = _proposal_new(proposal)
+        fact_type = canonical_fact_type(str(proposal.get("fact_type") or ""))
         raw = [proposal.get("entity"), new.get("subject"), new.get("user_entity"), new.get("owner")]
-        if proposal.get("fact_type") == "item" or new.get("facet") == "item":
+        if fact_type in _PLACE_OR_RULE_FACT_TYPES:
+            non_resolvers.update(v.strip() for v in raw[:2] if isinstance(v, str))
+        if fact_type not in _RESOLVER_FACT_TYPES or new.get("facet") in _NON_RESOLVER_FACETS:
+            continue
+        if fact_type == "item" or new.get("facet") == "item":
             raw.append(new.get("object"))
         for value in raw:
             name = value.strip() if isinstance(value, str) else ""
             if name and name not in names and _looks_like_name(name):
                 names.append(name)
-    return names
+    return [name for name in names if name not in non_resolvers]
 
 
 def _locate_evidence(draft: str, proposal: Mapping) -> Optional[Region]:
@@ -910,6 +1011,32 @@ def _sentence(text: str, start: int, end: int, english: bool) -> str:
     return text[lo:hi].strip()
 
 
+def _use_verb_negations(segment: str, english: bool) -> list[bool]:
+    """segment 里每个"使用"类动词是否被否定（True=被否定），按词表顺序。"""
+    flags = [
+        bool(_EN_NEGATION.search(segment[max(0, m.start() - 24):m.start()]))
+        for m in _EN_USE_VERB.finditer(segment)
+    ]
+    if english:
+        return flags
+    for verb in _ZH_USE_VERBS:
+        pos = segment.find(verb)
+        while pos >= 0:
+            flags.append(_zh_negated(segment, pos))
+            pos = segment.find(verb, pos + len(verb))
+    return flags
+
+
+def _zh_negated(text: str, pos: int) -> bool:
+    """动词前两字内有否定词即否定；"不得不/忍不住/不断"之类的双重否定、伪否定除外。"""
+    if text[max(0, pos - 3):pos] in _ZH_DOUBLE_NEGATION:
+        return False
+    before = text[max(0, pos - 2):pos]
+    if before in _ZH_PSEUDO_NEGATION:
+        return False
+    return any(neg in before for neg in _ZH_NEGATION)
+
+
 def _sentence_uses(text: str, start: int, end: int, english: bool) -> bool:
     """名字所在分句里有"使用"类动词，且动词前没有否定词。
 
@@ -917,20 +1044,14 @@ def _sentence_uses(text: str, start: int, end: int, english: bool) -> bool:
     """
     ends = (_EN_SENTENCE_END if english else _ZH_SENTENCE_END) + _CLAUSE_SEPARATORS
     lo, hi = _bounds(text, start, end, ends)
-    clause = text[lo:hi]
-    for m in _EN_USE_VERB.finditer(clause):
-        if not _EN_NEGATION.search(clause[max(0, m.start() - 24):m.start()]):
-            return True
-    if english:
-        return False
-    for verb in _ZH_USE_VERBS:
-        pos = clause.find(verb)
-        while pos >= 0:
-            before = clause[max(0, pos - 2):pos]
-            if not any(neg in before for neg in _ZH_NEGATION):
-                return True
-            pos = clause.find(verb, pos + len(verb))
-    return False
+    return not all(_use_verb_negations(text[lo:hi], english))
+
+
+def _negated_use(text: str, start: int, end: int, english: bool) -> bool:
+    """名字所在整句里只有被否定的使用动词（"想起血遁术，却终究没敢动用"）。"""
+    lo, hi = _bounds(text, start, end, _EN_SENTENCE_END if english else _ZH_SENTENCE_END)
+    flags = _use_verb_negations(text[lo:hi], english)
+    return bool(flags) and all(flags)
 
 
 def _cost_keywords(cost: Any) -> list[str]:
@@ -1100,7 +1221,10 @@ def _newcomer_text(entity: _Entity, debut_in_climax: bool, english: bool) -> tup
     return detail, fix
 
 
-def _undemonstrated_text(name: str, new_now: bool, soft: bool, english: bool) -> tuple[str, str]:
+def _undemonstrated_text(
+    name: str, new_now: bool, used: bool, soft: bool, english: bool,
+) -> tuple[str, str]:
+    """used=True：高潮段明确动用（提案 evidence / 使用动词）；False：只在高潮段出现，措辞放软。"""
     if english:
         reason = ("is first established in this chapter" if new_now
                   else "has never been shown or used before")
@@ -1113,13 +1237,23 @@ def _undemonstrated_text(name: str, new_now: bool, soft: bool, english: bool) ->
                 f"resolution and keep {name} in a supporting role, or give readers a glimpse of "
                 f"it earlier.",
             )
-        return (
-            f"Ability used to resolve the conflict without setup: {name} {reason}, yet it "
-            f"resolves the climax here (an ability can solve only as much conflict as readers "
-            f"understand).",
+        fix = (
             f"Show {name} in an earlier chapter, in a small test that makes clear what it can "
             f"do, what it cannot do and what it costs, or resolve the conflict with an ability "
-            f"readers have already seen.",
+            f"readers have already seen."
+        )
+        if used:
+            return (
+                f"Ability used to resolve the conflict without setup: {name} {reason}, yet it "
+                f"resolves the climax here (an ability can solve only as much conflict as "
+                f"readers understand).",
+                fix,
+            )
+        return (
+            f"Ability appears in the climax without setup: {name} {reason}, yet it shows up "
+            f"in this chapter's climax; if it helps resolve the conflict, readers will feel "
+            f"cheated (an ability can solve only as much conflict as readers understand).",
+            fix,
         )
     reason = "本章才首次设定" if new_now else "此前从未展示或使用过"
     if soft:
@@ -1129,11 +1263,20 @@ def _undemonstrated_text(name: str, new_now: bool, soft: bool, english: bool) ->
             f"让人物的选择、牺牲或已知能力承担解决冲突的主要分量，「{name}」只作辅助；"
             f"或在前文先露出它的一角。",
         )
-    return (
-        f"能力未经铺垫即用于解决冲突：「{name}」{reason}，却在本章高潮段被用来解决问题"
-        f"（读者理解多少，它才能解决多少冲突）。",
+    fix = (
         f"在此前章节安排一次「{name}」的展示或小规模试用（交代它能做什么、不能做什么、"
-        f"代价是什么），或改用读者已见识过的能力解决冲突。",
+        f"代价是什么），或改用读者已见识过的能力解决冲突。"
+    )
+    if used:
+        return (
+            f"能力未经铺垫即用于解决冲突：「{name}」{reason}，却在本章高潮段被用来解决问题"
+            f"（读者理解多少，它才能解决多少冲突）。",
+            fix,
+        )
+    return (
+        f"能力未经铺垫就出现在高潮段：「{name}」{reason}，却出现在本章高潮段；"
+        f"若由它解决冲突，读者会觉得是作者在开外挂（读者理解多少，它才能解决多少冲突）。",
+        fix,
     )
 
 

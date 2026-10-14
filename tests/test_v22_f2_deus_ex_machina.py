@@ -249,6 +249,50 @@ class TestNewcomerResolver:
         assert "「萧玄」" in issue["detail"] and "该实体此前章节从未出现" in issue["detail"]
         assert issue["span"] == "危急关头，萧玄一剑斩落魔头首级。"
 
+    def test_location_and_rule_proposals_are_not_resolvers(self, conn):
+        """每卷高潮换新场地是常态：location / world_rule / style 提案的主语不是"出手者"。"""
+        _volume(conn, 1, 4)
+        for chapter in (1, 2, 3):
+            _index_chapter(conn, chapter, "林凡下山，继续赶路。")
+        climax = "危急关头，众人退入黑风谷，借灵气复苏之势，萧玄一剑击退魔头。"
+        draft = _draft(climax)
+        proposals = [
+            {"op": "add", "fact_type": "location", "entity": "黑风谷",
+             "new": {"subject": "黑风谷", "predicate": "位于", "object": "北境"}},
+            {"op": "add", "fact_type": "world_rule", "entity": "灵气复苏",
+             "new": {"subject": "灵气复苏", "predicate": "效果", "object": "修为暴涨"}},
+            {"op": "add", "fact_type": "style", "entity": "全书",
+             "new": {"subject": "全书", "predicate": "基调", "object": "热血"}},
+            {"op": "add", "fact_type": "numeric", "entity": "灵石",
+             "new": {"subject": "灵石", "predicate": "数量", "object": "300"}},
+            # 同一批里地点也被 event 提案当主语：仍按地点处理，不报。
+            {"op": "add", "fact_type": "event", "entity": "黑风谷",
+             "new": {"subject": "黑风谷", "predicate": "发生", "object": "大战"}},
+            {"op": "add", "fact_type": "event", "entity": "萧玄",
+             "new": {"subject": "萧玄", "predicate": "击退", "object": "魔头"}},
+        ]
+        issues = dem.craft_checks(_ctx(conn, 4, draft, proposals=proposals))
+        reported = " ".join(i["detail"] for i in issues)
+        for name in ("黑风谷", "灵气复苏", "全书", "灵石"):
+            assert f"「{name}」" not in reported
+        # 对照：同批的真新人萧玄照报（a 已报，d 不重复）。
+        [issue] = issues
+        assert issue["check"] == dem.CHECK_NEWCOMER and "「萧玄」" in issue["detail"]
+        assert dem._proposal_entity_names(proposals) == ["萧玄"]
+
+    def test_short_alias_inside_longer_name_is_not_a_mention(self, conn):
+        _entity(conn, "e2", "玄天老祖", first=5, aliases=["老祖"])
+        _entity(conn, "e3", "血魔老祖", first=1)
+        _entity(conn, "e4", "黑风", first=5)
+        _entity(conn, "l1", "黑风谷", etype="location", first=1)
+        draft = _draft("危急关头，血魔老祖退入黑风谷，魔头随之溃散。")
+        assert dem.craft_checks(_ctx(conn, 5, draft)) == []
+        # 独立出现的短别名照常命中。
+        draft = _draft("危急关头，老祖从天而降，血魔老祖仓皇而逃。")
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_NEWCOMER)
+        assert "「玄天老祖」" in issue["detail"]
+        assert issue["span"] == "危急关头，老祖从天而降，血魔老祖仓皇而逃。"
+
     def test_newcomer_in_chapter_end_hook_is_not_a_resolver(self, conn):
         _entity(conn, "e7", "厉千秋", first=5)
         hook = "远处，一道身影缓缓走来——血魔宗少主，厉千秋。"
@@ -294,6 +338,75 @@ class TestUndemonstratedAbility:
         _gimmick(conn, "g1", "血遁术", 5)
         _index_chapter(conn, 3, "古籍记载，血遁术可燃血千里遁走。")
         assert dem.craft_checks(_ctx(conn, 5, _draft("林凡施展血遁术，逃出生天。"))) == []
+
+    def test_negated_use_in_climax_is_silent(self, conn):
+        _gimmick(conn, "g1", "血遁术", 5)
+        for climax in ("他想起血遁术的传说，却终究没敢动用。", "林凡没有动用血遁术，咬牙硬扛。",
+                       "林凡不敢施展血遁术，转身迎敌。"):
+            assert _checks(dem.craft_checks(_ctx(conn, 5, _draft(climax))),
+                           dem.CHECK_UNDEMONSTRATED) == [], climax
+
+    def test_mention_only_in_climax_uses_softer_wording(self, conn):
+        _gimmick(conn, "g1", "血遁术", 5)
+        climax = "魔头狞笑：血遁术也救不了你！"
+        draft = _draft(climax)
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_UNDEMONSTRATED)
+        _assert_shape(issue, draft)
+        assert issue["detail"].startswith("能力未经铺垫就出现在高潮段：「血遁术」本章才首次设定")
+        assert "被用来解决问题" not in issue["detail"]
+        assert issue["span"] == climax
+
+    def test_use_proposal_evidence_in_climax_counts_as_use(self, conn):
+        _gimmick(conn, "g1", "血遁术", 5)
+        proposals = [{"op": "add", "fact_type": "power_system", "entity": "林凡",
+                      "new": {"facet": "gimmick_use", "gimmick_name": "血遁术"},
+                      "evidence_refs": [{"quote": "一道血光遁出千里"}]}]
+        draft = _draft("林凡掐诀，一道血光遁出千里。")
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, draft, proposals=proposals)),
+                          dem.CHECK_UNDEMONSTRATED)
+        assert "被用来解决问题" in issue["detail"]
+        assert issue["span"] == "林凡掐诀，一道血光遁出千里。"
+
+    def _canon_fact(self, conn, fid, subject, obj, chapter, detail):
+        conn.execute(
+            "INSERT INTO facts(id, fact_type, subject, predicate, object, detail_json, status,"
+            " valid_from_chapter, current_revision_id) VALUES(?,?,?,?,?,?,'canon',?,?)",
+            (fid, "power_system", subject, "金手指", obj,
+             json.dumps(detail, ensure_ascii=False), chapter, f"r_{fid}"),
+        )
+
+    def test_defining_rule_fact_alone_is_not_a_demonstration(self, conn):
+        # 定义 fact 由 gimmick_rules.fact_id 指向（detail 不带 facet）；另一条 facet=gimmick_rule
+        # 的旧定义也不算展示。两条都排除后仍应报"此前从未展示或使用过"。
+        self._canon_fact(conn, "f_def", "林凡", "血遁术", 2, {"gimmick_name": "血遁术"})
+        self._canon_fact(conn, "f_old", "林凡", "血遁术", 2,
+                         {"facet": "gimmick_rule", "gimmick_name": "血遁术"})
+        conn.execute(
+            "INSERT INTO gimmick_rules(id, gimmick_name, valid_from_chapter, fact_id,"
+            " source_fact_id) VALUES('g1', '血遁术', 2, 'f_def', 'f_def')"
+        )
+        _index_chapter(conn, 1, "林凡下山。")
+        draft = _draft("林凡施展血遁术，逃出生天。")
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_UNDEMONSTRATED)
+        assert "此前从未展示或使用过" in issue["detail"]
+
+    def test_earlier_canon_usage_fact_counts_as_demonstrated(self, conn):
+        _gimmick(conn, "g1", "血遁术", 2)
+        _index_chapter(conn, 1, "林凡下山。")
+        draft = _draft("林凡施展血遁术，逃出生天。")
+        assert _checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_UNDEMONSTRATED)
+        for fid, subject, obj, detail in (
+            ("f_use", "林凡", "脱身", {"facet": "gimmick_use", "gimmick_name": "血遁术"}),
+            ("f_obj", "林凡", "血遁术", {}),
+        ):
+            conn.execute("DELETE FROM facts")
+            self._canon_fact(conn, fid, subject, obj, 3, detail)
+            assert _checks(dem.craft_checks(_ctx(conn, 5, draft)),
+                           dem.CHECK_UNDEMONSTRATED) == [], fid
+        # 本章（N）及以后的 canon fact 不算"此前"。
+        conn.execute("DELETE FROM facts")
+        self._canon_fact(conn, "f_now", "林凡", "血遁术", 5, {"facet": "gimmick_use"})
+        assert _checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_UNDEMONSTRATED)
 
     def test_rule_proposal_without_db_still_warns(self):
         proposals = [{"op": "add", "fact_type": "power_system", "entity": "林凡",
@@ -363,6 +476,14 @@ class TestUnpaidCost:
         for draft in ("林凡想起血遁术的传说。", "林凡没有动用血遁术，咬牙硬扛。",
                       "林凡想起血遁术，转身催动青冥剑。"):
             assert dem.craft_checks(_ctx(conn, 1, draft, beats=PLAIN_BEATS)) == []
+
+    def test_double_negation_is_a_use(self, conn):
+        _gimmick(conn, "g1", "血遁术", 0, cost={"寿元": 10})
+        for draft in ("林凡不得不施展血遁术，逃出生天。", "林凡忍不住催动血遁术，逃出生天。"):
+            [issue] = dem.craft_checks(_ctx(conn, 1, draft, beats=PLAIN_BEATS))
+            assert issue["check"] == dem.CHECK_UNPAID_COST, draft
+        assert dem._sentence_uses("不得不施展血遁术", 5, 8, False)
+        assert not dem._sentence_uses("不敢施展血遁术", 4, 7, False)
 
     def test_cost_without_searchable_keyword_is_silent(self, conn):
         _gimmick(conn, "g1", "血遁术", 0, cost={"amount": 3})
@@ -519,6 +640,18 @@ class TestEnglish:
         for draft in (paid, refused):
             assert dem.craft_checks(_ctx(conn, 1, draft, beats=PLAIN_BEATS, workspace=ws)) == []
 
+    def test_english_mention_only_wording(self, conn):
+        ws = self._en(conn)
+        _gimmick(conn, "g1", "Starfall", 5)
+        filler = "The harbor bells rang through the cold morning. " * 6
+        draft = filler + "The sky split as Starfall answered the call. " + filler[:120]
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, draft, workspace=ws)),
+                          dem.CHECK_UNDEMONSTRATED)
+        assert issue["detail"].startswith(
+            "Ability appears in the climax without setup: Starfall is first established"
+        )
+        assert not _CJK.search(issue["detail"] + issue["fix"])
+
     def test_english_soft_magic_and_late_newcomer(self, conn):
         ws = self._en(conn)
         _volume(conn, 1, 10)
@@ -584,6 +717,26 @@ class TestRobustness:
         for chapter in (1, 4):
             assert dem.craft_checks(_ctx(conn, chapter, draft, proposals=proposals)) == []
 
+    def test_bigram_fallback_index_cannot_prove_absence(self, conn, monkeypatch):
+        """回退分词的 FTS 去空格后搜不到 3 字以上的名字：判"无法判断"，不判"新"。"""
+        import novelforge.tokenizer as tokenizer_mod
+        _entity(conn, "e2", "玄天老祖")
+        _entity(conn, "e3", "萧玄")
+        _index_chapter(conn, 1, "林凡下山。")
+        _index_chapter(conn, 2, "林凡继续赶路。")
+        draft = _draft("危急关头，玄天老祖与萧玄从天而降，一掌击退魔头。")
+
+        def reported():
+            issues = _checks(dem.craft_checks(_ctx(conn, 3, draft)), dem.CHECK_NEWCOMER)
+            return sorted(re.findall(r"「(.+?)」", " ".join(i["detail"] for i in issues)))
+
+        assert reported() == ["玄天老祖", "萧玄"]
+        monkeypatch.setattr(tokenizer_mod, "_HAS_JIEBA", False)
+        assert reported() == ["萧玄"]            # 2 字名仍可由 bigram 判定
+        monkeypatch.setattr(tokenizer_mod, "_HAS_JIEBA", True)
+        set_meta(conn, "tokenizer_version", "zh-CN:fallback-bigram-1+dict:000000000000")
+        assert reported() == ["萧玄"]
+
     def test_disabled_by_config(self, conn):
         _entity(conn, "e2", "玄天老祖", first=5)
         cfg = NovelForgeConfig()
@@ -633,7 +786,8 @@ def project(client):
 _REVISE_MARKERS = ("一致性问题", "修订补丁任务", "润色补丁任务", "工艺问题")
 
 
-def test_generate_chapter_reports_deus_ex_machina_as_warn(project):
+def _generate_chapter_5(project, configure=None):
+    """FakeProvider 跑一遍 generate_chapter(5)；configure(cfg) 可改 NovelForgeConfig。"""
     from novelforge.app.deps import get_registry
     from novelforge.control_plane.budget import BudgetLedger
     from novelforge.control_plane.llm.fake_provider import FakeProvider
@@ -664,6 +818,8 @@ def test_generate_chapter_reports_deus_ex_machina_as_warn(project):
     cfg.provider.provider = "fake"
     cfg.recall.enable_summaries = False
     cfg.settle.enabled = False
+    if configure is not None:
+        configure(cfg)
 
     conn = get_registry().open_conn(project)
     try:
@@ -672,8 +828,12 @@ def test_generate_chapter_reports_deus_ex_machina_as_warn(project):
         outcome = Orchestrator(gw, reg, cfg).generate_chapter(5, conn, chapter_goal="击退魔头")
     finally:
         conn.close()
-
     assert outcome.ok, outcome.error
+    return outcome, fake
+
+
+def test_generate_chapter_reports_deus_ex_machina_as_warn(project):
+    outcome, fake = _generate_chapter_5(project)
     found = [i for i in outcome.issues if i.get("check") == dem.CHECK_NEWCOMER]
     assert len(found) == 1
     assert found[0]["severity"] == "warn"
@@ -685,6 +845,16 @@ def test_generate_chapter_reports_deus_ex_machina_as_warn(project):
         if any(m in str(c["messages"][-1].content) for m in _REVISE_MARKERS)
     ]
     assert revise_calls == []
+
+
+def test_generate_chapter_honours_plausibility_config(project):
+    """orchestrator 写入的 workspace["cfg"] 把 cfg.plausibility 送到检查里。"""
+    def disable(cfg):
+        cfg.plausibility.enabled = False
+
+    outcome, _ = _generate_chapter_5(project, disable)
+    assert not [i for i in outcome.issues
+                if str(i.get("category", "")).startswith("craft.deus_ex_machina.")]
 
 
 def test_governance_check_craft_endpoint(client, project):
