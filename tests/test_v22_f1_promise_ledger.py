@@ -189,6 +189,24 @@ class TestHelpers:
         assert m.mentions("coins")
         assert not m.mentions("Blood Oath of the North")
         assert pl.label_in_text("blood debts", "Old blood debt never fades.")
+        # 两个内容词都在同一句里：算作对 "The Broken Sword" 的呼应（有意保留）
+        assert pl.DraftMatcher("A sword lay broken in the mud.").mentions("The Broken Sword")
+        assert not pl.DraftMatcher("His name was Tom.").mentions("The Name of His Enemy")
+
+    def test_draft_matcher_cjk_rejects_function_bigrams(self):
+        # 评审探针：只靠虚字二元组（的名/名字、人身/身份）重合的句子不算提到了承诺
+        assert not pl.DraftMatcher("他的名字叫张三，是个铁匠。").mentions("仇人的名字")
+        assert not pl.DraftMatcher("此人身份不明。").mentions("黑袍人身份")
+        # 实词片段各自出现、彼此靠近 → 仍算
+        assert pl.DraftMatcher("那黑袍的身份终于有了眉目。").mentions("黑袍人身份")
+        assert pl.DraftMatcher("那个神秘人究竟什么来历？").mentions("神秘人的来历")
+        assert pl.DraftMatcher("灭门之仇，真凶未明。").mentions("灭门真凶")
+        # 实词片段在同一长句里相隔太远 → 不算
+        assert not pl.DraftMatcher("他拔出青铜长剑，心里藏着一个秘密。").mentions("青铜剑的秘密")
+        # 精确模式不走模糊兜底
+        m = pl.DraftMatcher("那灭门的真凶究竟是谁？")
+        assert m.mentions("灭门真凶") and not m.mentions("灭门真凶", fuzzy=False)
+        assert pl.DraftMatcher("他想起血仇。").find("血仇", fuzzy=False) == "他想起血仇"
 
     def test_content_units_between(self, conn):
         conn.execute("INSERT INTO chapter_cards(id, chapter, word_count) VALUES('c1', 1, 4000)")
@@ -252,6 +270,12 @@ class TestCraftChecks:
         _fs(conn, "fs_recent", "断剑", planted=1, mentioned=8)
         assert pl.craft_checks(_ctx(conn, 12, "他想起血仇，夜不能寐。")) == []
 
+    def test_dormant_not_silenced_by_function_bigrams(self, conn):
+        _fs(conn, "fs_name", "仇人的名字", planted=1)
+        _fs(conn, "fs_robe", "黑袍人身份", planted=1)
+        issues = pl.craft_checks(_ctx(conn, 12, "他的名字叫张三。此人身份不明。"))
+        assert len(_checks(issues, "promise_dormant")) == 2
+
     def test_dormant_cap_and_order(self, conn):
         for i in range(5):
             _fs(conn, f"fs{i}", f"承诺{'甲乙丙丁戊'[i]}", planted=1 + i)
@@ -309,6 +333,21 @@ class TestCraftChecks:
             paid_off=2)
         assert not _checks(pl.craft_checks(_ctx(conn, 3, _PLAIN)), "promise_opening")
 
+    def test_opening_planned_plant_covers_only_one_gap(self, conn):
+        actions = [{"label": "藏经阁的秘密", "action": "plant"}]
+        opening = _checks(pl.craft_checks(_ctx(conn, 3, _PLAIN, actions=actions)),
+                          "promise_opening")
+        assert len(opening) == 1
+        assert "只能补上其中一类" in opening[0]["detail"]
+        assert "再埋下 1 条" in opening[0]["fix"]
+        en = _checks(pl.craft_checks(_ctx(conn, 3, "Mara slept.", language="en-US",
+                                          actions=actions)), "promise_opening")
+        assert "cover only one of them" in en[0]["detail"]
+        assert not _CJK.search(en[0]["detail"] + en[0]["fix"])
+        both = actions + [{"label": "今晚的约战", "action": "plant"}]
+        assert not _checks(pl.craft_checks(_ctx(conn, 3, _PLAIN, actions=both)),
+                           "promise_opening")
+
     def test_opening_english(self, conn):
         _fs(conn, "fs_short", "Tonight's duel", planted=1, line_type="short")
         opening = _checks(pl.craft_checks(_ctx(conn, 3, "Mara slept.", language="en-US")),
@@ -333,6 +372,18 @@ class TestCraftChecks:
         unknown = [{"promise_id": "fs_missing", "action": "advance"}]
         assert pl.craft_checks(_ctx(conn, 12, _PLAIN, actions=unknown)) == []
 
+    def test_unmapped_variant_label_maps_by_containment(self, conn):
+        _fs(conn, "fs_old", "血仇", planted=1)
+        _fs(conn, "fs_master", "师父", planted=1, mentioned=10)
+        rows = pl.fetch_promises(conn, open_only=False)
+        mapped = pl.resolve_action({"label": "血仇未报", "action": "remind"}, rows)
+        assert mapped["id"] == "fs_old"
+        # 较短一方不足一半：「师父」不吞掉另一条承诺「师父的遗言」
+        assert pl.resolve_action({"label": "师父的遗言", "action": "remind"}, rows) is None
+        issues = pl.craft_checks(_ctx(conn, 15, _PLAIN, actions=[
+            {"label": "血仇未报", "action": "remind"}]))
+        assert [i["check"] for i in issues] == ["promise_contract_missing"]   # 不再双报
+
     def test_planned_remind_suppresses_dormant(self, conn):
         _fs(conn, "fs_old", "血仇", planted=1)
         actions = [{"label": "血仇", "action": "remind"}]
@@ -346,6 +397,9 @@ class TestCraftChecks:
         thin = _checks(pl.craft_checks(_ctx(conn, 6, draft, actions=actions)),
                        "promise_thin_setup")
         assert len(thin) == 1 and "扣子没挖够" in thin[0]["detail"]
+        # 建议必须可执行：本章内补的提醒不计入铺垫，所以不能让写手"在本章补一笔"了事
+        assert "本章内补的提醒不算" in thin[0]["fix"] and "再提醒/推进 1 次" in thin[0]["fix"]
+        assert "本章前半段" not in thin[0]["fix"]
         _log(conn, "fs_big", 4)
         assert not _checks(pl.craft_checks(_ctx(conn, 6, draft, actions=actions)),
                            "promise_thin_setup")
@@ -392,6 +446,9 @@ class TestCraftChecks:
         checks = {i["check"] for i in issues}
         assert {"promise_thin_setup", "promise_nesting"} <= checks
         assert not any(_CJK.search(i["detail"] + i["fix"]) for i in issues)
+        thin = _checks(issues, "promise_thin_setup")[0]
+        assert "earlier in this chapter" not in thin["fix"]
+        assert "1 more reminder(s)" in thin["fix"]
 
     def test_disabled_config_is_silent(self, conn):
         _fs(conn, "fs_old", "血仇", planted=1)
@@ -480,6 +537,41 @@ class TestDraftBrief:
         assert en[1].startswith("- Planned payoff: 复仇 (planted in chapter 7): 血债血偿")
         assert 'close the inner promise(s) "仇人的名字" first' in en[1]
 
+    def test_overdue_short_line_is_announced(self, conn):
+        # 第11章刚推进过（不在提醒周期内），但已超出短线预算：写手必须事先知道
+        _fs(conn, "fs_s", "断剑之谜", desc="断剑从何而来", planted=1, advanced=11,
+            line_type="short")
+        brief = pl.draft_brief(conn, 12, {}, language="zh-CN", cfg=None)
+        assert brief.splitlines()[1] == (
+            "- 断剑之谜（短线，第1章埋下，约 33,000 字仍未收束，超出 30,000 字预算）"
+            "：断剑从何而来；本章推进或揭开它")
+        assert not any(marker in brief for marker in _ROUTING_MARKERS)
+        # 告警口径不变（自埋下起计），写手照提示呼应后静默
+        assert _checks(pl.craft_checks(_ctx(conn, 12, _PLAIN)), "promise_short_overdue")
+        assert pl.craft_checks(_ctx(conn, 12, "断剑之谜终于有了线索。")) == []
+        en = pl.draft_brief(conn, 12, {}, language="en-US", cfg=None).splitlines()
+        assert en[1] == ("- 断剑之谜 (short line, planted in chapter 1, still open after "
+                         "about 22,000 words, over the 20,000-word budget): 断剑从何而来; "
+                         "advance or resolve it this chapter")
+
+    def test_due_and_overdue_short_line_listed_once(self, conn):
+        _fs(conn, "fs_s", "断剑之谜", desc="断剑从何而来", planted=1, line_type="short")
+        lines = pl.draft_brief(conn, 12, {}, language="zh-CN", cfg=None).splitlines()
+        assert lines[1:] == [
+            "- 断剑之谜（第1章埋下，已 11 章未提及）：断剑从何而来"
+            "；短线已超出 30,000 字预算（约 33,000 字），本章推进或揭开它"]
+
+    def test_planned_overdue_short_line_keeps_planner_note(self, conn):
+        _fs(conn, "fs_s", "断剑之谜", desc="断剑从何而来", planted=1, advanced=11,
+            line_type="short")
+        workspace = {"plan_context": PlanContext(target_chapter=12, current_contract={
+            "promise_actions": [{"promise_id": "fs_s", "action": "advance",
+                                 "note": "铁匠认出剑纹"}]})}
+        lines = pl.draft_brief(conn, 12, workspace, language="zh-CN", cfg=None).splitlines()
+        assert lines[1:] == [
+            "- 本章计划推进：断剑之谜（第1章埋下）：断剑从何而来 — 铁匠认出剑纹"
+            "；短线已超出 30,000 字预算（约 33,000 字），本章推进或揭开它"]
+
     def test_empty_when_nothing_due_or_disabled(self, conn):
         _fs(conn, "fs_recent", "断剑", planted=6)
         assert pl.draft_brief(conn, 9, {}, language="zh-CN", cfg=None) == ""
@@ -537,6 +629,57 @@ class TestSettle:
         # max(existing, chapter)：不把更晚的提及章回拨
         assert conn.execute("SELECT last_mentioned_chapter FROM foreshadow"
                             " WHERE id='fs_a'").fetchone()[0] == 12
+
+    def test_remind_needs_exact_hit_before_writing_ledger(self, conn):
+        _fs(conn, "fs_fuzzy", "灭门真凶", desc="灭门真凶", planted=1)
+        _fs(conn, "fs_name", "仇人的名字", desc="仇人的名字", planted=1)
+        actions = [{"promise_id": "fs_fuzzy", "action": "remind"},
+                   {"promise_id": "fs_name", "action": "remind"}]
+        draft = "那灭门的真凶究竟是谁？他的名字叫张三。"
+        # 检查侧：模糊命中「灭门真凶」算已呼应；「仇人的名字」不被虚字二元组误判
+        missing = _checks(pl.craft_checks(_ctx(conn, 9, draft, actions=actions)),
+                          "promise_contract_missing")
+        assert ["仇人的名字" in i["detail"] for i in missing] == [True]
+        # 写账本侧：只认精确命中，两条都不落 mention
+        report = pl.settle(conn, 9, _settle_ws(9, draft, actions), gateway=None, cfg=None)
+        assert report["reminded"] == [] and "error" not in report
+        assert conn.execute("SELECT COUNT(*) FROM foreshadow_log").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM foreshadow"
+                            " WHERE last_mentioned_chapter IS NOT NULL").fetchone()[0] == 0
+
+    def test_settle_leaves_commit_to_orchestrator(self, tmp_path):
+        from novelforge.db.connection import init_db_from_conn
+
+        path = tmp_path / "ledger.db"
+        main = sqlite3.connect(path)
+        main.row_factory = sqlite3.Row
+        init_db_from_conn(main)
+        _fs(main, "fs_old", "血仇", planted=1)
+        ws = _settle_ws(9, "他又想起血仇。", [{"label": "血仇", "action": "remind"}])
+        other = sqlite3.connect(path)
+        try:
+            assert not main.in_transaction
+            report = pl.settle(main, 9, ws, gateway=None, cfg=None)
+            assert report["reminded"] == [{"id": "fs_old", "label": "血仇"}]
+            # 没有自行提交：写入留在事务里，别的连接还看不到
+            assert main.in_transaction
+            count = "SELECT COUNT(*) FROM foreshadow_log WHERE chapter=9"
+            assert other.execute(count).fetchone()[0] == 0
+            main.commit()
+            assert other.execute(count).fetchone()[0] == 1
+            # 嵌套在调用方事务里：SAVEPOINT 隔离、不提交，随调用方回滚
+            main.execute("UPDATE foreshadow SET importance=5 WHERE id='fs_old'")
+            ws10 = _settle_ws(10, "血仇未报。", [{"label": "血仇", "action": "remind"}])
+            assert pl.settle(main, 10, ws10, gateway=None, cfg=None)["reminded"]
+            assert main.in_transaction
+            main.rollback()
+            assert main.execute("SELECT COUNT(*) FROM foreshadow_log"
+                                " WHERE chapter=10").fetchone()[0] == 0
+            assert main.execute("SELECT importance FROM foreshadow"
+                                " WHERE id='fs_old'").fetchone()[0] == 3
+        finally:
+            other.close()
+            main.close()
 
     def test_violations_and_counts(self, conn):
         _fs(conn, "fs_parent", "复仇", planted=1, state="paid_off", paid_off=12,

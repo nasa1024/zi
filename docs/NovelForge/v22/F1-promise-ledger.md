@@ -37,9 +37,14 @@
 
 依次尝试 label 与"足够短的描述"（中文 3–12 字 / 英文 2–6 词）：
 1. 精确：中文忽略空白标点的子串；英文按整词短语（`Art` 不会命中 `start`）。
-2. 模糊兜底（同句内）：中文 ≥4 字的短语，字符 bigram 覆盖 ≥50%（同 `foreshadow_settle` 的 bigram 思路）；
-   英文至少 2 个内容词且覆盖 ≥50%（去停用词、粗略去复数）。
-命中时返回所在句作为证据片段（结算落 `foreshadow_log.evidence`）。
+2. 模糊兜底（同句内，故意保守）：
+   - 中文 ≥4 字的短语：只看**实词二元组**——含虚字/代词/量词（的、之、了、是、人、个、他、这、那…）的二元组先剔除；
+     在约"短语长度 + 4"字的窗口内，命中的实词二元组须覆盖 ≥50% **且**至少 2 个互不重叠。
+     例：「灭门真凶」命中「那灭门的真凶」「灭门之仇，真凶未明」；「仇人的名字」不命中「他的名字叫张三」，
+     「黑袍人身份」不命中「此人身份不明」，「青铜剑的秘密」不命中相隔很远的「青铜长剑……一个秘密」。
+   - 英文至少 2 个内容词且覆盖 ≥50%（去停用词、粗略去复数）；"A sword lay broken" 算呼应了 "The Broken Sword"（有意保留）。
+命中时返回所在句作为证据片段。漏判只会多报休眠（安全方向）；误判会让检查静默、让账本记错，所以宁漏勿误。
+**写账本只认精确命中**：`settle` 落 `mention` 前用 `fuzzy=False`；检查侧（告警是否静默）仍允许模糊兜底。
 
 ## 四、数据流
 
@@ -54,7 +59,10 @@ COMMIT 后 _settle_chapter ─ foreshadow_settle（LLM，1 次）→ ext_promise
 ```
 
 承诺提醒块内容：最多 `inject_dormant_limit`(2) 条到期提醒的读者承诺（`- 血仇（第1章埋下，已 8 章未提及）：灭门真凶仍未现身`），
-再加本章契约里能映射到账本的承诺操作（补埋设章、描述、"先收束内层承诺"、"铺垫尚浅"提示）。
+再加最多同样条数的**超出预算的短线**（与 `promise_short_overdue` 同口径，哪怕刚推进过、不在提醒周期内：
+`- 断剑之谜（短线，第1章埋下，约 33,000 字仍未收束，超出 30,000 字预算）：…；本章推进或揭开它`；
+已在到期提醒里的同一行只追加"短线已超出预算"后缀），让该告警可以从提示里预见；
+最后是本章契约里能映射到账本的承诺操作（补埋设章、描述、"先收束内层承诺"、"铺垫尚浅：兑现时回扣此前埋下的细节"提示）。
 仅有标签、映射不到账本的操作已由契约块渲染，不重复。英文项目渲染 `## Promise reminders (weave in naturally, do not recap)`。
 
 ## 五、craft 检查明细（全部 `severity=warn`，category `craft.<check>`）
@@ -63,18 +71,23 @@ COMMIT 后 _settle_chapter ─ foreshadow_settle（LLM，1 次）→ ext_promise
 |---|---|---|
 | `promise_dormant` | 休眠的读者长/短线 | 正文已提及；本章契约已安排触及；同承诺已报短线超时 |
 | `promise_short_overdue` | 读者短线自埋设章起（不含本章）字数 > `short_line_max_chars`（en：`short_line_max_words`） | 正文已触及；契约已安排 |
-| `promise_opening` | N == `opening_window_chapters` 时，读者可见承诺（任何状态）缺长线或短线 | 账本完全没用过（无行且无契约操作）；未建档的计划 `plant` 可抵一个空缺 |
+| `promise_opening` | N == `opening_window_chapters` 时，读者可见承诺（任何状态）缺长线或短线 | 账本完全没用过（无行且无契约操作）；未建档的计划 `plant` 可抵一个空缺（两类都缺、只计划 1 条时改报"还差一条"，不再要求补两条） |
 | `promise_contract_missing` | 契约 remind/advance/payoff 的承诺在正文中找不到 | 只给了未知 promise_id |
-| `promise_thin_setup` | 计划兑现的大爽点扣子深度 < `big_payoff_min_touches` | — |
+| `promise_thin_setup` | 计划兑现的大爽点扣子深度 < `big_payoff_min_touches` | —（规划层告警：深度只数此前章节，本章内补提醒不算；fix 建议回扣细节或改为推进、延后兑现） |
 | `promise_payoff_cliff` | 计划兑现条数 > `max_payoffs_per_chapter` | 本章是卷末章（研究文档"卷末章除外"） |
 | `promise_nesting` | 计划兑现外层，内层仍开着 | 内层也在本章计划兑现 |
 
-契约 `promise_actions` → 账本行的映射：`promise_id` → 精确 label → label 相似度 ≥0.5（未关闭的行优先）。
+契约 `promise_actions` → 账本行的映射：`promise_id` → 精确 label → label 相似度 ≥0.5（未关闭的行优先）→
+中文包含关系兜底（「血仇未报」↔「血仇」：较短一方 ≥2 字且至少占较长一方一半，「师父」不会吞掉「师父的遗言」）。
+映射上的行不再单独报休眠，避免同一承诺"契约落空 + 休眠"双报。
 
 ## 六、结算步骤（`settle`）
 
-1. 契约 `remind` 且最终稿提及 → `last_mentioned_chapter = max(原值, N)` + 一条 `mention` 日志（证据为命中句）。
-   若该承诺本章已有 mention/advance/payoff 日志（LLM 结算或上次重跑写的）则跳过——重跑幂等。写入包在 SAVEPOINT 里。
+1. 契约 `remind` 且最终稿**精确**提及 → `last_mentioned_chapter = max(原值, N)` + 一条 `mention` 日志（证据为命中句）。
+   若该承诺本章已有 mention/advance/payoff 日志（LLM 结算或上次重跑写的）则跳过——重跑幂等。
+   本步**不提交**，由编排器在结算后统一 commit：调用方已开事务时用 SAVEPOINT 隔离（出错只回滚本步）；
+   未开事务时写入落在 DML 隐式开启的事务里（出错整体回滚——此前没有未提交写入）。不用顶层 SAVEPOINT，
+   因为它的 RELEASE 等于 COMMIT，会让行为随前序步骤是否留着事务而变化。
 2. 报告：`nesting`（本章兑现的外层仍有未关内层）、`payoff_cliff`、`thin_setup`、`payoffs`（`paid_off_chapter=N` 的行数）、
    `dormant`（进入下一章时的休眠数）。
 3. 数据问题（缺表、坏连接、脏值）只写 `error`，不抛异常，不会让章节变成 `state_degraded`。
@@ -109,9 +122,13 @@ COMMIT 后 _settle_chapter ─ foreshadow_settle（LLM，1 次）→ ext_promise
 
 ## 十一、局限
 
-- "触及"判定基于标签/短描述的字面与 bigram 匹配：别名、代称、纯意象式提醒会漏判（会多报休眠），长描述不参与匹配。
+- "触及"判定基于标签/短描述的字面与实词 bigram 匹配：别名、代称、纯意象式提醒，以及只剩 1 个实词片段的标签
+  （如「仇人的名字」只剩「名字」）的改写式提及会漏判（会多报休眠）；长描述不参与匹配。
+- 检查侧允许模糊命中、写账本只认精确命中：模糊呼应能让本章的"契约落空"告警静默，但不会落 `mention`，
+  后续章节可能仍提示该承诺需要提醒（漏记方向，安全）。
 - 正文能否算"推进/兑现"无法确定性区分：短线超时检查把"正文提及"视为已处理，交给 LLM 结算细分。
 - 契约检查依赖 planner 写出 `promise_actions`；只写 label、与账本标签差异过大时映射不到账本行，只做"正文落空"检查。
 - 重写更早章节时只按 `planted_chapter ≤ N` 过滤，last_* 列反映的是当前账本状态，可能把后续章的触及算进来（只会少报）。
 - 人工换稿（select-candidate）不会重跑结算，账本不随换稿回滚（与既有伏笔结算一致）。
 - 每章休眠告警上限 3 条而提醒块只注入 2 条，休眠承诺很多时会持续告警；开启质量门时 ≥3 条 warn 会触发润色。
+- 短线超时按"自埋设起"计（规格口径），超预算的短线每章都会出现在提醒块里，正文呼应即静默；要彻底消除需收束或改为长线。

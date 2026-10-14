@@ -213,6 +213,12 @@ _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 _NON_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
 _EN_WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;…\n]+|\.(?=\s|$)")
+# 高频虚字/代词/量词：含这些字的二元组（的名、人身、他的…）在任意正文里都常见，
+# 不能作为"提到了这条承诺"的证据——模糊匹配前先剔除。
+_CJK_STOP_CHARS = frozenset(
+    "的地得之了着过是在有和与及或而也都就才又还再已很不没未这那此其"
+    "他她它我你您们个人把被给让对向从于以为所者吗呢吧啊呀么一会能要"
+)
 _EN_STOPWORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has",
     "had", "her", "his", "its", "in", "into", "is", "it", "of", "on", "or", "our",
@@ -228,6 +234,24 @@ def _key(text: Any) -> str:
 
 def _char_bigrams(key: str) -> set[str]:
     return {key[i:i + 2] for i in range(len(key) - 1)}
+
+
+def _content_pieces(key: str) -> list[tuple[int, str]]:
+    """``(position, bigram)`` of a CJK key, dropping bigrams that contain a
+    function character (``_CJK_STOP_CHARS``)."""
+    return [
+        (i, key[i:i + 2]) for i in range(len(key) - 1)
+        if key[i] not in _CJK_STOP_CHARS and key[i + 1] not in _CJK_STOP_CHARS
+    ]
+
+
+def _disjoint_count(positions: Iterable[int]) -> int:
+    """Max number of non-overlapping bigrams among label ``positions``."""
+    count, last = 0, -2
+    for pos in sorted(set(positions)):
+        if pos >= last + 2:
+            count, last = count + 1, pos
+    return count
 
 
 def _en_words(text: Any) -> list[str]:
@@ -256,10 +280,20 @@ class DraftMatcher:
 
     Phrases tried: the label, plus the description when it is short enough to
     be a key phrase.  Exact match first (CJK: punctuation/space-insensitive
-    substring; Latin: whole-phrase word match), then a fuzzy fallback inside
-    one sentence — CJK phrases of ≥4 characters need ≥50% of their character
-    bigrams (cf. ``foreshadow_settle._similarity``), Latin phrases ≥50% (and at
-    least two) of their content words.  Built once per draft and reused.
+    substring; Latin: whole-phrase word match), then an optional fuzzy
+    fallback inside one sentence:
+
+    - CJK phrases of ≥4 characters: only *content* bigrams count (bigrams
+      containing a function character such as 的/人/他 are dropped); within a
+      window of about the phrase's length (+4) the sentence must contain ≥50%
+      of them **and** at least two non-overlapping ones.  So 「灭门真凶」 matches
+      「那灭门的真凶」, while 「仇人的名字」 does not match 「他的名字叫张三」
+      and 「黑袍人身份」 does not match 「此人身份不明」.
+    - Latin phrases: ≥50% (and at least two) of their content words.
+
+    Misses are the safe failure (an extra dormant warning); false hits would
+    silence checks, so the fuzzy rule is deliberately conservative.  Built once
+    per draft and reused.
     """
 
     def __init__(self, text: str):
@@ -313,15 +347,35 @@ class DraftMatcher:
         key = "".join(words)
         return _snippet(self._sentence_with_key(key) or phrase)
 
+    def _fuzzy_cjk(self, label: str) -> Optional[str]:
+        key = _key(label)
+        pieces = _content_pieces(key)
+        distinct = {gram for _, gram in pieces}
+        if len(key) < 4 or len(distinct) < 2:
+            return None
+        window = len(key) + max(4, len(key) // 2)
+        for sentence, sentence_grams, sentence_key in zip(
+                self._sentences, self._bigram_index(), self._keys()):
+            if len(distinct & sentence_grams) < 2:
+                continue
+            # (sentence position, label position, bigram) of every occurrence
+            occurrences = sorted(
+                (start, pos, gram)
+                for pos, gram in pieces if gram in sentence_grams
+                for start in _find_all(sentence_key, gram)
+            )
+            for i, (first, _, _) in enumerate(occurrences):
+                inside = [(pos, gram) for start, pos, gram in occurrences[i:]
+                          if start + 2 - first <= window]
+                grams = {gram for _, gram in inside}
+                if (len(grams) * 2 >= len(distinct)
+                        and _disjoint_count(pos for pos, _ in inside) >= 2):
+                    return _snippet(sentence)
+        return None
+
     def _fuzzy(self, label: str) -> Optional[str]:
         if _CJK_RE.search(label):
-            grams = _char_bigrams(_key(label))
-            if len(grams) < 3:
-                return None
-            for sentence, sentence_grams in zip(self._sentences, self._bigram_index()):
-                if len(grams & sentence_grams) / len(grams) >= 0.5:
-                    return _snippet(sentence)
-            return None
+            return self._fuzzy_cjk(label)
         tokens = [_stem(t) for t in _content_tokens(label)]
         if len(tokens) < 2:
             return None
@@ -331,8 +385,12 @@ class DraftMatcher:
                 return _snippet(sentence)
         return None
 
-    def find(self, label: Any, description: Any = None) -> Optional[str]:
-        """Return an evidence snippet when the promise is referenced, else ``None``."""
+    def find(self, label: Any, description: Any = None, *,
+             fuzzy: bool = True) -> Optional[str]:
+        """Return an evidence snippet when the promise is referenced, else ``None``.
+
+        ``fuzzy=False`` accepts exact phrase hits only (used before writing
+        the ledger)."""
         phrases = [p for p in (str(label or "").strip(),) if p]
         description = str(description or "").strip()
         if description and _is_key_phrase(description):
@@ -343,14 +401,23 @@ class DraftMatcher:
             hit = self._exact(phrase)
             if hit:
                 return hit
+        if not fuzzy:
+            return None
         for phrase in phrases:
             hit = self._fuzzy(phrase)
             if hit:
                 return hit
         return None
 
-    def mentions(self, label: Any, description: Any = None) -> bool:
-        return self.find(label, description) is not None
+    def mentions(self, label: Any, description: Any = None, *, fuzzy: bool = True) -> bool:
+        return self.find(label, description, fuzzy=fuzzy) is not None
+
+
+def _find_all(text: str, needle: str) -> Iterable[int]:
+    start = text.find(needle)
+    while start != -1:
+        yield start
+        start = text.find(needle, start + 1)
 
 
 def _is_key_phrase(text: str) -> bool:
@@ -365,13 +432,13 @@ def label_in_text(label: Any, text: str, *, description: Any = None) -> bool:
 
 
 def _row_found(matcher: DraftMatcher, row: Optional[Mapping[str, Any]],
-               extra_label: Any = None) -> Optional[str]:
+               extra_label: Any = None, *, fuzzy: bool = True) -> Optional[str]:
     if extra_label:
-        hit = matcher.find(extra_label)
+        hit = matcher.find(extra_label, fuzzy=fuzzy)
         if hit:
             return hit
     if row is not None:
-        return matcher.find(row.get("label"), row.get("description"))
+        return matcher.find(row.get("label"), row.get("description"), fuzzy=fuzzy)
     return None
 
 
@@ -489,6 +556,28 @@ def touch_count(conn: Optional[sqlite3.Connection], row: Mapping[str, Any],
     return 1 + sum(1 for c in chapters if c > planted)
 
 
+def overdue_short_lines(
+    conn: Optional[sqlite3.Connection], rows: Iterable[Mapping[str, Any]], chapter: int,
+    cfg: PromiseConfig, language: Any, *, skip_ids: Iterable[str] = (),
+) -> list[tuple[int, dict]]:
+    """Open reader-visible short lines whose content since planting (chapters
+    ``planted <= c < chapter``) exceeds the short-line budget, as
+    ``[(units, row)]`` most over budget first."""
+    limit = short_line_limit(cfg, language)
+    skip = set(skip_ids)
+    out: list[tuple[int, dict]] = []
+    for row in rows:
+        if (row["id"] in skip or not is_open(row) or row.get("line_type") != "short"
+                or row.get("visibility") != "reader"):
+            continue
+        planted = _int(row.get("planted_chapter"), chapter) or chapter
+        units = content_units_between(conn, planted, chapter, language=language)
+        if units > limit:
+            out.append((units, dict(row)))
+    out.sort(key=lambda item: (-item[0], str(item[1]["id"])))
+    return out
+
+
 def _open_children(conn: Optional[sqlite3.Connection], parent_id: str,
                    *, exclude: Iterable[str] = ()) -> list[dict]:
     if conn is None or not parent_id:
@@ -563,7 +652,20 @@ def resolve_action(action: Mapping[str, Any], rows: list[dict]) -> Optional[dict
         sim = _label_similarity(label, row["label"])
         if sim > best_sim:
             best, best_sim = row, sim
-    return best if best_sim >= _LABEL_MATCH_THRESHOLD else None
+    if best_sim >= _LABEL_MATCH_THRESHOLD:
+        return best
+    # 中文包含关系兜底：「血仇未报」↔ 账本「血仇」（二元组 Jaccard 只有 1/3）。
+    # 较短一方 ≥2 字且至少占较长一方的一半，避免「师父」吞掉「师父的遗言」这类另一条承诺。
+    if _CJK_RE.search(label):
+        contained = [r for r in ordered if _contains_label(key, _key(r["label"]))]
+        if contained:
+            return max(contained, key=lambda r: (is_open(r), len(_key(r["label"]))))
+    return None
+
+
+def _contains_label(a: str, b: str) -> bool:
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 2 and short in long_ and len(short) * 2 >= len(long_)
 
 
 # ── 文案（zh/en）──────────────────────────────────────────────────────────────
@@ -592,11 +694,18 @@ _TEXT = {
                    "（一长一短），目前缺少：{missing}",
         "opening_fix": "在本章埋下缺少的{missing}承诺（短线：几章内就会揭晓的悬念/约定/威胁；"
                        "长线：贯穿全卷的大目标或大谜团），并在账本里标注 line_type",
+        "opening_one": "开篇第{chapter}章结束前应至少埋下 1 条长线 + 1 条短线读者可见承诺"
+                       "（一长一短）；账本里两类都还没有，本章计划的新埋设只能补上其中一类",
+        "opening_one_fix": "除计划中的埋设外再埋下 1 条承诺，保证长线、短线各有一条"
+                           "（短线：几章内就会揭晓的悬念/约定/威胁；长线：贯穿全卷的大目标或大谜团），"
+                           "并在账本里标注 line_type",
         "missing": "本章契约计划{verb}承诺「{label}」，但正文里找不到相关内容",
         "missing_fix": "在本章{verb}「{label}」{note}",
         "thin": "本章计划兑现「{label}」，但它自第{planted}章埋下后只被触及 {touches} 次"
                 "（大爽点前建议至少 {need} 次提醒/推进）——扣子没挖够，兑现会显得突兀",
-        "thin_fix": "兑现前先在本章前半段补一笔提醒或推进，或把兑现推迟到扣子挖够之后",
+        "thin_fix": "兑现时回扣此前埋下的细节，让兑现有来处；铺垫按此前章节的提醒/推进计数，"
+                    "本章内补的提醒不算——若扣子确实不够，把本章的兑现改为推进（advance），"
+                    "后续章节再提醒/推进 {more} 次后兑现",
         "cliff": "本章计划同时兑现 {count} 条承诺（{labels}），超过每章 {limit} 条——"
                  "集中兑现会造成张力断崖，后续章节失去期待",
         "cliff_fix": "把部分兑现拆到后续章节，或把其中一条改为推进（advance）",
@@ -610,7 +719,11 @@ _TEXT = {
         "brief_planted": "（第{planted}章埋下）",
         "brief_planned_suffix": "；本章计划{verb}",
         "brief_children": "；先收束内层承诺{children}",
-        "brief_thin": "；铺垫尚浅（仅触及 {touches} 次），兑现前先补一笔提醒",
+        "brief_thin": "；铺垫尚浅（仅触及 {touches} 次）：兑现时回扣此前埋下的细节，让兑现有来处",
+        "brief_overdue": "- {label}（短线，第{planted}章埋下，约 {units} 字仍未收束，"
+                         "超出 {limit} 字预算）",
+        "brief_overdue_tail": "；本章推进或揭开它",
+        "brief_overdue_suffix": "；短线已超出 {limit} 字预算（约 {units} 字），本章推进或揭开它",
         "colon": "：",
         "long": "长线", "short_line": "短线",
     },
@@ -630,14 +743,24 @@ _TEXT = {
         "opening_fix": "Plant the missing {missing} promise in this chapter (short: a question "
                        "answered within a few chapters; long: a goal or mystery spanning the "
                        "volume) and tag its line_type in the ledger.",
+        "opening_one": "By the end of chapter {chapter} the opening should have planted at least "
+                       "one long-line and one short-line reader promise; the ledger has neither "
+                       "yet, and the plant planned for this chapter can cover only one of them.",
+        "opening_one_fix": "Besides the planned plant, plant one more promise so there is one "
+                           "long line (a goal or mystery spanning the volume) and one short line "
+                           "(a question answered within a few chapters), and tag their line_type "
+                           "in the ledger.",
         "missing": 'The chapter contract plans to {verb} promise "{label}", but the draft '
                    "never touches it.",
         "missing_fix": '{verb_cap} "{label}" in this chapter{note}.',
         "thin": 'This chapter plans to pay off "{label}", but since it was planted in '
                 "chapter {planted} it has been touched only {touches} time(s) (a big payoff "
                 "wants at least {need}); the setup is too thin and the payoff may feel unearned.",
-        "thin_fix": "Add a reminder or an advance earlier in this chapter first, or delay the "
-                    "payoff until the setup is deep enough.",
+        "thin_fix": "Call back to the details planted earlier so the payoff feels earned. Setup "
+                    "is counted from earlier chapters, so a reminder added in this chapter does "
+                    "not count; if the setup really is too thin, turn this chapter's payoff into "
+                    "an advance and pay it off after {more} more reminder(s) or advance(s) in "
+                    "later chapters.",
         "cliff": "This chapter plans to pay off {count} promises at once ({labels}), more than "
                  "{limit} per chapter; bunching payoffs causes a tension cliff afterwards.",
         "cliff_fix": "Move some payoffs to later chapters, or turn one of them into an advance.",
@@ -653,8 +776,13 @@ _TEXT = {
         "brief_planted": " (planted in chapter {planted})",
         "brief_planned_suffix": "; planned this chapter: {verb}",
         "brief_children": "; close the inner promise(s) {children} first",
-        "brief_thin": "; setup is thin (touched {touches} time(s)), "
-                      "add a reminder before the payoff",
+        "brief_thin": "; setup is thin (touched {touches} time(s)): call back to the details "
+                      "planted earlier so the payoff feels earned",
+        "brief_overdue": "- {label} (short line, planted in chapter {planted}, still open after "
+                         "about {units} words, over the {limit}-word budget)",
+        "brief_overdue_tail": "; advance or resolve it this chapter",
+        "brief_overdue_suffix": "; short line over its {limit}-word budget (about {units} words),"
+                                " advance or resolve it this chapter",
         "colon": ": ",
         "long": "long line", "short_line": "short line",
     },
@@ -780,18 +908,9 @@ def _check_short_overdue(conn, rows: list[dict], chapter: int, cfg: PromiseConfi
     Returns ``[(row_id, issue)]`` so the caller can suppress a duplicate dormant warn."""
     t = _TEXT[_lang(language)]
     limit = short_line_limit(cfg, language)
-    candidates: list[tuple[int, dict]] = []
-    for row in rows:
-        if (row["id"] in skip_ids or row["line_type"] != "short"
-                or row["visibility"] != "reader"):
-            continue
-        planted = _int(row.get("planted_chapter"), chapter) or chapter
-        units = content_units_between(conn, planted, chapter, language=language)
-        if units > limit:
-            candidates.append((units, row))
-    candidates.sort(key=lambda item: (-item[0], str(item[1]["id"])))
     out: list[tuple[str, dict]] = []
-    for units, row in candidates:
+    for units, row in overdue_short_lines(conn, rows, chapter, cfg, language,
+                                          skip_ids=skip_ids):
         if len(out) >= _ISSUE_CAP:
             break
         if matcher.mentions(row["label"], row["description"]):
@@ -825,6 +944,13 @@ def _check_opening(conn, chapter: int, resolved: list[tuple[dict, Optional[dict]
     if len(missing) <= wildcards:
         return []
     t = _TEXT[lang]
+    if wildcards:
+        # 两类都缺、本章只计划埋 1 条未建档承诺：它能补哪一类未知，只提示"还差一条"
+        return [_issue(
+            "promise_opening",
+            t["opening_one"].format(chapter=chapter),
+            t["opening_one_fix"],
+        )]
     names = t["and"].join(t["long"] if lt == "long" else t["short_line"] for lt in missing)
     return [_issue(
         "promise_opening",
@@ -888,7 +1014,7 @@ def _check_contract(conn, chapter: int, cfg: PromiseConfig,
                 "promise_thin_setup",
                 t["thin"].format(label=label, planted=row["planted_chapter"],
                                  touches=touches, need=need),
-                t["thin_fix"],
+                t["thin_fix"].format(more=need - touches),
             ))
 
     # c) 张力断崖：同章兑现过多（卷末章除外）
@@ -929,10 +1055,12 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
     """Dynamic "promise reminders" block for the planner and the drafter.
 
     Lists up to ``inject_dormant_limit`` reader-visible open promises that are
-    due for a reminder (most dormant first) plus the contract's planned promise
-    actions not already listed, each with ledger context.  Returns "" when
-    nothing applies.  Also records the effective config in the workspace so the
-    craft checks of this chapter use the same thresholds."""
+    due for a reminder (most dormant first), up to as many short lines that are
+    over their character/word budget (the ``promise_short_overdue`` check's
+    rule), plus the contract's planned promise actions not already listed, each
+    with ledger context.  Returns "" when nothing applies.  Also records the
+    effective config in the workspace so the craft checks of this chapter use
+    the same thresholds."""
     pcfg = resolve_config(cfg)
     if isinstance(workspace, dict):
         workspace[_WORKSPACE_CFG_KEY] = asdict(pcfg)
@@ -976,8 +1104,20 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
     limit = max(0, _int(pcfg.inject_dormant_limit, 2) or 0)
     due = sorted((r for r in open_rows if is_due_for_reminder(r, chapter, pcfg)),
                  key=lambda r: dormancy_rank(r, chapter, pcfg))[:limit]
+    # 超出预算的短线（craft check promise_short_overdue 的同一口径）：即使刚推进过、
+    # 不在提醒周期内，也要让写手知道它该收了——否则告警无从预见。
+    short_limit = short_line_limit(pcfg, language)
+    overdue = overdue_short_lines(conn, open_rows, chapter, pcfg, language) if limit else []
+    overdue_units = {row["id"]: units for units, row in overdue}
     lines: list[str] = []
     listed: set[str] = set()
+
+    def overdue_suffix(row: dict) -> str:
+        if row["id"] not in overdue_units:
+            return ""
+        return t["brief_overdue_suffix"].format(
+            units=f"{overdue_units[row['id']]:,}", limit=f"{short_limit:,}")
+
     for row in due:
         listed.add(row["id"])
         line = t["brief_due"].format(label=_clip(row["label"], 40),
@@ -985,9 +1125,26 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
                                      gap=chapters_since_touch(row, chapter))
         if row["description"]:
             line += t["colon"] + _clip(row["description"], desc_limit)
+        line += overdue_suffix(row)
         if row["id"] in planned_verb:
             line += t["brief_planned_suffix"].format(verb=nouns[planned_verb[row["id"]]])
         lines.append(line + payoff_hints(row))
+
+    # 契约已安排的超时短线留给下面的契约操作行（带 planner 备注 + 超时后缀）
+    overdue_lines = 0
+    for units, row in overdue:
+        if overdue_lines >= limit:
+            break
+        if row["id"] in listed or row["id"] in planned_verb:
+            continue
+        listed.add(row["id"])
+        line = t["brief_overdue"].format(label=_clip(row["label"], 40),
+                                         planted=row["planted_chapter"],
+                                         units=f"{units:,}", limit=f"{short_limit:,}")
+        if row["description"]:
+            line += t["colon"] + _clip(row["description"], desc_limit)
+        lines.append(line + t["brief_overdue_tail"] + payoff_hints(row))
+        overdue_lines += 1
 
     # 契约计划的承诺操作：契约块已列出标签，这里只补账本上下文（埋设章/描述/内层线/铺垫深度），
     # 所以只列能映射到账本、仍未关闭、且没在上面出现过的行。
@@ -1005,7 +1162,7 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
             line += t["colon"] + _clip(row["description"], desc_limit)
         if action.get("note"):
             line += " — " + _clip(action["note"], desc_limit)
-        lines.append(line + payoff_hints(row))
+        lines.append(line + overdue_suffix(row) + payoff_hints(row))
         action_lines += 1
 
     if not lines:
@@ -1023,9 +1180,12 @@ def settle(conn: sqlite3.Connection, chapter: int, workspace: Any, *,
     """Post-commit deterministic ledger step (runs after ``foreshadow_settle``).
 
     1. Applies the contract's ``remind`` actions whose promise appears in the
-       final draft: ``last_mentioned_chapter = max(existing, chapter)`` plus one
+       final draft (exact phrase hit only — this path writes the ledger, so the
+       fuzzy fallback used by the checks is not trusted here):
+       ``last_mentioned_chapter = max(existing, chapter)`` plus one
        ``foreshadow_log`` ``mention`` row — skipped when the chapter already
        has a mention/advance/payoff row for that promise (idempotent re-runs).
+       Nothing is committed here: the orchestrator commits after the step.
     2. Reports nesting violations (outer promise paid off while an inner one is
        open), the number of payoffs this chapter (and a tension-cliff
        violation above the limit, volume finales excepted), big payoffs with
@@ -1067,14 +1227,19 @@ def _apply_contract_reminders(conn: sqlite3.Connection, chapter: int,
     matcher = DraftMatcher(draft)
     applied: list[dict] = []
     done: set[str] = set()
-    conn.execute(f"SAVEPOINT {_SAVEPOINT}")
+    # 只在调用方已开事务时用 SAVEPOINT 隔离本步写入：顶层 SAVEPOINT 的 RELEASE 等于
+    # COMMIT，会抢在编排器之前提交。无事务时写入落在 DML 隐式开启的事务里，由编排器提交；
+    # 出错时整体回滚（此前没有未提交的写入）。
+    nested = conn.in_transaction
+    if nested:
+        conn.execute(f"SAVEPOINT {_SAVEPOINT}")
     try:
         for action in actions:
             row = resolve_action(action, rows)
             if row is None or row["id"] in done or not is_open(row):
                 continue
             done.add(row["id"])
-            evidence = _row_found(matcher, row, action.get("label"))
+            evidence = _row_found(matcher, row, action.get("label"), fuzzy=False)
             if not evidence:
                 continue
             already = conn.execute(
@@ -1096,10 +1261,14 @@ def _apply_contract_reminders(conn: sqlite3.Connection, chapter: int,
                 (new_id("fsl"), row["id"], chapter, evidence),
             )
             applied.append({"id": row["id"], "label": row["label"]})
-        conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
+        if nested:
+            conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
     except sqlite3.Error:
-        conn.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT}")
-        conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
+        if nested:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT}")
+            conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
+        else:
+            conn.rollback()
         raise
     return applied
 
