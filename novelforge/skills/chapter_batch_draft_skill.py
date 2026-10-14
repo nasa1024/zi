@@ -9,7 +9,8 @@
 输入（workspace）：
     stable_context / dynamic_context / craft_brief   起始章的上下文（与单章同源）
     writing_profile                                  起始章写作配置
-    batch_chapters   [{"chapter", "goal", "contract", "beats"}]，按章号升序
+    batch_chapters   [{"chapter", "goal", "contract", "brief", "beats"}]，按章号升序
+                     （brief = 该章自己的动态提示，起始章为空——其 craft_brief 在顶部）
 输出（workspace）：
     batch_drafts     {chapter: text}  通过校验的章节正文
     batch_rejects    {chapter: reason}  missing | empty | truncated | language_mismatch | too_short
@@ -77,12 +78,14 @@ commentary, summaries, code fences or proposals outside the markers. Do not
 imitate a named author or copy wording from a style reference.
 """
 
-# 中文 / 英文章节标记（解析两种都认，容忍粗体/标题前缀与全角间隔号变体）
+# 中文 / 英文章节标记（解析两种都认，容忍粗体/标题前缀与全角间隔号变体；
+# 中文模型常把章号写成中文数字：【第十二章·开始】）
 _ZH_MARK = re.compile(
-    r"[#>*_\s]*【\s*第\s*(\d+)\s*章\s*[·・•.:：\-—_]?\s*(开始|结束)\s*】[*_]*"
+    r"[#>*_\s]*【\s*第\s*(\d+|[零〇一二三四五六七八九十百千两]+)\s*章\s*"
+    r"[·・•.:：\-—_]?\s*(开始|结束)\s*】[*_]*"
 )
 _EN_MARK = re.compile(
-    r"[#>*_\s]*={2,}\s*CHAPTER\s+(\d+)\s+(START|END)\s*={2,}[*_]*",
+    r"[#>*_\s]*[=\-#]{2,}\s*CHAPTER\s+(\d+)\s*[:\-–—]?\s*(START|END)\s*[=\-#]{2,}[*_]*",
     re.IGNORECASE,
 )
 _FENCE_LINE = re.compile(r"^\s*```[\w-]*\s*$")
@@ -102,20 +105,38 @@ def chapter_markers(chapter: int, language: str) -> tuple[str, str]:
 
 
 def per_chapter_output_tokens(profile: dict, target_chars: int = 3000) -> int:
-    """单章可见输出 token 预算（与单章起草同口径，留 1024 余量）。
+    """单章可见输出 token 预算（留 1024 余量）。
 
-    中文按 ~1.6 token/字；英文按 ``chapter_word_range`` 上限 × 1.8 token/词
-    （与 ``chapter_draft_skill`` 的英文预算一致）。
+    中文按 ~1.6 token/字，取 ``max(draft_target_chars, chapter_word_range 上限)``——
+    目标字数只是提示里的"约 N 字"，模型写到 profile 允许的上限（中文默认 5000 字）
+    也必须放得下，否则 N 章共用的 maxOutputTokens 会把窗口尾章截断、整段作废重写；
+    英文按 ``chapter_word_range`` 上限 × 1.8 token/词（与 ``chapter_draft_skill`` 一致）。
     """
+    quality = profile.get("quality_rules") or {}
+    word_range = quality.get("chapter_word_range")
+    try:
+        range_max = int(word_range[1]) if word_range else None
+    except (TypeError, ValueError, IndexError):
+        range_max = None
     if is_english(profile):
-        quality = profile.get("quality_rules") or {}
-        word_range = quality.get("chapter_word_range") or [1500, 2500]
-        try:
-            range_max = int(word_range[1])
-        except (TypeError, ValueError, IndexError):
-            range_max = 2500
-        return int(max(1, range_max) * 1.8) + 1024
-    return int(1.6 * max(1, int(target_chars or 3000))) + 1024
+        return int(max(1, range_max or 2500) * 1.8) + 1024
+    chars = max(int(target_chars or 3000), range_max or 0)
+    return int(1.6 * max(1, chars)) + 1024
+
+
+_ZH_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _mark_number(raw: str) -> Optional[int]:
+    """章节标记里的章号：阿拉伯数字或中文数字（十二 / 一百零三 / 逐位写法一〇三）。"""
+    if raw.isdigit():
+        return int(raw)
+    if not any(unit in raw for unit in "十百千"):
+        return int("".join(str(_ZH_DIGITS[c]) for c in raw)) or None
+    from ..coldstart.batch import _cn_to_int
+
+    return _cn_to_int(raw.replace("〇", "零"))
 
 
 def hard_min_units(profile: dict) -> int:
@@ -149,7 +170,7 @@ def build_batch_prompt(
     """组装连写 user 消息，返回 ``(user_msg, stable_prefix)``。
 
     顺序：稳定前缀（与单章 prompt 逐字节一致）→ 当前世界状态 → 起始章 craft_brief →
-    逐章小节（契约 / 目标 / 字数 / Beat Sheet）→ ``## 连写任务``。
+    逐章小节（契约 / 该章动态提示 / 目标 / 字数 / Beat Sheet）→ ``## 连写任务``。
     """
     english = is_english(profile)
     specs: list[dict] = list(workspace.get("batch_chapters") or [])
@@ -175,6 +196,8 @@ def build_batch_prompt(
     for i, spec in enumerate(specs, 1):
         chapter = int(spec["chapter"])
         contract = _demote_headings(str(spec.get("contract") or "").strip())
+        # 该章动态提示（F1/F3/F5 brief）嵌在本章小节的"动态提示"标题下：整体降两级
+        brief = _demote_headings(_demote_headings(str(spec.get("brief") or "").strip()))
         beats = spec.get("beats") or []
         beats_str = _fmt_beats(beats) if beats else (
             "(no beats)" if english else "(无 beats)"
@@ -184,6 +207,11 @@ def build_batch_prompt(
             lines = [f"## Batch chapter {i}/{total} · Chapter {chapter}"]
             if contract:
                 lines.append(contract)
+            if brief:
+                lines.append(
+                    f"### Chapter {chapter} dynamic notes (estimated before this batch; skip "
+                    f"anything an earlier chapter of this batch already handled)\n{brief}"
+                )
             lines.append(
                 f"### Chapter {chapter} requirements\n"
                 f"Goal: {goal or 'Advance the story according to the profile.'}\n"
@@ -195,6 +223,11 @@ def build_batch_prompt(
             lines = [f"## 连写第 {i}/{total} 章 · 第 {chapter} 章"]
             if contract:
                 lines.append(contract)
+            if brief:
+                lines.append(
+                    f"### 第 {chapter} 章动态提示（按本批开始前的进度估算；"
+                    f"本批前文已处理过的可略过）\n{brief}"
+                )
             lines.append(
                 f"### 第 {chapter} 章写作要求\n"
                 f"章节目标：{goal or '按情节发展'}\n"
@@ -256,8 +289,8 @@ def parse_batch_output(
 ) -> BatchParse:
     """按章节标记切分连写输出并逐章校验（确定性）。
 
-    - 中英文标记都认；容忍缺失的结束标记（截断到下一个开始标记或文末）、
-      多余空白、markdown 代码围栏与乱序；
+    - 中英文标记都认（中文章号可写成中文数字；英文围栏可用 ===/---/###，章号后可带冒号）；
+      容忍缺失的结束标记（截断到下一个开始标记或文末）、多余空白、markdown 代码围栏与乱序；
     - ``truncated=True``（输出因 max_tokens 截断）时，一直延伸到文末、没有任何
       后续标记的片段视为半截章 → ``truncated``；
     - 只返回请求范围内的章；同一章出现多次时取第一个通过校验的片段；
@@ -267,8 +300,11 @@ def parse_batch_output(
     marks: list[tuple[int, int, int, str]] = []   # (start, end, chapter, kind)
     for regex in (_ZH_MARK, _EN_MARK):
         for m in regex.finditer(text or ""):
+            number = _mark_number(m.group(1))
+            if number is None:
+                continue
             kind = "start" if m.group(2).lower() in ("开始", "start") else "end"
-            marks.append((m.start(), m.end(), int(m.group(1)), kind))
+            marks.append((m.start(), m.end(), number, kind))
     marks.sort()
 
     candidates: dict[int, list[tuple[str, bool]]] = {}   # chapter -> [(正文, 延伸到文末)]

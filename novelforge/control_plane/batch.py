@@ -9,7 +9,8 @@
 - 每章在连写 prompt 中各自携带完整契约 + 目标 + 字数 + Beat Sheet；
 - 输出按章节标记切分并逐章校验；
 - 某章失败（未落库）→ 丢弃其后的依赖章、从该章重写；某章落库但仍有 block →
-  保留该章、丢弃其后、从下一章重写；重写次数受 ``cfg.batch.max_regenerations`` 限制。
+  保留该章、丢弃其后、从下一章重写；连续无进展的重写次数受 ``cfg.batch.max_regenerations``
+  限制（窗口接受 ≥1 章即清零）。
 
 未处理/被丢弃的正文只留在 ``draft_batch_chapters``，从不进入 ``draft_index``，
 因此 ``next_chapter_no`` 与 autopilot 断点续写保持正确。
@@ -257,6 +258,26 @@ def _skill_ctx(orch: Orchestrator, conn, chapter: int, workspace: dict, profile:
     )
 
 
+def _brief_lines(brief: str) -> set[str]:
+    return {line.strip() for line in str(brief or "").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")}
+
+
+def _fresh_brief(brief: str, seen: set[str]) -> str:
+    """窗口内后续章的 brief 只保留此前各章 brief 未出现过的条目（逐字相同的行只说一次，
+    如窗口开始前就欠下的爽点反应、通用提醒）；整块无新条目时连标题一起省略。"""
+    blocks: list[str] = []
+    for block in str(brief or "").split("\n\n"):
+        lines = [line for line in block.splitlines() if line.strip()]
+        head = lines[:1] if lines and lines[0].lstrip().startswith("#") else []
+        body = lines[len(head):]
+        fresh = [line for line in body if line.strip() not in seen]
+        seen.update(line.strip() for line in body)
+        if fresh:
+            blocks.append("\n".join(head + fresh))
+    return "\n\n".join(blocks)
+
+
 def _draft_window(conn, window: list[int], goals: dict[int, str], *,
                   orch: Orchestrator, profile: dict) -> _WindowDraft:
     """为窗口内各章准备契约/节拍并发起一次连写调用（起始章上下文 as_of(start-1)）。"""
@@ -270,7 +291,9 @@ def _draft_window(conn, window: list[int], goals: dict[int, str], *,
     recall_pack = gather_recall_pack(cfg, conn, start, chapter_goal=goals[start])
     start_plan = gather_plan_context(conn, start, lookahead_chapters=5)
     pacing = PacingController()
-    pacing_state = pacing.get_state(conn)
+    pacing_state = pacing.get_state(   # 与 generate_chapter 的 RECALL 段同口径（F3 阈值）
+        conn, max_low_streak=getattr(getattr(cfg, "polarity", None), "max_low_streak", None),
+    )
     hint = _profile_pacing_hint(profile, pacing, pacing_state)
     start_goal = (goals[start] + "\n" + hint).strip() if hint else goals[start]
     base_ws: dict = {
@@ -293,11 +316,33 @@ def _draft_window(conn, window: list[int], goals: dict[int, str], *,
 
     specs: list[dict] = []
     beats_by_chapter: dict[int, list[dict]] = {}
+    seen_brief_lines = _brief_lines(base_ws["craft_brief"])
     for chapter in window:
         plan = start_plan if chapter == start else gather_plan_context(
             conn, chapter, lookahead_chapters=5,
         )
         goal = start_goal if chapter == start else goals[chapter]
+        contract_text = plan.render_contract_for_draft(language)
+        guardrails = plan.render_guardrails_for_draft(language)
+        contract = contract_text or guardrails
+        if chapter == start:
+            brief, section_brief = base_ws["craft_brief"], ""   # 起始章 brief 已在 prompt 顶部
+        else:
+            # 逐章动态提示（F1 到期承诺提醒 / F3 上一章计划高潮后的余韵 / F5 爽点三段式…）：
+            # 纯 DB 读、确定性，账本为 as_of(起始章-1) 的近似（与各章契约同口径）。
+            # 否则窗口内后续章永远看不到"本章该提醒的承诺"。同窗口内已出现过的条目只说一次。
+            brief = build_draft_briefs(
+                conn, chapter, {
+                    **base_ws,
+                    "chapter_goal": goal,
+                    "plan_context": plan,
+                    "future_plan_context": plan.render_for_planner(language),
+                    "future_guardrails": guardrails,
+                    "chapter_contract_context": contract_text,
+                },
+                language=language, cfg=cfg,
+            )
+            section_brief = _fresh_brief(brief, seen_brief_lines)
         beats = [dict(b) for b in plan.selected_beats]
         if not beats:
             # 无已选/已计划节拍：内存内跑一次 planner（as_of 起始章的近似，见设计说明）
@@ -308,7 +353,7 @@ def _draft_window(conn, window: list[int], goals: dict[int, str], *,
                 "stable_context": base_ws["stable_context"],
                 "dynamic_context": base_ws["dynamic_context"],
                 "future_plan_context": plan.render_for_planner(language),
-                "craft_brief": base_ws["craft_brief"] if chapter == start else "",
+                "craft_brief": brief,
             }
             result = orch.registry.invoke(
                 "planner",
@@ -319,10 +364,8 @@ def _draft_window(conn, window: list[int], goals: dict[int, str], *,
         specs.append({
             "chapter": chapter,
             "goal": goal,
-            "contract": (
-                plan.render_contract_for_draft(language)
-                or plan.render_guardrails_for_draft(language)
-            ),
+            "contract": contract,
+            "brief": section_brief,
             "beats": beats,
         })
 
@@ -498,6 +541,25 @@ def _notify(chapter_cb, chapter: int, outcome: ChapterOutcome) -> Optional[str]:
     return None
 
 
+def _draft_rowid(conn) -> Optional[int]:
+    try:
+        return int(conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM draft_index").fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
+def _persisted_since(conn, chapter: int, mark: Optional[int]) -> bool:
+    """``mark``（处理本章前的 draft_index 最大 rowid）之后本章是否已有新修订落库。"""
+    if mark is None:
+        return False
+    try:
+        return conn.execute(
+            "SELECT 1 FROM draft_index WHERE chapter=? AND rowid>? LIMIT 1", (chapter, mark),
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def _error_kind(exc: BaseException) -> str:
     return "circuit_broken" if isinstance(exc, CircuitTripped) else "exception"
 
@@ -508,12 +570,17 @@ def _run_windows(conn, out: BatchOutcome, make_orchestrator, chapter_goals,
     end = out.requested[-1]
     next_chapter = out.requested[0]
     kind = "initial"
+    # 上限按"连续无进展的重写"计：窗口接受 ≥1 章即清零。挂机把整段会话当作一次 run，
+    # 若按全程累计，长会话里第 N+1 次互不相干的偶发失败（某章过短/某章残留 block）
+    # 就会让整个会话报错停止；out.regenerations 仍报告全程总次数。
+    regen_streak = 0
     while next_chapter <= end:
         if canceled():
             out.status = "canceled"
             return
         if kind == "regenerate":
             out.regenerations += 1          # 只有真正发起重写才计数（取消不算）
+            regen_streak += 1
         profile = get_project_writing_profile(conn, chapter=next_chapter)
         window = [next_chapter]
         for chapter in range(next_chapter + 1, min(end, next_chapter + out.capacity - 1) + 1):
@@ -595,6 +662,7 @@ def _run_windows(conn, out: BatchOutcome, make_orchestrator, chapter_goals,
             if canceled():
                 stop = "canceled"
                 break
+            draft_mark = _draft_rowid(conn)
             try:
                 outcome = make_orchestrator().generate_chapter(
                     chapter, conn,
@@ -611,6 +679,11 @@ def _run_windows(conn, out: BatchOutcome, make_orchestrator, chapter_goals,
                 reasons[chapter] = "exception"
                 stop, stop_chapter = "fatal", chapter
                 break
+            if not outcome.ok and _persisted_since(conn, chapter, draft_mark):
+                # 正文落库之后才抛的异常（catch-all 返回 ok=False，但本章已进 draft_index）：
+                # 从本章重写会产生重复修订轮并二次结算。按结算降级处理（P1#11 正文已落袋）。
+                outcome.ok = True
+                outcome.state_degraded = True
             _record(out, outcome, batch_id)
             if outcome.ok:
                 _mark_batch_chapter(conn, batch_id, chapter, "accepted", run_id=outcome.run_id)
@@ -681,14 +754,16 @@ def _run_windows(conn, out: BatchOutcome, make_orchestrator, chapter_goals,
             return
         if stop == "fatal":
             return
+        if window_accepted:
+            regen_streak = 0                # 有进展：之前的重写已解决问题
         if not thrown:
             next_chapter = window[-1] + 1
             kind = "continue"
             continue
         next_chapter = thrown[0]
-        if out.regenerations >= max_regenerations:
+        if regen_streak >= max_regenerations:
             out.error = (
-                f"max regenerations ({max_regenerations}) reached; "
+                f"max regenerations ({max_regenerations}) reached without progress; "
                 f"stopped before chapter {next_chapter} ({failure_reason})"
             )
             out.error_kind = "regenerations"

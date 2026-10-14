@@ -158,7 +158,7 @@ class BatchConfig:
     max_chapters: int = 10               # 单次调用最多起草章数
     min_chapters: int = 2                # 少于此数时退回单章流程
     require_long_output: bool = True
-    max_regenerations: int = 2           # 单次批量任务中"丢弃后续章并重写"的最大次数
+    max_regenerations: int = 2           # "丢弃后续章并重写"连续无进展的最大次数（窗口接受≥1章即清零）
 
 
 @dataclass

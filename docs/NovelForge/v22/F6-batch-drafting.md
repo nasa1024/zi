@@ -28,35 +28,40 @@ run_batch(start, count)
  └─ 连写模式，循环窗口 [next, next+capacity)（写作配置在窗口内切换则截断）：
      1. INSERT draft_batches(status=running, origin)
      2. 起始章上下文 as_of(start-1)：召回包 → 稳定前缀 / 当前世界状态 / craft_brief
-     3. 逐章：gather_plan_context(k) 渲染契约；节拍 = 已选/已计划契约节拍，否则内存内跑 planner
+     3. 逐章：gather_plan_context(k) 渲染契约；k>start 另算该章自己的 craft_brief（F1/F3/F5，
+        as_of(start-1) 账本近似）；节拍 = 已选/已计划契约节拍，否则内存内跑 planner（带该章 brief）
      4. chapter_batch_draft：一次调用（gateway 的预算 ×N）→ {k: 正文} + {k: 拒绝原因}
      5. INSERT draft_batch_chapters：可用前缀 pending；首个缺口 rejected；其后 discarded
      6. 逐章（每章全新 orchestrator/ledger）generate_chapter(k, predrafted_text, predrafted_beats, batch_id)
      7. 窗口成本平摊到本窗口接受章（ChapterOutcome + pipeline_run.tokens/usd_spent）
-     8. 失败 → 作废后缀、重写（计 regenerations）；否则继续下一窗口
+     8. 失败 → 作废后缀、重写（计 regenerations；连续无进展次数受上限约束）；否则继续下一窗口
 ```
 
 ## 2. 资格判定（确定性）
 
 `batch_capacity(gateway, cfg, profile)`：`cfg.batch.enabled=False`、gateway 为 None 或
 `capabilities()` 抛错、`require_long_output` 且 STRONG 模型无 `long_output` → **1**；否则
-`min(max_chapters, max_tokens_out // 单章预算)`。单章可见输出预算与单章起草同口径：
-中文 `1.6 × draft_target_chars + 1024`，英文 `chapter_word_range[1] × 1.8 + 1024`
-（思考 token 由 Gemini provider 在其上另加余量）。容量 < `max(2, min_chapters)` 走顺序模式。
+`min(max_chapters, max_tokens_out // 单章预算)`。单章可见输出预算按 profile 允许的上限留足：
+中文 `1.6 × max(draft_target_chars, chapter_word_range[1]) + 1024`（默认 5000 字 → 9024；
+提示里的"约 3000 字"只是目标，N 章共用一个输出上限，按目标字数算会截断窗口尾章），
+英文 `chapter_word_range[1] × 1.8 + 1024`（思考 token 由 Gemini provider 在其上另加余量）。容量 < `max(2, min_chapters)` 走顺序模式。
 FakeProvider 声明 `long_output=False`，所有旧测试保持原路径。
 
 ## 3. 连写 prompt 与输出协议
 
 user 消息顺序：起始章**稳定前缀**（与单章 prompt 逐字节一致，`CacheHint(user_prefix_chars=len(stable))`）
 → `## 世界状态（当前）` → 起始章 `craft_brief` → 每章一节 `## 连写第 i/N 章 · 第 k 章`
-（该章契约整体降一级标题嵌入、`### 第 k 章写作要求`：目标与字数、`### 第 k 章 Beat Sheet`）
+（该章契约整体降一级标题嵌入 → k>start 时 `### 第 k 章动态提示`：该章自己的 F1/F3/F5 brief，
+标题降两级、同窗口内此前已出现过的逐字相同条目只说一次 → `### 第 k 章写作要求`：目标与字数 →
+`### 第 k 章 Beat Sheet`）
 → `## 连写任务` / `## Batch Writing Task`。system 为"连写助手 / serial drafting assistant"。
 所有路由标记（`本章任务`、`## Chapter Task`、`规划任务`、`未解伏笔`、`本章目标：`、`Chapter goal: `、
 `草稿：` 等）都不出现；英文项目整段无中文标签。
 
 输出协议：`【第12章·开始】…【第12章·结束】` / `=== CHAPTER 12 START === … === CHAPTER 12 END ===`。
 解析器（`parse_batch_output`，确定性）两种标记都认，容忍：缺失的结束标记（截到下一个标记或文末）、
-粗体/标题前缀、空白、markdown 围栏、乱序、范围外章节。逐章校验顺序：非空 → 未截断（`stop_reason=max_tokens`
+粗体/标题前缀、空白、markdown 围栏、乱序、范围外章节、中文数字章号（`【第十二章·开始】`、
+`一百零三`、逐位 `一〇三`）、英文 `===`/`---`/`###` 围栏与 `CHAPTER 12: START` 写法。逐章校验顺序：非空 → 未截断（`stop_reason=max_tokens`
 时延伸到文末且无后续标记的片段判为半截章）→ `language_matches` → `count_content_units >= hard_min_words`；
 拒绝原因 `missing | empty | truncated | language_mismatch | too_short`。
 
@@ -77,11 +82,14 @@ user 消息顺序：起始章**稳定前缀**（与单章 prompt 逐字节一致
 | 窗口首个缺口章（切分失败） | 缺口章 `rejected`（原因），其后 `discarded: after_rejected:k` | 缺口章 |
 | 第 k 章 `ok=False`（未落库） | k `rejected`（run 已 crashed），其后 `discarded: after_failed:k` | k |
 | 第 k 章落库但修订后仍有 `block` | 保留 k，其后 `discarded: after_blocked:k`（后续章照着修订前的 k 写成） | k+1 |
+| 第 k 章正文落库后才抛异常（`ok=False`，但 `draft_index` 已有本次新修订） | 视同结算降级：`ok=True`、`state_degraded=True`，k `accepted`（不重写，避免重复修订轮与二次结算） | — |
 | 末章有 block / 窗口全部接受 | 不作废任何正文，下一窗口照常续写（不计重写） | — |
 | `cancel_cb()` 为真（每章与每次连写调用前检查） | 剩余章 `discarded: canceled`，状态 `canceled` | — |
 | 连写调用异常（含熔断）/ 回调异常 | 批次 `failed`，`error_kind=circuit_broken|exception`，不重写 | — |
 
-重写次数上限 `cfg.batch.max_regenerations`（每次 run），超出即停，整体状态 `partial`（有接受章）或 `failed`。
+重写次数上限 `cfg.batch.max_regenerations` 按**连续无进展**计：窗口接受 ≥1 章即清零（挂机把整段会话当作
+一次 run，按全程累计会让长会话在第 3 次互不相干的偶发失败时报错停止）；卡在同一章连续重写超限即停，
+整体状态 `partial`（有接受章）或 `failed`。`BatchOutcome.regenerations` / 事件 `attempt` 仍报告全程总次数。
 未处理正文只留在 `draft_batch_chapters`，从不进入 `draft_index`，因此 `next_chapter_no` 与挂机断点续写不受影响。
 每次连写调用（含重写/后续窗口）对应一行 `draft_batches`，`detail_json` 记 `root_batch_id / kind
 (initial|continue|regenerate) / attempt / accepted / parse_rejects / thrown / failure_reason`。
@@ -127,6 +135,9 @@ user 消息顺序：起始章**稳定前缀**（与单章 prompt 逐字节一致
 ## 10. 局限
 
 - 窗口内第 k>起始章的召回与世界状态是 as_of(起始章-1) 的近似（提示词层面）；逐章校验仍严格 as_of(k-1)。
+- 第 k>起始章的动态提示同样按 as_of(起始章-1) 的账本计算：F1 到期提醒在窗口内到期章出现（同一承诺在
+  后续章的提醒间隔数会变，仍会重复列出，提示语注明"本批前文已处理过的可略过"）；F3 的连续低谷/顺境
+  依赖同批前序章尚未落库的极性，无法预知（只有按 k-1 章计划判断的余韵提示）；F5 待补反应同理。
 - 无契约节拍时内存内 planner 看不到同批前序章的节拍（只看各自的计划上下文与目标）。
 - 修订/润色改写了第 k 章（但未残留 block）时，第 k+1 章仍按原稿续写；依赖第 k+1 章自己的连续性校验兜底。
 - `n_candidates` 只在顺序模式生效（连写模式每章只有一稿，`select-candidate` 不适用）；挂机按规范

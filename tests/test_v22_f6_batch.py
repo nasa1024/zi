@@ -73,15 +73,22 @@ def users(fake) -> list[str]:
 class Script:
     """按路由标记应答的 FakeProvider factory；可按调用序号定制连写/规划/修订输出。"""
 
-    def __init__(self, *, batch=None, planner=None, revise=None, draft=None, on_batch=None):
+    def __init__(self, *, batch=None, planner=None, revise=None, draft=None, on_batch=None,
+                 score=None, polish=None, on_settle=None):
         self.batch = batch            # (call_no, chapters) -> str
         self.planner = planner        # (chapter, call_no_for_chapter) -> str
         self.revise = revise          # (call_no) -> str（可 raise）
         self.draft = draft            # (chapter) -> str
         self.on_batch = on_batch      # (call_no, chapters) -> None
+        self.score = score            # (call_no) -> str（质量评分 JSON）
+        self.polish = polish          # (call_no) -> str（全文润色稿）
+        self.on_settle = on_settle    # (call_no) -> None（可阻塞：与测试线程同步）
         self.batch_calls: list[list[int]] = []
         self.planner_calls: dict[int, int] = {}
         self.revise_calls = 0
+        self.score_calls = 0
+        self.polish_calls = 0
+        self.settle_calls = 0
 
     def __call__(self, messages, model="", temperature=1.0):
         user = str(messages[-1].content) if messages else ""
@@ -92,11 +99,17 @@ class Script:
             if self.on_batch:
                 self.on_batch(n, chapters)
             return self.batch(n, chapters) if self.batch else batch_output(chapters)
+        if user.startswith("本章目标："):  # 质量评分（score_chapter_detailed）
+            self.score_calls += 1
+            return self.score(self.score_calls) if self.score else "[]"
         if "一致性问题" in user:          # 全文重写（须先于 "草稿：" 判断）
             self.revise_calls += 1
             if self.revise:
                 return self.revise(self.revise_calls)
             return "[]"
+        if "工艺问题" in user:            # 全文润色（锚点补丁 "润色补丁任务" 走默认 "[]"）
+            self.polish_calls += 1
+            return self.polish(self.polish_calls) if self.polish else "[]"
         if "修订补丁任务" in user:
             return "[]"
         if "规划任务" in user:
@@ -110,6 +123,9 @@ class Script:
             body = self.draft(chapter) if self.draft else chapter_body(chapter)
             return f"```draft\n{body}\n```"
         if "未解伏笔" in user:
+            self.settle_calls += 1
+            if self.on_settle:
+                self.on_settle(self.settle_calls)
             return '{"settlements": [], "new_hooks": []}'
         return "[]"
 
@@ -199,7 +215,7 @@ class TestCapacity:
         disabled.batch.enabled = False
         assert batch_capacity(self._gw(LongFake()), disabled, profile) == 1
         assert batch_capacity(None, cfg, profile) == 1
-        # 不要求 long_output 时按 token 预算算：8192 // 5824 = 1
+        # 不要求 long_output 时按 token 预算算：8192 // 9024 → 至少 1
         relaxed = NovelForgeConfig()
         relaxed.batch.require_long_output = False
         assert batch_capacity(self._gw(FakeProvider()), relaxed, profile) == 1
@@ -223,6 +239,12 @@ class TestCapacity:
         en = {"content_language": "en-US", "quality_rules": {"chapter_word_range": [1500, 2500]}}
         assert per_chapter_output_tokens(zh, 3000) == int(1.6 * 3000) + 1024
         assert per_chapter_output_tokens(en, 3000) == int(2500 * 1.8) + 1024
+        # 中文按 profile 允许的上限留足预算（目标字数只是"约 N 字"提示）：
+        # 否则 N 章共用的输出上限会截断窗口尾章
+        zh_range = {"content_language": "zh-CN",
+                    "quality_rules": {"chapter_word_range": [1000, 5000]}}
+        assert per_chapter_output_tokens(zh_range, 3000) == int(1.6 * 5000) + 1024
+        assert per_chapter_output_tokens(zh_range, 6000) == int(1.6 * 6000) + 1024
 
 
 # ── 2. 连写输出切分（确定性解析）─────────────────────────────────────────────
@@ -285,6 +307,29 @@ class TestParser:
         r = self._parse("【第3章·开始】\n\n【第3章·结束】", [3])
         assert r.rejects == {3: "empty"}
 
+    def test_chinese_numeral_markers(self):
+        """中文模型常把章号写成中文数字：不能因此判 missing、整窗作废重写。"""
+        text = (
+            "【第十二章·开始】\n" + "甲" * 30 + "\n【第十二章·结束】\n"
+            "【第13章·开始】\n" + "乙" * 30 + "\n【第十三章·结束】\n"
+            "【第一〇四章·开始】\n" + "丙" * 30 + "\n【第一百零四章·结束】\n"
+            "【第一百零五章·开始】\n" + "丁" * 30 + "\n【第一百零五章·结束】"
+        )
+        r = self._parse(text, [12, 13, 104, 105])
+        assert r.drafts == {12: "甲" * 30, 13: "乙" * 30, 104: "丙" * 30, 105: "丁" * 30}
+        assert r.rejects == {}
+
+    def test_english_marker_variants(self):
+        good = "The lantern swung over the gate while Mara counted the guards. " * 4
+        text = (
+            "--- CHAPTER 12 START ---\n" + good + "\n--- CHAPTER 12 END ---\n"
+            "=== CHAPTER 13: START ===\n" + good + "\n=== CHAPTER 13: END ===\n"
+            "### Chapter 14 - Start ###\n" + good + "\n### Chapter 14 - End ###"
+        )
+        r = self._parse(text, [12, 13, 14], language="en-US", hard_min=20)
+        assert set(r.drafts) == {12, 13, 14} and r.rejects == {}
+        assert r.drafts[13] == good.strip()
+
     def test_english_markers_and_language_check(self):
         good = "The lantern swung over the gate while Mara counted the guards. " * 4
         text = (
@@ -335,6 +380,26 @@ class TestBatchPrompt:
         for marker in _FORBIDDEN_MARKERS:
             assert marker not in msg, marker
         assert "创作助手" not in _SYSTEM and "连写助手" in _SYSTEM
+
+    def test_per_chapter_brief_rendered_inside_its_section(self):
+        from novelforge.skills.chapter_batch_draft_skill import build_batch_prompt
+
+        ws = self._ws()
+        ws["batch_chapters"][1]["brief"] = "## 承诺提醒（本章需自然呼应）\n- 玉佩（第1章埋下，已 5 章未提及）"
+        ws["batch_chapters"][1]["contract"] = "## 本章硬契约\n- 核心目标：试炼"
+        profile = {"content_language": "zh-CN", "quality_rules": {}}
+        msg, stable = build_batch_prompt(ws, profile, target_chars=3000)
+        sec2 = msg[msg.index("## 连写第 2/2 章 · 第 8 章"):]
+        order = [sec2.index(x) for x in (
+            "### 本章硬契约", "### 第 8 章动态提示", "#### 承诺提醒（本章需自然呼应）",
+            "- 玉佩（第1章埋下，已 5 章未提及）", "### 第 8 章写作要求", "### 第 8 章 Beat Sheet",
+            "## 连写任务",
+        )]
+        assert order == sorted(order)
+        assert "玉佩" not in msg[:msg.index("## 连写第 1/2 章")]      # 不进前缀/起始章 brief
+        assert msg.startswith(stable)
+        for marker in _FORBIDDEN_MARKERS:
+            assert marker not in msg, marker
 
     def test_en_prompt_has_no_chinese_labels(self):
         from novelforge.skills.chapter_batch_draft_skill import _SYSTEM_EN, build_batch_prompt
@@ -400,6 +465,82 @@ class TestBatchPrompt:
         assert call["cache_hint"].user_prefix_chars == len(stable)
         assert "serial drafting assistant" in call["system"]
         assert fake.max_tokens_seen == [2 * per_chapter_output_tokens(profile, 3000)]
+
+
+class TestGeminiIntegration:
+    """真实 GeminiProvider（注入 transport，无网络）：容量门控、连写输出预算、截断尾章。"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for name in ("NOVELFORGE_PROVIDER", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_BASE_URL",
+                     "NOVELFORGE_GEMINI_BASE_URL", "NOVELFORGE_GEMINI_SAFETY_THRESHOLD",
+                     "NOVELFORGE_FAST_MODEL", "NOVELFORGE_MID_MODEL", "NOVELFORGE_STRONG_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_gemini_argon_gateway_gets_full_batch_capacity(self, db):
+        from novelforge.control_plane.batch import batch_capacity, batch_threshold
+        from novelforge.control_plane.llm.factory import build_gateway
+        from novelforge.control_plane.llm.tiers import ModelTier
+        from novelforge.writing_profiles import get_project_writing_profile
+
+        conn, _ = db
+        cfg = NovelForgeConfig()
+        cfg.provider.provider = "gemini"
+        cfg.provider.api_key = "test-key"
+        gw = build_gateway(cfg)
+        assert gw.model_for(ModelTier.STRONG) == "gemini-4-argon@high"
+        profile = get_project_writing_profile(conn, chapter=1)
+        capacity = batch_capacity(gw, cfg, profile)
+        assert capacity == cfg.batch.max_chapters >= batch_threshold(cfg)
+
+    def test_batch_call_budget_and_truncated_tail_on_gemini(self, db):
+        from novelforge.control_plane.llm.factory import GEMINI_MODELS
+        from novelforge.control_plane.llm.gemini_provider import GeminiProvider
+        from novelforge.control_plane.skill_base import SkillContext
+        from novelforge.skills.chapter_batch_draft_skill import (
+            ChapterBatchDraftSkill,
+            per_chapter_output_tokens,
+        )
+        from novelforge.writing_profiles import get_project_writing_profile
+
+        def chunk(text, *, finish=None, token=None):
+            cand = {"content": {"role": "model", "parts": [{"text": text}]}}
+            if finish:
+                cand["finishReason"] = finish
+            if token:
+                cand["continuationToken"] = token
+            return {"candidates": [cand], "usageMetadata": {
+                "promptTokenCount": 1000, "candidatesTokenCount": 4000}}
+
+        out = batch_output([1, 2]) + "\n\n【第3章·开始】\n" + chapter_body(3, 30)
+        cut = len(out) // 2
+        # long decode：第一跳 CONTINUATION 续接，第二跳在第 3 章中途撞上 MAX_TOKENS
+        hops = [[chunk(out[:cut], finish="CONTINUATION", token="tok-1")],
+                [chunk(out[cut:], finish="MAX_TOKENS")]]
+        requests: list[dict] = []
+
+        def transport(url, headers, body, timeout):
+            requests.append(json.loads(json.dumps(body)))
+            return iter(hops.pop(0))
+
+        conn, _ = db
+        profile = get_project_writing_profile(conn, chapter=1)
+        gw = LLMGateway(GeminiProvider(api_key="test-key", transport=transport),
+                        BudgetLedger(max_tokens=10_000_000, max_usd=100.0),
+                        model_map=GEMINI_MODELS)
+        ws = {"writing_profile": profile, "stable_context": "## 项目写作配置（锁定）\n缓存标识：zh",
+              "batch_chapters": [{"chapter": c, "goal": "g", "beats": BEATS, "contract": ""}
+                                 for c in (1, 2, 3)]}
+        ctx = SkillContext(project_id="p", target_chapter=1, mode="human_gate", as_of_chapter=0,
+                           budget=gw.ledger, llm=gw, conn=conn, workspace=ws,
+                           extra={"draft_target_chars": 3000})
+        result = ChapterBatchDraftSkill().run(ctx)
+        assert result.ok
+        per_chapter = per_chapter_output_tokens(profile, 3000)
+        assert requests[0]["generationConfig"]["maxOutputTokens"] == 3 * per_chapter + 32_768
+        assert requests[1]["continuationToken"] == "tok-1"
+        assert sorted(ws["batch_drafts"]) == [1, 2]
+        assert ws["batch_rejects"] == {3: "truncated"}
 
 
 # ── 4. 编排器接缝 ─────────────────────────────────────────────────────────────
@@ -714,6 +855,133 @@ class TestRunBatch:
             "SELECT status FROM draft_batches ORDER BY created_at, rowid").fetchall()]
         assert statuses == ["partial", "failed"]
 
+    def test_isolated_failures_in_separate_windows_do_not_stop_run(self, db):
+        """重写上限按"连续无进展"计：挂机把整段会话当作一次 run，互不相干的偶发失败
+        （各在不同窗口、之间有章被接受）不得累计到上限而让长会话报错停止。"""
+        from novelforge.control_plane.batch import run_batch
+        from novelforge.skills.chapter_batch_draft_skill import per_chapter_output_tokens
+        from novelforge.writing_profiles import get_project_writing_profile
+
+        conn, path = db
+        short_by_call = {1: {2}, 3: {5}, 5: {8}}       # 第 1/3/5 次连写各有一章过短
+        script = Script(batch=lambda n, chs: batch_output(chs, short=short_by_call.get(n, ())))
+        fake = LongFake(factory=script)
+        fake.max_out = per_chapter_output_tokens(get_project_writing_profile(conn, chapter=1)) * 2
+        out = run_batch(conn, start_chapter=1, count=8, make_orchestrator=make_factory(path, fake))
+        assert script.batch_calls == [[1, 2], [2, 3], [4, 5], [5, 6], [7, 8], [8]]
+        # 默认 max_regenerations=2，全程共 3 次重写仍完成；报告的是全程总数
+        assert (out.status, out.error, out.regenerations) == ("completed", None, 3)
+        assert _draft_index(conn) == [(c, 0) for c in range(1, 9)]
+
+    def test_regeneration_limit_still_stops_a_stuck_chapter_after_progress(self, db):
+        from novelforge.control_plane.batch import run_batch
+
+        conn, path = db
+
+        def tweak(cfg):
+            cfg.batch.max_regenerations = 1
+
+        # 首窗接受第 1 章（有进展、清零）后第 2 章反复过短：第 2 章只获 1 次重写
+        script = Script(batch=lambda n, chs: batch_output(chs, short={2}))
+        out = run_batch(conn, start_chapter=1, count=4,
+                        make_orchestrator=make_factory(path, LongFake(factory=script), tweak=tweak))
+        assert script.batch_calls == [[1, 2, 3, 4], [2, 3, 4]]
+        assert (out.status, out.error_kind, out.next_chapter) == ("partial", "regenerations", 2)
+
+    def test_later_chapters_get_their_own_craft_brief(self, db):
+        """F1/F3/F5 动态提示逐章计算：窗口内后续章也能拿到"本章到期的承诺提醒"
+        （连写 prompt 的本章小节 + 补规划），扩展结算逐章照常运行。"""
+        from novelforge.control_plane.batch import run_batch
+
+        conn, path = db
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, state, planted_chapter, remind_every)"
+            " VALUES('fs_blood', '血仇', '灭门之仇未报', 'planted', 1, 2)"
+        )
+        conn.commit()
+        script = Script()
+        fake = LongFake(factory=script)
+        out = run_batch(conn, start_chapter=1, count=3,
+                        make_orchestrator=make_factory(
+                            path, fake, tweak=lambda c: setattr(c.settle, "enabled", True)))
+        assert (out.status, script.batch_calls) == ("completed", [[1, 2, 3]])
+        prompt = next(u for u in users(fake) if "## 连写任务" in u)
+        reminder = "- 血仇（第1章埋下，已 2 章未提及）"     # remind_every=2：第 3 章到期
+        head = prompt[:prompt.index("## 连写第 1/3 章")]
+        sec12 = prompt[prompt.index("## 连写第 1/3 章"):prompt.index("## 连写第 3/3 章")]
+        sec3 = prompt[prompt.index("## 连写第 3/3 章"):prompt.index("## 连写任务")]
+        assert "承诺提醒" not in head and "血仇" not in sec12
+        order = [sec3.index(x) for x in (
+            "### 第 3 章动态提示", "#### 承诺提醒", reminder, "### 第 3 章写作要求")]
+        assert order == sorted(order)
+        for marker in _FORBIDDEN_MARKERS:
+            assert marker not in prompt, marker
+        # 补规划同样看到本章自己的 brief
+        planner3 = next(u for u in users(fake)
+                        if "规划任务" in u and "当前章节：第 3 章" in u)
+        assert reminder in planner3
+        # 连写章逐章跑完扩展结算（无降级），且每章恰好一次伏笔结算调用
+        assert script.settle_calls == 3
+        for row in conn.execute("SELECT detail_json FROM pipeline_run ORDER BY chapter"):
+            detail = json.loads(row[0])
+            assert detail.get("failed_steps") in (None, [])
+            assert {"promise_ledger", "polarity", "payoff_reactions"} <= set(detail["extensions"])
+
+    def test_failure_after_persist_keeps_chapter(self, db, monkeypatch):
+        """落库后才抛异常（ok=False 但正文已进 draft_index）→ 不得从该章重写（重复修订轮/二次结算）。"""
+        import novelforge.control_plane.orchestrator as orch_mod
+        from novelforge.control_plane.batch import run_batch
+
+        conn, path = db
+        real_complete = orch_mod._complete_pipeline_run
+        calls = {"n": 0}
+
+        def flaky_complete(*args, **kw):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("run bookkeeping exploded")
+            return real_complete(*args, **kw)
+
+        monkeypatch.setattr(orch_mod, "_complete_pipeline_run", flaky_complete)
+        script = Script()
+        out = run_batch(conn, start_chapter=1, count=3,
+                        make_orchestrator=make_factory(path, LongFake(factory=script)))
+        assert script.batch_calls == [[1, 2, 3]]
+        assert (out.status, out.regenerations) == ("completed", 0)
+        assert _draft_index(conn) == [(1, 0), (2, 0), (3, 0)]
+        ch2 = next(o for o in out.outcomes if o.chapter == 2)
+        assert ch2.ok and ch2.state_degraded and "exploded" in ch2.error
+        assert [o.chapter for o in out.outcomes] == [1, 2, 3]
+        assert [r[:2] for r in _batch_rows(conn, out.batch_id)] == [
+            (1, "accepted"), (2, "accepted"), (3, "accepted")]
+
+    def test_window_truncates_at_profile_switch(self, db):
+        """写作配置自第 3 章切换（cache_key 变化）→ 窗口在切换前截断，第 3 章用新配置起草。"""
+        from novelforge.control_plane.batch import run_batch
+        from novelforge.writing_profiles import (
+            get_project_writing_profile,
+            initialize_project_writing_profile,
+            update_project_writing_profile,
+        )
+
+        conn, path = db
+        initialize_project_writing_profile(conn, None)
+        update_project_writing_profile(conn, {"story_tags": ["热血"]}, effective_from_chapter=3)
+        old_key = get_project_writing_profile(conn, chapter=2)["cache_key"]
+        new_key = get_project_writing_profile(conn, chapter=3)["cache_key"]
+        assert old_key != new_key
+        script = Script()
+        fake = LongFake(factory=script)
+        out = run_batch(conn, start_chapter=1, count=4, make_orchestrator=make_factory(path, fake))
+        assert script.batch_calls == [[1, 2], [3, 4]]
+        assert (out.status, out.regenerations) == ("completed", 0)
+        kinds = [json.loads(r[0])["kind"] for r in conn.execute(
+            "SELECT detail_json FROM draft_batches ORDER BY created_at, rowid").fetchall()]
+        assert kinds == ["initial", "continue"]
+        prompts = [u for u in users(fake) if "## 连写任务" in u]
+        assert old_key in prompts[0] and new_key not in prompts[0]
+        assert new_key in prompts[1]
+
     def test_batch_call_exception_fails_without_regeneration(self, db):
         from novelforge.control_plane.batch import run_batch
 
@@ -998,7 +1266,13 @@ class TestBatchApi:
         from novelforge.app.deps import get_registry
         from novelforge.app.models import BatchRunRequest
 
-        _patch_api(monkeypatch, LongFake(factory=Script()))
+        import threading
+
+        # 第 2 章的伏笔结算调用阻塞到客户端断开之后：断开必然发生在第 2 章完成之前，
+        # 取消检查在第 3 章之前生效（不依赖线程调度时序）
+        resume = threading.Event()
+        script = Script(on_settle=lambda n: resume.wait(10) if n == 2 else None)
+        _patch_api(monkeypatch, LongFake(factory=script))
 
         async def scenario() -> str:
             resp = await api_orch.pipeline_batch_stream(
@@ -1008,6 +1282,7 @@ class TestBatchApi:
                 if '"event": "chapter_done"' in chunk:
                     break
             await stream.aclose()                       # 模拟客户端断开
+            resume.set()
             status = "running"
             for _ in range(400):
                 conn = _open_conn(project)
@@ -1019,14 +1294,16 @@ class TestBatchApi:
             return status
 
         assert asyncio.run(scenario()) == "canceled"
+        assert script.settle_calls == 2                 # 同步点确实生效；第 3 章从未处理
         conn = _open_conn(project)
         try:
             rows = conn.execute("SELECT chapter, status, reason FROM draft_batch_chapters"
                                 " ORDER BY chapter").fetchall()
         finally:
             conn.close()
-        assert rows[0]["status"] == "accepted"
-        assert (rows[-1]["status"], rows[-1]["reason"]) == ("discarded", "canceled")
+        assert [(r["chapter"], r["status"]) for r in rows[:2]] == [(1, "accepted"), (2, "accepted")]
+        assert (rows[-1]["chapter"], rows[-1]["status"], rows[-1]["reason"]) == (
+            3, "discarded", "canceled")
 
     def test_stream_sequential_mode_without_long_output(self, client, project, monkeypatch):
         _patch_api(monkeypatch, FakeProvider(factory=Script()))
@@ -1148,6 +1425,66 @@ class TestAutopilotBatch:
             time.sleep(0.05)
         assert statuses == ["partial", "partial"]     # 第 2 窗：第 2 章接受，3-4 章作废后停
         assert chapters == [1, 2]
+
+    def _wait_batches_settled(self, project, timeout=10.0):
+        """暂停在逐章回调里广播；连写线程随后（无 LLM 调用）收尾批次行。"""
+        deadline = time.time() + timeout
+        while True:
+            conn = _open_conn(project)
+            try:
+                statuses = [r[0] for r in conn.execute(
+                    "SELECT status FROM draft_batches ORDER BY created_at, rowid")]
+                rows = [tuple(r) for r in conn.execute(
+                    "SELECT chapter, status, reason FROM draft_batch_chapters ORDER BY chapter")]
+                details = [json.loads(r[0]) for r in conn.execute(
+                    "SELECT detail_json FROM pipeline_run WHERE status='completed'"
+                    " ORDER BY chapter")]
+            finally:
+                conn.close()
+            if "running" not in statuses or time.time() > deadline:
+                return statuses, rows, details
+            time.sleep(0.05)
+
+    def test_autopilot_batch_quality_gate_counts_low_dimension(self, client, project, monkeypatch):
+        """F4×F6 合流点：连写路径逐章记账同样走分维度质量门控（acct_cfg.quality.enabled →
+        _account_chapter(batch=True) → evaluate_quality(quality_score, quality_dimensions)）。"""
+        low_hook = ('{"score": 8.5, "dimensions": {"hook": 3, "pacing": 9, "character": 9,'
+                    ' "prose": 9}, "reason": "钩子弱"}')
+        script = Script(score=lambda n: low_hook, polish=lambda n: "润色后正文平稳推进。" * 120)
+        _patch_autopilot_gateway(monkeypatch, LongFake(factory=script))
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 4, "mode": "auto_promote",
+            "quality_check": True, "auto_degrade_after_consecutive_issues": 2})
+        assert r.status_code == 202, r.text
+        s = _wait_finish(client, project, r.json()["session_id"])
+        assert s["status"] == "paused" and s["policy_mode"] == "human_gate", s
+        assert (s["chapters_done"], s["current_chapter"]) == (2, 3)
+        assert script.batch_calls == [[1, 2, 3, 4]]
+        assert script.score_calls >= 2
+        statuses, rows, details = self._wait_batches_settled(project)
+        assert statuses == ["canceled"]
+        assert rows == [(1, "accepted", None), (2, "accepted", None),
+                        (3, "discarded", "canceled"), (4, "discarded", "canceled")]
+        # 连写章（predrafted 路径）照样带出维度分与门控结论
+        assert [d["quality_dimensions"]["hook"] for d in details] == [3.0, 3.0]
+        assert all(d["selected_by"] == "batch" and d["quality_gate"] for d in details)
+
+    def test_autopilot_batch_quality_gate_passing_dimensions(self, client, project, monkeypatch):
+        all_mid = ('{"score": 5.5, "dimensions": {"hook": 5.5, "pacing": 5.5, "character": 5.5,'
+                   ' "prose": 5.5}, "reason": "及格"}')
+        script = Script(score=lambda n: all_mid)
+        _patch_autopilot_gateway(monkeypatch, LongFake(factory=script))
+        r = client.post(f"/v1/{project}/autopilot/start", json={
+            "from_chapter": 1, "to_chapter": 3, "mode": "auto_promote",
+            "quality_check": True, "auto_degrade_after_consecutive_issues": 2})
+        s = _wait_finish(client, project, r.json()["session_id"])
+        assert s["status"] == "completed" and s["policy_mode"] == "auto_promote", s
+        assert (s["chapters_done"], s["current_chapter"]) == (3, 4)
+        assert script.batch_calls == [[1, 2, 3]]
+        assert script.score_calls >= 3
+        statuses, rows, details = self._wait_batches_settled(project)
+        assert statuses == ["completed"]
+        assert [d["quality_dimensions"]["hook"] for d in details] == [5.5, 5.5, 5.5]
 
     def test_autopilot_batch_size_one_keeps_legacy_loop(self, client, project, monkeypatch):
         script = Script()
