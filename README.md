@@ -70,7 +70,7 @@ The exact pre-existing/new-work boundary, human decisions, Codex contributions, 
 - **Memory with provenance.** A promoted fact can be traced back through its candidate, final draft, L0 source, and evidence lines. Derived memory can be rebuilt without rewriting Canon.
 - **Plans are hypotheses, not facts.** Future chapter plans are append-only versions. The finished prose produces actuals; drift is measured; only future plans are revised.
 - **Local-first by default.** SQLite and the filesystem are enough for the deterministic core and complete UI. External model keys are only needed for live generation.
-- **Models are replaceable.** The runtime supports DeepSeek, Anthropic, OpenAI-compatible services, a deterministic fake provider, and offline hash embeddings.
+- **Models are replaceable.** The runtime supports Google Gemini 4 (default when `GEMINI_API_KEY` is set), DeepSeek, Anthropic, OpenAI-compatible services, a deterministic fake provider, and offline hash embeddings.
 - **Failure is recoverable.** Atomic draft writes, CAS revisions, durable agent checkpoints, hot backups, SSE replay, and circuit breakers are built in.
 
 ## Quick start
@@ -176,11 +176,13 @@ cp .env.example .env
 Example:
 
 ```ini
-NOVELFORGE_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your-key-here
+NOVELFORGE_PROVIDER=gemini
+GEMINI_API_KEY=your-key-here
 ```
 
-Anthropic and OpenAI-compatible endpoints are also supported. Vector recall uses the offline `HashEmbedder` by default; external embeddings are opt-in through `NOVELFORGE_EMBEDDING_*`. See [.env.example](.env.example) for every setting.
+The Gemini provider targets `gemini-4-argon` through the Gemini API's REST/SSE endpoint with no extra SDK. All three tiers use Gemini 4 and differ by thinking level (`fast=low`, `mid=medium`, `strong=high`). Outputs beyond the 64K per-request cap are continued transparently (long decode), so a single volume-planning call can cover 30 chapters instead of 10. Override any tier with `NOVELFORGE_*_MODEL=model@level`. See [Gemini 4 integration notes](docs/NovelForge/22-Gemini4接入与长输出改造.md).
+
+DeepSeek, Anthropic, and OpenAI-compatible endpoints are also supported. Vector recall uses the offline `HashEmbedder` by default; external embeddings are opt-in through `NOVELFORGE_EMBEDDING_*`. See [.env.example](.env.example) for every setting.
 
 > `NOVELFORGE_API_KEY` is the compatibility name for the variable that protects zi's own REST API. It is not an LLM credential. Never place a real key in source, examples, fixtures, logs, screenshots, or commit messages.
 

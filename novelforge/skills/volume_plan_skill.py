@@ -2,7 +2,7 @@
 
 输入（workspace）：
   volume_brief    {volume_no, title, synopsis, rolling_summary}
-  plan_from / plan_to   规划章节范围（单次 ≤10 章，防截断）
+  plan_from / plan_to   规划章节范围（单次 ≤10 章防截断；长输出模型 ≤30 章）
   foreshadow_due  待回收伏笔列表 [{label, due_chapter}]
   stable_context  慢变设定（可选，与生成管线共享前缀）
 
@@ -185,6 +185,14 @@ class VolumePlanSkill:
         user_msg = "\n\n".join(parts)
 
         from ..control_plane.llm.provider import Message
+        # ≤10 章沿用 8192（旧行为）；长输出模型的大窗口按每章约 1K token 线性放大
+        n_chapters = plan_to - plan_from + 1
+        max_out = 8192 if n_chapters <= 10 else n_chapters * 1024
+        try:
+            caps = ctx.llm._provider.capabilities(ctx.llm.model_for(ModelTier.STRONG))
+            max_out = min(max_out, caps.max_tokens_out)
+        except AttributeError:
+            pass
         validated = ctx.llm.generate_validated(
             ModelTier.STRONG,
             [Message(role="user", content=user_msg)],
@@ -195,7 +203,7 @@ class VolumePlanSkill:
                 content_language=str(profile.get("content_language") or "zh-CN"),
             ),
             system=compile_system_prompt(_SYSTEM, profile, english_system=_SYSTEM_EN),
-            max_tokens=8192,
+            max_tokens=max_out,
             max_tier=ModelTier.STRONG,
             attempts_per_tier=2,
         )

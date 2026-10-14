@@ -32,7 +32,7 @@ _DEFAULT_MODEL_MAP: dict[str, str] = {
 }
 
 # HTTP 状态码前缀 → 可重试
-_RETRYABLE = ("429", "500", "529", "503", "overloaded", "rate_limit")
+_RETRYABLE = ("429", "500", "502", "503", "504", "529", "overloaded", "rate_limit")
 
 
 class LLMGateway:

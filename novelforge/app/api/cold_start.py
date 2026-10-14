@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 import hashlib
-import os
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import ProjectRegistry, get_registry
+from ...control_plane.llm.runtime import resolve_provider_env
 from ..models import (
     ColdStartImportRequest, ColdStartJobInfo, ColdStartRequest,
     ColdStartResponse, ColdStartSplitPreview,
@@ -57,7 +57,7 @@ def cold_start_import(
         )
 
     mgr = get_cold_start_manager()
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    _, api_key = resolve_provider_env()
     job = mgr.start(
         project_id, chapters, registry,
         auto_promote_low_risk=req.auto_promote_low_risk,
@@ -110,16 +110,12 @@ def cold_start(
         from ...config import NovelForgeConfig
         from ...control_plane.skill_base import SkillContext
         from ...control_plane.budget import BudgetLedger
-        from ...control_plane.llm.runtime import build_configured_gateway
+        from ...control_plane.llm.runtime import apply_provider_env, build_configured_gateway
         from ...skills.cold_extract_skill import ColdExtractSkill
 
-        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-
         cfg = NovelForgeConfig(project_id=project_id, db_path="")
-        if api_key:
-            cfg.provider.api_key = api_key
-            cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-        else:
+        apply_provider_env(cfg)
+        if not cfg.provider.api_key:
             cfg.provider.provider = "fake"
 
         skill = ColdExtractSkill()

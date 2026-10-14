@@ -11,6 +11,7 @@ def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setenv("NOVELFORGE_PROVIDER", "fake")
     monkeypatch.delenv("NOVELFORGE_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     import novelforge.app.autopilot_manager as ap_mod
     import novelforge.app.deps as deps_mod

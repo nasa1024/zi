@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..autopilot_manager import AutopilotSession, get_autopilot_manager
+from ...control_plane.llm.runtime import resolve_provider_env
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
     AutopilotDegradeRequest, AutopilotSessionInfo, AutopilotStartRequest,
@@ -83,7 +83,7 @@ def autopilot_start(
         raise HTTPException(422, f"from_chapter ({req.from_chapter}) > to_chapter ({req.to_chapter})")
 
     mgr = get_autopilot_manager()
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    _, api_key = resolve_provider_env()
 
     internal_req = _StartReq(
         project_id=project_id,
@@ -293,7 +293,7 @@ def autopilot_resume(
         quality_check=req.get("quality_check", False),
         n_candidates=req.get("n_candidates", 1),
     )
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    _, api_key = resolve_provider_env()
     session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)
     return _session_to_info(session)
 

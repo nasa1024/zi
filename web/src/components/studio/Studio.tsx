@@ -1467,7 +1467,7 @@ function PipelinePanel({
 
       <div className="nf-notice">
         ⚠ <b>需要 LLM provider key</b>：后端配置{' '}
-        <code>DEEPSEEK_API_KEY</code>{' '}
+        <code>GEMINI_API_KEY</code>（或 <code>DEEPSEEK_API_KEY</code> 等）{' '}
         后方能真正生成正文；确定性核心（seed / bible / state / search / reviews）不受影响。
       </div>
 
@@ -1789,7 +1789,7 @@ function PipelinePanel({
         <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📋 卷规划</span>
       </div>
       <div className="ph-hint">
-        按卷大纲一次生成 ≤10 章细纲（目标/钩子/节拍，含爽点与伏笔回收安排），
+        按卷大纲一次生成 ≤10 章细纲（Gemini 4 等长输出模型 ≤30 章；目标/钩子/节拍，含爽点与伏笔回收安排），
         入库后「下一章 · 自动连写」与挂机连写按细纲驱动；已写过的章不会被覆盖。
       </div>
 

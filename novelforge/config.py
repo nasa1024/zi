@@ -28,13 +28,14 @@ class BudgetConfig:
 
 @dataclass
 class ProviderConfig:
-    provider: str = "anthropic"  # "anthropic" | "openai_compat" | "fake"
+    provider: str = "anthropic"  # "gemini" | "anthropic" | "deepseek" | "openai_compat" | "fake"
     api_key: Optional[str] = None
-    base_url: Optional[str] = None        # openai_compat 专用
+    base_url: Optional[str] = None        # openai_compat / gemini 代理端点
     fast_model: str = "claude-haiku-4-5-20251001"
     mid_model: str = "claude-sonnet-4-6"
     strong_model: str = "claude-opus-4-8"
     max_retries: int = 3
+    safety_threshold: Optional[str] = None   # gemini 专用：安全过滤阈值（None=服务端默认）
 
 
 @dataclass

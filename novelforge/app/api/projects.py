@@ -168,12 +168,11 @@ def create_project(
 @router.post("/setup/suggest", response_model=SettingSuggestResponse)
 def suggest_setting(req: SettingSuggestRequest):
     """生成 N 个情节设定候选（建项目前，无 project DB）。候选不入库，瞬态返回。"""
-    import os
     import sqlite3
 
     from ...config import NovelForgeConfig
     from ...control_plane.budget import BudgetLedger, CircuitTripped
-    from ...control_plane.llm.runtime import build_configured_gateway
+    from ...control_plane.llm.runtime import apply_provider_env, build_configured_gateway
     from ...control_plane.skill_base import SkillContext
     from ...skills.setting_gen_skill import SettingGenSkill
 
@@ -182,13 +181,10 @@ def suggest_setting(req: SettingSuggestRequest):
     except WritingProfileError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     cfg = NovelForgeConfig(project_id="setup", db_path="")
+    apply_provider_env(cfg)
     degraded = False
-    if api_key:
-        cfg.provider.api_key = api_key
-        cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
-    else:
+    if cfg.provider.provider == "fake" or not cfg.provider.api_key:
         cfg.provider.provider = "fake"      # 无 key 降级（同 cold_start）
         degraded = True
 

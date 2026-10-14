@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setenv("NOVELFORGE_DATA", str(tmp_path))
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("NOVELFORGE_API_KEY", raising=False)
     import novelforge.app.deps as deps_mod
     import novelforge.app.autopilot_manager as ap_mod

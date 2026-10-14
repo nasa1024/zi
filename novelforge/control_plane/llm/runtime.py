@@ -33,6 +33,97 @@ def build_configured_gateway(
     return llm_factory.build_gateway(cfg, ledger)
 
 
+def resolve_provider_env() -> tuple[Optional[str], Optional[str]]:
+    """Resolve ``(provider, api_key)`` from the process env without cross-wiring.
+
+    An explicit ``NOVELFORGE_PROVIDER`` is only ever paired with its own key.
+    Without one, the provider is inferred from the available keys; Gemini wins
+    because it is the default creative model family.  ``GOOGLE_API_KEY`` is
+    too generic to drive inference and is only honoured for explicit Gemini.
+    Returns ``(None, None)`` when nothing is configured.
+    """
+    requested = os.environ.get("NOVELFORGE_PROVIDER", "").strip().lower()
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+
+    if requested == "fake":
+        return "fake", None
+    if requested in {"gemini", "google"}:
+        return "gemini", gemini_key or os.environ.get("GOOGLE_API_KEY")
+    if requested in {"deepseek", "deepseek_anthropic"}:
+        return requested, deepseek_key
+    if requested == "anthropic":
+        return "anthropic", anthropic_key
+    if requested in {"openai", "openai_compat"}:
+        return "openai_compat", openai_key
+    if requested:
+        # Keep an explicit unsupported provider visible to the factory instead
+        # of silently pairing it with whichever unrelated key happens to exist.
+        return requested, None
+    if gemini_key:
+        return "gemini", gemini_key
+    if deepseek_key:
+        return "deepseek", deepseek_key
+    if anthropic_key:
+        return "anthropic", anthropic_key
+    if openai_key:
+        return "openai_compat", openai_key
+    return None, None
+
+
+def _apply_tier_model_env(cfg: NovelForgeConfig) -> None:
+    cfg.provider.fast_model = os.environ.get(
+        "NOVELFORGE_FAST_MODEL", cfg.provider.fast_model
+    )
+    cfg.provider.mid_model = os.environ.get(
+        "NOVELFORGE_MID_MODEL", cfg.provider.mid_model
+    )
+    cfg.provider.strong_model = os.environ.get(
+        "NOVELFORGE_STRONG_MODEL", cfg.provider.strong_model
+    )
+
+
+def apply_provider_env(
+    cfg: NovelForgeConfig, *, api_key: Optional[str] = None,
+) -> None:
+    """Inject provider, credential, endpoint and tier models from the env.
+
+    ``api_key`` is a legacy explicit credential: it replaces the env key of the
+    resolved provider (``deepseek`` when the env names none).
+    """
+    provider, key = resolve_provider_env()
+    if api_key:
+        provider = provider or "deepseek"
+        if provider != "fake":
+            key = api_key
+    if provider is None:
+        return
+    cfg.provider.provider = provider
+    cfg.provider.api_key = key
+
+    if provider == "openai_compat" and key:
+        cfg.provider.base_url = (
+            os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("NOVELFORGE_OPENAI_BASE_URL")
+            or cfg.provider.base_url
+        )
+        _apply_tier_model_env(cfg)
+    elif provider == "gemini":
+        cfg.provider.base_url = (
+            os.environ.get("GEMINI_BASE_URL")
+            or os.environ.get("NOVELFORGE_GEMINI_BASE_URL")
+            or cfg.provider.base_url
+        )
+        cfg.provider.safety_threshold = (
+            os.environ.get("NOVELFORGE_GEMINI_SAFETY_THRESHOLD")
+            or cfg.provider.safety_threshold
+        )
+        # Unset tiers keep the Gemini 4 defaults chosen by the factory.
+        _apply_tier_model_env(cfg)
+
+
 def build_project_config(
     project_id: str,
     db_path: str,
@@ -43,55 +134,30 @@ def build_project_config(
     if conn is not None:
         apply_project_memory_settings(cfg, conn)
     apply_runtime_env(cfg)
-
-    requested = os.environ.get("NOVELFORGE_PROVIDER", "").strip().lower()
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
-
-    if requested == "fake":
-        cfg.provider.provider = "fake"
-        cfg.provider.api_key = None
-    elif requested in {"deepseek", "deepseek_anthropic"}:
-        cfg.provider.provider = requested
-        cfg.provider.api_key = deepseek_key
-    elif requested == "anthropic":
-        cfg.provider.provider = "anthropic"
-        cfg.provider.api_key = anthropic_key
-    elif requested in {"openai", "openai_compat"}:
-        cfg.provider.provider = "openai_compat"
-        cfg.provider.api_key = openai_key
-    elif requested:
-        # Keep an explicit unsupported provider visible to the factory instead
-        # of silently pairing it with whichever unrelated key happens to exist.
-        cfg.provider.provider = requested
-        cfg.provider.api_key = None
-    elif deepseek_key:
-        cfg.provider.provider = "deepseek"
-        cfg.provider.api_key = deepseek_key
-    elif anthropic_key:
-        cfg.provider.provider = "anthropic"
-        cfg.provider.api_key = anthropic_key
-    elif openai_key:
-        cfg.provider.provider = "openai_compat"
-        cfg.provider.api_key = openai_key
-
-    if cfg.provider.provider == "openai_compat" and cfg.provider.api_key:
-        cfg.provider.base_url = (
-            os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("NOVELFORGE_OPENAI_BASE_URL")
-            or cfg.provider.base_url
-        )
-        cfg.provider.fast_model = os.environ.get(
-            "NOVELFORGE_FAST_MODEL", cfg.provider.fast_model
-        )
-        cfg.provider.mid_model = os.environ.get(
-            "NOVELFORGE_MID_MODEL", cfg.provider.mid_model
-        )
-        cfg.provider.strong_model = os.environ.get(
-            "NOVELFORGE_STRONG_MODEL", cfg.provider.strong_model
-        )
+    apply_provider_env(cfg)
     return cfg
+
+
+DEFAULT_PLANNING_HORIZON = 10        # 普通模型：单次规划 ≤10 章防输出截断
+LONG_OUTPUT_PLANNING_HORIZON = 30    # 长输出模型（Gemini 4 long decode）：单次 ≤30 章
+
+
+def max_planning_horizon(cfg: NovelForgeConfig) -> int:
+    """Chapters one volume-planning call may cover for the configured model.
+
+    The legacy 10-chapter window exists only to avoid truncated plan JSON.
+    Models that report ``long_output`` (Gemini 4 continues past the per-request
+    cap server-side) can plan a much larger slice of a volume in one pass.
+    """
+    try:
+        provider = llm_factory.build_provider(cfg.provider)
+        strong = llm_factory._model_map(cfg.provider)["strong"]
+        caps = provider.capabilities(strong)
+    except Exception:
+        return DEFAULT_PLANNING_HORIZON
+    if getattr(caps, "long_output", False):
+        return LONG_OUTPUT_PLANNING_HORIZON
+    return DEFAULT_PLANNING_HORIZON
 
 
 def build_project_gateway(

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 import queue as _queue
 import threading
 import time
@@ -409,12 +408,12 @@ class AutopilotManager:
                 _n_cands = getattr(req, "n_candidates", 1) or 1
                 if _n_cands > 1:
                     cfg.candidates.n_candidates = max(1, min(3, _n_cands))
-                if api_key:
-                    cfg.provider.api_key = api_key
-                    cfg.provider.provider = os.environ.get("NOVELFORGE_PROVIDER", "deepseek")
                 from ..config import apply_project_memory_settings, apply_runtime_env
+                from ..control_plane.llm.runtime import apply_provider_env
                 apply_project_memory_settings(cfg, conn)
                 apply_runtime_env(cfg)   # env 覆盖项目记忆设置（运维优先级最高）
+                # 与 build_project_config 同序：provider 端点不得充当 embedding 回退端点
+                apply_provider_env(cfg, api_key=api_key)
 
                 gw = build_configured_gateway(cfg)
                 reg = SkillRegistry()

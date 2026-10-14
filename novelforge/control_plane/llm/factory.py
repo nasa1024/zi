@@ -25,6 +25,18 @@ DEEPSEEK_MODELS = {
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
+# Gemini 4 预置：三档同为 gemini-4-argon，以思考强度（thinkingLevel）区分档位——
+# 失败升级 fast→mid→strong 即"同模型加深推理"。可用 NOVELFORGE_*_MODEL 覆盖，
+# 例如 NOVELFORGE_FAST_MODEL=gemini-3.8-flash 让摘要类小任务走更便宜的模型。
+GEMINI_MODELS = {
+    "fast":   "gemini-4-argon@low",
+    "mid":    "gemini-4-argon@medium",
+    "strong": "gemini-4-argon@high",
+}
+
+# ProviderConfig 的默认（Claude）模型 ID：Gemini 下视为"未指定"
+_DEFAULT_PROVIDER_CONFIG = ProviderConfig()
+
 
 def build_provider(pc: ProviderConfig) -> LLMProvider:
     """根据 ProviderConfig 实例化对应 provider。"""
@@ -54,6 +66,15 @@ def build_provider(pc: ProviderConfig) -> LLMProvider:
         from .openai_compat_provider import OpenAICompatProvider
         return OpenAICompatProvider(api_key=pc.api_key, base_url=pc.base_url)
 
+    elif p == "gemini":
+        # 标准库 REST 实现（long decode 续接 / 思考强度），无需额外 SDK
+        from .gemini_provider import GeminiProvider
+        return GeminiProvider(
+            api_key=pc.api_key,
+            base_url=pc.base_url,
+            safety_threshold=pc.safety_threshold,
+        )
+
     elif p == "fake":
         from .fake_provider import FakeProvider
         return FakeProvider()
@@ -61,13 +82,20 @@ def build_provider(pc: ProviderConfig) -> LLMProvider:
     else:
         raise ValueError(
             f"未知 provider: {pc.provider!r}。"
-            f"支持: anthropic / deepseek_anthropic / deepseek / openai_compat / fake"
+            f"支持: gemini / anthropic / deepseek_anthropic / deepseek / openai_compat / fake"
         )
 
 
 def _model_map(pc: ProviderConfig) -> dict[str, str]:
     """将三档 tier 映射为具体 model ID。"""
     p = pc.provider.lower()
+    if p == "gemini":
+        base = dict(GEMINI_MODELS)
+        for tier in ("fast", "mid", "strong"):
+            chosen = getattr(pc, f"{tier}_model")
+            if chosen and chosen != getattr(_DEFAULT_PROVIDER_CONFIG, f"{tier}_model"):
+                base[tier] = chosen
+        return base
     if p == "deepseek":
         base = dict(DEEPSEEK_MODELS)
     else:

@@ -466,7 +466,7 @@ class ForeshadowHealth(BaseModel):
 
 class VolumePlanRequest(BaseModel):
     from_chapter: Optional[int] = None   # 缺省 = max(卷起始章, 已完成最大章+1)
-    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章
+    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章（长输出模型 ≤30 章）
 
 
 class PlannedBeat(BaseModel):

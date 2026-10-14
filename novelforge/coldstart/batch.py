@@ -457,10 +457,10 @@ class ColdStartJobManager:
              auto_promote_low_risk: bool, max_concurrency: int,
              api_key: Optional[str]) -> None:
         from concurrent.futures import ThreadPoolExecutor
-        import os
 
         from ..control_plane.budget import BudgetLedger
         from ..control_plane.llm.runtime import (
+            apply_provider_env,
             build_configured_gateway,
             build_project_config,
         )
@@ -484,10 +484,7 @@ class ColdStartJobManager:
             # including OpenAI-compatible deployments.  An explicit legacy
             # argument still wins; otherwise preserve that resolved provider.
             if api_key:
-                cfg.provider.api_key = api_key
-                cfg.provider.provider = os.environ.get(
-                    "NOVELFORGE_PROVIDER", "deepseek",
-                )
+                apply_provider_env(cfg, api_key=api_key)
             elif not cfg.provider.api_key:
                 cfg.provider.provider = "fake"
             gw = build_configured_gateway(cfg, ledger=BudgetLedger())
