@@ -876,6 +876,7 @@ export interface ForeshadowHealth {
   oldest_overdue_chapter?: number | null;
   due_soon: { label: string; due_chapter: number }[];
   status: 'green' | 'yellow' | 'red' | string;
+  dormant_count?: number;  // v22/F1: 已休眠的读者可见长/短线承诺数
 }
 
 // M8: Autopilot 进度 SSE 事件
