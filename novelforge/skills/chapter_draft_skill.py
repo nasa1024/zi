@@ -15,6 +15,7 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..control_plane.llm.tiers import ModelTier
+from ..planning.contract_fields import normalize_witnesses
 from ..writing_profiles import compile_system_prompt, get_project_writing_profile
 
 
@@ -239,7 +240,9 @@ def _fmt_beats(beats: list[dict]) -> str:
         sm = b.get("summary", "")
         va = b.get("value_axis", "")
         line = f"  {i}. [{bt}] {sm} (value_axis: {va})"
-        witnesses = [str(w) for w in (b.get("witnesses") or []) if str(w).strip()]
+        # LLM 常把 witnesses 回成 "王长老、赵师兄" 这类分隔字符串；统一走
+        # normalize_witnesses，避免逐字符展开
+        witnesses = normalize_witnesses(b.get("witnesses"))
         if witnesses:
             # v22/F5：必须对本 beat 作出可见反应的在场角色
             line += f" (witnesses: {', '.join(witnesses)})"

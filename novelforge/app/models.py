@@ -384,6 +384,7 @@ class PipelineRunRecord(BaseModel):
     quality_score: Optional[float] = None  # M5-⑦
     tokens_spent: Optional[int] = None     # 逐章成本（v11）
     usd_spent: Optional[float] = None
+    batch_id: Optional[str] = None         # v22/F6: 多章连写批次；单章流程为 None
 
 
 class PipelineRunDetail(PipelineRunRecord):
@@ -401,6 +402,9 @@ class PipelineRunDetail(PipelineRunRecord):
     recommended_plan_action: Optional[
         Literal["keep", "patch", "replan", "pause"]
     ] = None
+    # v22/F4: 质量门结论 {low, reasons, mode, gate_mode, min_score, dimension_min}
+    quality_gate: Optional[dict] = None
+    judge_disagreement: Optional[bool] = None  # 评委正反两序胜者不一致（None=未做两序校验）
 
 
 class CandidateInfo(BaseModel):

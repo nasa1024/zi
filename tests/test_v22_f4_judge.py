@@ -567,6 +567,27 @@ class TestStats:
         assert body["judge_runs"] == 0
         assert body["judge_disagreement_rate"] is None
 
+    def test_malformed_or_odd_detail_json_degrades_to_defaults(self, client, project):
+        conn = _open_conn(project)
+        conn.execute(
+            "INSERT INTO pipeline_run(run_id, chapter, project_id, status, quality_score,"
+            " detail_json, started_at) VALUES('bad', 1, ?, 'completed', 4.0, ?, ?)",
+            (project, '{"judge_disagreement": tru', "2026-06-01T00:00:01"),
+        )
+        self._seed(conn, project, "odd", 2, 9.0,
+                   {"judge_disagreement": 1, "quality_gate": "strict",
+                    "quality_dimensions": ["hook", 2]})
+        conn.commit()
+        conn.close()
+
+        r = client.get(f"/v1/{project}/pipeline/stats")
+        assert r.status_code == 200, r.text
+        by_ch = {s["chapter"]: s for s in r.json()["series"]}
+        # 非法 JSON / 非对象字段 → 默认 QualityConfig 旧口径、未做两序校验
+        assert by_ch[1]["quality_low"] is True and by_ch[1]["judge_disagreement"] is None
+        assert by_ch[2]["quality_low"] is False and by_ch[2]["judge_disagreement"] is None
+        assert r.json()["judge_runs"] == 0
+
 
 # ── 6. 人工换稿后质量门随之复算 ─────────────────────────────────────────────
 
@@ -603,6 +624,12 @@ class TestSelectCandidateRefreshesGate:
             conn.close()
         assert detail["quality_gate"]["low"] is True
         assert detail["quality_gate"]["reasons"] == ["hook 3<5"]
+        # 换稿响应与运行详情都暴露复算后的质量门结论
+        assert r.json()["quality_gate"]["reasons"] == ["hook 3<5"]
+        run = client.get(f"/v1/{project}/pipeline/runs/{outcome.run_id}").json()
+        assert run["quality_gate"]["low"] is True
+        assert run["quality_gate"]["reasons"] == ["hook 3<5"]
+        assert run["batch_id"] is None
         body = client.get(f"/v1/{project}/pipeline/stats").json()
         assert body["series"][0]["quality_low"] is True
         assert body["low_quality_count"] == 1

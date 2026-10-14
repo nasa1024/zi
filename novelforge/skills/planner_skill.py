@@ -140,6 +140,7 @@ class PlannerSkill:
         beats = result.value if result.value is not None else _parse_beats(
             resp.text, content_language=profile["content_language"]
         )
+        _canonicalize_witnesses(beats)
         ctx.workspace["beats"] = beats
         ctx.workspace["planner_raw"] = resp.text
         ctx.workspace["planner_tier_used"] = result.tier_used
@@ -195,6 +196,19 @@ def _parse_beats_strict(
             " ".join(str(b.get("summary") or "") for b in beats), content_language
         ):
             return None
+    return _canonicalize_witnesses(beats)
+
+
+def _canonicalize_witnesses(beats: list) -> list:
+    """v22/F5：把 beat 的 witnesses 规整为名字列表（LLM 常回分隔字符串）。
+
+    仅处理带 witnesses 键的 dict beat，原地修改并返回同一列表。
+    """
+    from ..planning.contract_fields import normalize_witnesses
+
+    for b in beats or []:
+        if isinstance(b, dict) and "witnesses" in b:
+            b["witnesses"] = normalize_witnesses(b.get("witnesses"))
     return beats
 
 

@@ -924,6 +924,13 @@ class TestBatchApi:
         assert body["next_chapter"] == 3 and body["batch_tokens"] > 0
         assert script.batch_calls == [[1, 2]]
         assert client.get(f"/v1/{project}/pipeline/next").json()["next_chapter"] == 3
+        # 运行历史/详情可按批次归组
+        runs = client.get(f"/v1/{project}/pipeline/runs").json()
+        assert {r["chapter"]: r["batch_id"] for r in runs} == {
+            1: body["batch_id"], 2: body["batch_id"]}
+        run1 = client.get(
+            f"/v1/{project}/pipeline/runs/{body['chapters'][0]['run_id']}").json()
+        assert run1["batch_id"] == body["batch_id"]
 
         listing = client.get(f"/v1/{project}/pipeline/batches").json()
         assert len(listing) == 1 and listing[0]["batch_id"] == body["batch_id"]
@@ -941,6 +948,26 @@ class TestBatchApi:
         assert client.post(f"/v1/{project}/pipeline/batch",
                            json={"chapters": 31}).status_code == 422
         assert client.post("/v1/nope/pipeline/batch", json={}).status_code == 404
+
+    def test_sync_batch_propagates_http_errors(self, client, project, monkeypatch):
+        """run_batch 内部抛 HTTPException → 原样返回 HTTP 状态，而不是 200 + failed。"""
+        import novelforge.control_plane.batch as batch_mod
+        from fastapi import HTTPException
+
+        def boom(*_a, **_k):
+            raise HTTPException(404, "项目不存在: gone")
+
+        monkeypatch.setattr(batch_mod, "run_batch", boom)
+        r = client.post(f"/v1/{project}/pipeline/batch", json={"chapters": 2})
+        assert r.status_code == 404, r.text
+
+        def crash(*_a, **_k):
+            raise RuntimeError("pipeline exploded")
+
+        monkeypatch.setattr(batch_mod, "run_batch", crash)
+        r = client.post(f"/v1/{project}/pipeline/batch", json={"chapters": 2})
+        assert r.status_code == 200
+        assert r.json()["status"] == "failed" and "pipeline exploded" in r.json()["error"]
 
     def test_stream_event_order(self, client, project, monkeypatch):
         _patch_api(monkeypatch, LongFake(factory=Script()))

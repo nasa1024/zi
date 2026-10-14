@@ -1137,8 +1137,13 @@ class Orchestrator:
         verdict = evaluate_quality(score, dims, qcfg)
         craft_warns = [i for i in ctx.workspace.get("craft_issues", [])
                        if i.get("severity") == "warn"]
+        # v22：扩展检查（承诺账本/天降外挂/极性/爽点反应）的 warn 是情节层提示
+        # （advisory），稳态长篇几乎每章都有；它们照常进 outcome.issues，润色触发时
+        # 也一并交给润色，但不计入"≥3 warn 才润色"的阈值——否则每章都多一轮 MID
+        # 润色+复评，且平分时 STRONG 初稿被 MID 改写稿替换。
+        polish_trigger_warns = [i for i in craft_warns if not i.get("advisory")]
         need_polish = (qcfg.polish_enabled and not hard_blocks and
-                       (verdict.low or len(craft_warns) >= 3))
+                       (verdict.low or len(polish_trigger_warns) >= 3))
         if need_polish:
             old_draft = ctx.workspace.get("draft_text", "")
             old_craft = list(ctx.workspace.get("craft_issues", []))

@@ -59,6 +59,9 @@ class CraftIssue:
     repair_scope: str = "local"
     category: str = ""
     source: str = "craft"
+    # v22：扩展检查（承诺账本/天降外挂/极性/爽点反应）的情节层提示——照常报告，
+    # 但不计入质量 pass 的"≥3 craft warn → 润色"阈值（润色不改情节，修不了缺席类问题）
+    advisory: bool = False
 
 
 class CraftCheckSkill:
@@ -131,7 +134,7 @@ class CraftCheckSkill:
             issues.append(CraftIssue(
                 check=raw["check"], severity=raw["severity"], detail=raw["detail"],
                 span=raw["span"], fix=raw["fix"], repair_scope=raw["repair_scope"],
-                category=raw["category"],
+                category=raw["category"], advisory=True,
             ))
 
         ctx.workspace["craft_issues"] = [_issue_dict(i) for i in issues]
@@ -298,7 +301,8 @@ def _issue_dict(i: CraftIssue) -> dict:
             # P1#8 findings 字段（旧字段保留，只增不删）
             "category": i.category or f"craft.{i.check}",
             "issue": i.detail, "evidence": i.span,
-            "fix": i.fix, "repair_scope": i.repair_scope, "source": i.source}
+            "fix": i.fix, "repair_scope": i.repair_scope, "source": i.source,
+            "advisory": i.advisory}
 
 
 def _writing_profile(ctx: SkillContext) -> Mapping[str, Any]:

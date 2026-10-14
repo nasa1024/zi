@@ -282,6 +282,7 @@ export interface PipelineRunRecord {
   quality_score?: number | null;
   tokens_spent?: number | null;   // 逐章成本（v11）
   usd_spent?: number | null;
+  batch_id?: string | null;       // v22/F6: 多章连写批次；单章流程为 null
 }
 
 // M7: 补丁式修订统计（kind: revise | polish）
@@ -313,6 +314,15 @@ export interface PipelineRunDetail extends PipelineRunRecord {
   } | null;
   alignment_report?: AlignmentReport | null;
   recommended_plan_action?: PlanAction | null;
+  quality_gate?: {                     // v22/F4: 质量门结论（含当时阈值）
+    low: boolean;
+    reasons: string[];                 // 未过线项，如 "hook 4<5"
+    mode: string;
+    gate_mode?: string;
+    min_score?: number;
+    dimension_min?: Record<string, number>;
+  } | null;
+  judge_disagreement?: boolean | null; // v22/F4: 评委正反两序胜者不一致（null=未做两序校验）
 }
 
 // v16: Choice-driven Author Agent

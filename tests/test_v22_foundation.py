@@ -1,6 +1,8 @@
 """v22 foundation: contract fields, extension registry and prompt plumbing."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from novelforge.craft import extensions
@@ -100,6 +102,27 @@ class TestRendering:
         ])
         assert "(witnesses: 王长老)" in text
         assert "黑影" in text and text.count("witnesses") == 1
+
+    def test_fmt_beats_splits_string_witnesses_by_name(self):
+        # LLM 常把 witnesses 回成分隔字符串：必须按名字拆，而不是逐字符展开
+        text = _fmt_beats([
+            {"beat_type": "payoff_beat", "summary": "打脸", "value_axis": "x",
+             "witnesses": "王长老、赵师兄"},
+        ])
+        assert "(witnesses: 王长老, 赵师兄)" in text
+        assert "王, 长" not in text
+
+    def test_planner_parse_canonicalizes_string_witnesses(self):
+        from novelforge.skills.planner_skill import _parse_beats_strict
+
+        beats = _parse_beats_strict(json.dumps([
+            {"beat_type": "payoff_beat", "summary": "当众打脸",
+             "witnesses": "王长老、赵师兄"},
+            {"beat_type": "hook", "summary": "黑影"},
+        ], ensure_ascii=False))
+        assert beats is not None
+        assert beats[0]["witnesses"] == ["王长老", "赵师兄"]
+        assert "witnesses" not in beats[1]
 
 
 class TestExtensionRegistry:

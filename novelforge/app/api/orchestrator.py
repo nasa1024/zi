@@ -311,6 +311,9 @@ def pipeline_batch(
             interaction_mode=req.interaction_mode,
         )
         return BatchRunResponse(**outcome.to_summary())
+    except HTTPException:
+        # 404/409 等协议错误照常以 HTTP 状态返回，不包装成 200 + status=failed
+        raise
     except Exception as e:
         return _batch_error_response(start, str(e))
     finally:
@@ -540,34 +543,45 @@ def _payoff_closed_chapters(conn) -> set[int]:
     return closed
 
 
-def _stat_signals(raw_detail, score, default_qcfg) -> tuple:
-    """v22/F4：从 detail_json 复算本章质量门结论 + 读取评委两序一致性。
+# v22/F4：看板只需 detail_json 的三个子字段；在 SQL 里抽取，避免逐章 json.loads 整个
+# detail_json（含全部候选正文，多候选长篇每次刷新要解析数十 MB）。非法 JSON → NULL。
+_STAT_DETAIL_COLUMNS = (
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_extract(pr.detail_json, '$.quality_gate') END AS gate_json,"
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_extract(pr.detail_json, '$.quality_dimensions') END AS dims_json,"
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_type(pr.detail_json, '$.judge_disagreement') END AS judge_type"
+)
+
+
+def _json_fragment(raw):
+    """json_extract 抽出的对象/数组是 JSON 文本；解析失败或非文本 → None。"""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _stat_signals(gate_json, dims_json, judge_type, score, default_qcfg) -> tuple:
+    """v22/F4：从 detail_json 子字段复算本章质量门结论 + 读取评委两序一致性。
 
     质量门按该 run 落库的阈值（detail_json["quality_gate"]）复算，换稿后分数/维度
     更新也随之生效；旧数据无 quality_gate 时用默认 QualityConfig（无维度分 → 旧口径
-    score < min_score）。Returns (quality_low|None, reasons, judge_disagreement|None)。
+    score < min_score）。入参为 ``_STAT_DETAIL_COLUMNS`` 抽出的三列。
+    Returns (quality_low|None, reasons, judge_disagreement|None)。
     """
     from ...craft.quality_gate import MODE_UNSCORED, evaluate_quality
 
-    detail: dict = {}
-    if raw_detail:
-        try:
-            parsed = _json.loads(raw_detail)
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            detail = parsed
-    gate_cfg = detail.get("quality_gate")
+    gate_cfg = _json_fragment(gate_json)
     if not isinstance(gate_cfg, dict):
         gate_cfg = default_qcfg
-    verdict = evaluate_quality(score, detail.get("quality_dimensions"), gate_cfg)
+    verdict = evaluate_quality(score, _json_fragment(dims_json), gate_cfg)
     quality_low = None if verdict.mode == MODE_UNSCORED else verdict.low
-    disagreement = detail.get("judge_disagreement")
-    return (
-        quality_low,
-        list(verdict.reasons),
-        disagreement if isinstance(disagreement, bool) else None,
-    )
+    disagreement = {"true": True, "false": False}.get(judge_type)
+    return quality_low, list(verdict.reasons), disagreement
 
 
 @router.get("/{project_id}/pipeline/stats", response_model=PipelineStats)
@@ -590,7 +604,8 @@ def pipeline_stats(
     try:
         rows = conn.execute(
             "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count,"
-            "       pr.tokens_spent, pr.usd_spent, pr.detail_json"
+            "       pr.tokens_spent, pr.usd_spent,"
+            + _STAT_DETAIL_COLUMNS +
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id=? AND pr.status='completed'"
@@ -606,7 +621,8 @@ def pipeline_stats(
         series = []
         for r in rows:
             quality_low, gate_reasons, judge_disagreement = _stat_signals(
-                r["detail_json"], r["quality_score"], default_qcfg,
+                r["gate_json"], r["dims_json"], r["judge_type"],
+                r["quality_score"], default_qcfg,
             )
             series.append(ChapterStat(
                 chapter=r["chapter"], word_count=r["word_count"],
@@ -652,7 +668,8 @@ def list_pipeline_runs(
     try:
         rows = conn.execute(
             "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-            "       pr.quality_score, pr.tokens_spent, pr.usd_spent, di.word_count"
+            "       pr.quality_score, pr.tokens_spent, pr.usd_spent, pr.batch_id,"
+            "       di.word_count"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id = ?"
@@ -670,6 +687,7 @@ def list_pipeline_runs(
                 quality_score=r["quality_score"],
                 tokens_spent=r["tokens_spent"],
                 usd_spent=r["usd_spent"],
+                batch_id=r["batch_id"],
             )
             for r in rows
         ]
@@ -699,7 +717,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     row = conn.execute(
         "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
         "       pr.quality_score, pr.tokens_spent, pr.usd_spent, pr.detail_json,"
-        "       di.word_count, di.file_path"
+        "       pr.batch_id, di.word_count, di.file_path"
         " FROM pipeline_run pr"
         " LEFT JOIN draft_index di ON di.id = pr.draft_id"
         " WHERE pr.run_id = ? AND pr.project_id = ?",
@@ -726,6 +744,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     plan_reconcile = None
     alignment_report = None
     recommended_plan_action = None
+    quality_gate = None
+    judge_disagreement = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
@@ -738,6 +758,10 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
             plan_reconcile = detail.get("plan_reconcile")
             alignment_report = detail.get("alignment_report")
             recommended_plan_action = detail.get("recommended_plan_action")
+            if isinstance(detail.get("quality_gate"), dict):
+                quality_gate = detail["quality_gate"]
+            if isinstance(detail.get("judge_disagreement"), bool):
+                judge_disagreement = detail["judge_disagreement"]
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             continuity_blocks = detail.get("continuity_blocks") or []
@@ -783,6 +807,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         quality_score=row["quality_score"],
         tokens_spent=row["tokens_spent"],
         usd_spent=row["usd_spent"],
+        batch_id=row["batch_id"],
         draft_text=draft_text,
         candidates=candidates,
         winner_index=winner_index,
@@ -794,6 +819,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         plan_reconcile=plan_reconcile,
         alignment_report=alignment_report,
         recommended_plan_action=recommended_plan_action,
+        quality_gate=quality_gate,
+        judge_disagreement=judge_disagreement,
     )
 
 
@@ -819,6 +846,7 @@ def select_candidate(
     )
     from ...control_plane.skill_base import SkillContext
     from ...control_plane.skill_registry import SkillRegistry
+    from ...craft.extensions import settle_steps
     from ...craft.pacing import PacingController
     from ...craft.quality_gate import evaluate_quality, verdict_detail
     from ...memory.l1_atoms import persist_proposal_atoms
@@ -1120,6 +1148,25 @@ def select_candidate(
                 "recommended_plan_action"
             ]
             detail["chapter_actuals_id"] = alignment.actuals_id
+            # v22：特性扩展的确定性结算随换稿重跑（极性/游标按新稿 actuals 重算、
+            # 爽点反应覆盖率与承诺提醒按新稿重报）。各步均为按章 upsert/只读，可重复；
+            # 单步失败只记入报告，不影响已落袋的换稿。
+            settle_workspace = {
+                "draft_text": chosen_text,
+                "beats": validation_beats,
+                "plan_context": plan_context,
+                "chapter_actuals": alignment.actuals,
+                "writing_profile": writing_profile,
+            }
+            extensions: dict = {}
+            for ext_name, ext_settle in settle_steps():
+                try:
+                    extensions[ext_name] = ext_settle(
+                        conn, chapter, settle_workspace, gateway=gateway, cfg=cfg,
+                    ) or {}
+                except Exception as e:
+                    extensions[ext_name] = {"error": f"{type(e).__name__}: {e}"}
+            detail["extensions"] = extensions
             if validation.get("quality_score") is not None:
                 detail["quality_dimensions"] = (
                     validation.get("quality") or {}

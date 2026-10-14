@@ -892,3 +892,68 @@ class TestApiAndPipeline:
             assert not [i for i in outcome.issues if i.get("check") == "polarity_turn"]
         finally:
             conn.close()
+
+    def test_manual_candidate_swap_resettles_polarity(self, client, project, monkeypatch):
+        """人工换稿后 pacing_state / 游标 / extensions 报告按新稿重算，而非沿用自动胜者。"""
+        import novelforge.control_plane.llm.runtime as runtime_mod
+        from novelforge.control_plane.budget import BudgetLedger
+        from novelforge.control_plane.llm.fake_provider import FakeProvider
+        from novelforge.control_plane.llm.gateway import LLMGateway
+
+        beats = [
+            {"beat_type": "setup", "summary": "林动被困在血色秘境", "value_axis": "平静→危机"},
+            {"beat_type": "turn", "summary": "林动识破长老的阴谋", "value_axis": "绝境→翻盘"},
+            {"beat_type": "hook", "summary": "神秘人现身", "value_axis": "悬念↑"},
+        ]
+        up = ("林动被困在血色秘境。" + "风声呜咽，石壁渗血。" * 40
+              + "林动识破长老的阴谋。" + "众人哗然。" * 40 + "神秘人现身。")
+        down = ("林动被困在血色秘境。" + "风声呜咽，石壁渗血。" * 40
+                + "他只能咬牙苦撑。" + "寒意彻骨。" * 40 + "神秘人现身。")
+        beats_json = json.dumps(beats, ensure_ascii=False)
+
+        def factory(messages, model="", temperature=1.0):
+            user = str(messages[-1].content) if messages else ""
+            if "规划任务" in user:
+                return beats_json
+            if "本章任务" in user:
+                idx = round((1.0 - temperature) / 0.15)
+                return f"```draft\n{up if idx == 0 else down}\n```\n```proposals\n[]\n```"
+            return "[]"
+
+        orch, _ = _orch(project, factory)
+        orch._cfg.candidates.n_candidates = 3
+        conn = _open(project)
+        try:
+            outcome = orch.generate_chapter(1, conn, chapter_goal="破局")
+            assert outcome.ok, outcome.error
+            winner = json.loads(conn.execute(
+                "SELECT detail_json FROM pipeline_run WHERE run_id=?", (outcome.run_id,)
+            ).fetchone()[0])["winner"]
+            before = conn.execute("SELECT polarity FROM pacing_state WHERE chapter=1").fetchone()
+        finally:
+            conn.close()
+        expected_before = "+" if winner == 0 else "-"
+        assert before["polarity"] == expected_before
+        swap_to, expected = (1, "-") if winner == 0 else (0, "+")
+
+        monkeypatch.setattr(
+            runtime_mod, "build_project_gateway",
+            lambda *a, **k: LLMGateway(FakeProvider(factory=lambda *a, **k: "[]"),
+                                       BudgetLedger(max_tokens=10_000_000, max_usd=100.0)),
+        )
+        r = client.post(f"/v1/{project}/pipeline/runs/{outcome.run_id}/select-candidate",
+                        json={"candidate_index": swap_to})
+        assert r.status_code == 200, r.text
+        conn = _open(project)
+        try:
+            rows = conn.execute("SELECT polarity FROM pacing_state").fetchall()
+            assert [row["polarity"] for row in rows] == [expected]
+            assert _cursor(conn)["last_polarity"] == expected
+            detail = json.loads(conn.execute(
+                "SELECT detail_json FROM pipeline_run WHERE run_id=?", (outcome.run_id,)
+            ).fetchone()[0])
+        finally:
+            conn.close()
+        assert detail["winner"] == swap_to
+        assert detail["extensions"]["polarity"]["polarity"] == expected
+        assert set(detail["extensions"]) >= {"polarity", "promise_ledger", "payoff_reactions"}

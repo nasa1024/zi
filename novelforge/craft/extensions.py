@@ -11,7 +11,9 @@ lives in its own module under ``novelforge.craft`` and may define any of:
     repair_scope ('local'|'structural'), category``.  Must tolerate missing
     workspace keys (the governance API runs the skill with only draft/beats)
     and old databases.  Prefer ``warn``: a remaining ``block`` counts toward
-    autopilot degradation.
+    autopilot degradation.  ``CraftCheckSkill`` marks every extension issue
+    ``advisory``: it is reported as usual but does not count toward the
+    quality pass's "≥3 craft warns → polish" trigger.
 
 ``draft_brief(conn, chapter, workspace, *, language, cfg) -> str``
     A short dynamic prompt block computed before planning/drafting a chapter

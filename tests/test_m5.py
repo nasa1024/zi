@@ -166,6 +166,67 @@ class TestQualityGate:
                         if "工艺问题" in str(c["messages"][-1].content)]
         assert not polish_calls
 
+    def test_extension_warns_do_not_trigger_polish(self, client, project):
+        """v22：≥3 条扩展 warn（承诺休眠等情节层提示）+ 高分 → 不润色，warn 照常报告。"""
+        conn = _open_conn(project)
+        try:
+            for i in range(3):
+                conn.execute(
+                    "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
+                    " line_type, visibility) VALUES(?,?,?,'planted',1,'long','reader')",
+                    (f"fs_quiet{i}", f"血仇{i}", f"灭门真凶{i}仍未现身"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        orch, fake = self._build_orch(project, scores=['{"score": 9.0}'])
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(12, conn)
+            assert outcome.ok, outcome.error
+        finally:
+            conn.close()
+        dormant = [i for i in outcome.issues if i.get("check") == "promise_dormant"]
+        assert len(dormant) >= 3
+        assert all(i["severity"] == "warn" and i["advisory"] for i in dormant)
+        assert outcome.quality_score == 9.0
+        polish_calls = [c for c in fake.calls
+                        if "工艺问题" in str(c["messages"][-1].content)
+                        or "润色补丁任务" in str(c["messages"][-1].content)]
+        assert not polish_calls
+        score_calls = [c for c in fake.calls if "本章目标" in str(c["messages"][-1].content)]
+        assert len(score_calls) == 1
+        assert "润色后正文" not in outcome.draft_text
+
+    def test_low_score_polish_still_sees_extension_warns(self, client, project):
+        """低分仍触发润色；扩展 warn 作为待解决问题一并交给润色。"""
+        conn = _open_conn(project)
+        try:
+            for i in range(3):
+                conn.execute(
+                    "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
+                    " line_type, visibility) VALUES(?,?,?,'planted',1,'long','reader')",
+                    (f"fs_quiet{i}", f"血仇{i}", f"灭门真凶{i}仍未现身"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        orch, fake = self._build_orch(
+            project, scores=['{"score": 4.0}', '{"score": 8.0}'],
+        )
+        conn = _open_conn(project)
+        try:
+            outcome = orch.generate_chapter(12, conn)
+            assert outcome.ok, outcome.error
+        finally:
+            conn.close()
+        polish_prompts = [str(c["messages"][-1].content) for c in fake.calls
+                          if "工艺问题" in str(c["messages"][-1].content)
+                          or "润色补丁任务" in str(c["messages"][-1].content)]
+        assert polish_prompts
+        assert any("血仇0" in p for p in polish_prompts)
+        assert outcome.quality_score == 8.0
+
     def test_disabled_zero_extra_calls(self, client, project):
         orch, fake = self._build_orch(project, scores=[], quality_enabled=False)
         conn = _open_conn(project)
