@@ -124,6 +124,16 @@ class CraftCheckSkill:
                 check_english_quality(draft_text, writing_profile)
             ))
 
+        # ⑩ v22 特性扩展检查（承诺账本 / 天降外挂 / 极性序列 / 爽点反应），
+        # 见 craft/extensions.py：各自隔离、只读、默认 warn。
+        from ..craft.extensions import run_craft_checks
+        for raw in run_craft_checks(ctx):
+            issues.append(CraftIssue(
+                check=raw["check"], severity=raw["severity"], detail=raw["detail"],
+                span=raw["span"], fix=raw["fix"], repair_scope=raw["repair_scope"],
+                category=raw["category"],
+            ))
+
         ctx.workspace["craft_issues"] = [_issue_dict(i) for i in issues]
         blocks = [i for i in issues if i.severity == "block"]
 
@@ -187,7 +197,8 @@ def _check_beat_contract(beats: list[dict]) -> list[CraftIssue]:
     if len(beats) < 2:
         issues.append(CraftIssue(check="beat_contract", severity="block",
                                   detail=f"beats 数量={len(beats)}，至少需要 2 条"))
-    valid_types = {"setup", "turn", "payoff_beat", "tension_point", "hook"}
+    from ..planning.contract_fields import BEAT_TYPES
+    valid_types = set(BEAT_TYPES)
     for i, b in enumerate(beats):
         bt = b.get("beat_type")
         if bt not in valid_types:

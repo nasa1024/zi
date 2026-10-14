@@ -730,7 +730,7 @@ class TestMigrationV17:
 
         conn = init_db(tmp_path / "agent-v16.db")
         try:
-            assert SCHEMA_VERSION == "21"
+            assert SCHEMA_VERSION == "22"
             for table in (
                 "story_plans",
                 "story_arcs",

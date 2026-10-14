@@ -352,6 +352,14 @@ CREATE TABLE IF NOT EXISTS foreshadow (
     last_advanced_chapter INTEGER,                 -- v12: 最近实质推进章
     origin          TEXT NOT NULL DEFAULT 'manual',-- v12: manual=人工建档 settle=结算仲裁自动建档
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v22/F1 读者承诺账本：承诺类型（MICE/线索/誓约…）、长短线、读者可见性、嵌套父承诺、提醒周期
+    promise_kind    TEXT,
+    line_type       TEXT NOT NULL DEFAULT 'long'
+                        CHECK(line_type IN ('long','short','micro')),
+    visibility      TEXT NOT NULL DEFAULT 'reader'
+                        CHECK(visibility IN ('reader','hidden')),
+    parent_id       TEXT REFERENCES foreshadow(id),
+    remind_every    INTEGER CHECK(remind_every IS NULL OR remind_every >= 1),
     FOREIGN KEY(related_entity_id) REFERENCES entities(id)
 );
 CREATE INDEX IF NOT EXISTS idx_fs_state ON foreshadow(state);
@@ -373,7 +381,8 @@ CREATE TABLE IF NOT EXISTS beats (
     chapter         INTEGER NOT NULL,
     seq             INTEGER NOT NULL,
     beat_type       TEXT NOT NULL
-                        CHECK(beat_type IN ('setup','turn','payoff_beat','tension_point','hook')),
+                        CHECK(beat_type IN ('setup','turn','payoff_beat','tension_point',
+                                            'aftermath','hook')),   -- v22: +aftermath（余韵）
     summary         TEXT NOT NULL,
     value_start     TEXT,
     value_end       TEXT,
@@ -387,6 +396,7 @@ CREATE TABLE IF NOT EXISTS beats (
     status          TEXT NOT NULL DEFAULT 'planned'
                         CHECK(status IN ('planned','drafted','satisfied','dropped')),
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    witnesses_json  TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(witnesses_json)), -- v22/F5
     UNIQUE(chapter, seq),
     FOREIGN KEY(related_foreshadow_id) REFERENCES foreshadow(id)
 );
@@ -479,7 +489,10 @@ CREATE TABLE IF NOT EXISTS pacing_state (
                         CHECK(pace IS NULL OR pace IN ('slow','steady','fast','climax')),
     value_shift_net TEXT,
     notes           TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v22/F3: 本章实际转向（+ / - / ±）与转折类型（action / revelation），逐章幂等 upsert
+    polarity        TEXT CHECK(polarity IS NULL OR polarity IN ('+','-','±')),
+    turning_point   TEXT CHECK(turning_point IS NULL OR turning_point IN ('action','revelation'))
 );
 CREATE INDEX IF NOT EXISTS idx_pacing_chapter ON pacing_state(chapter);
 
@@ -490,7 +503,10 @@ CREATE TABLE IF NOT EXISTS pacing_cursor (
     kchars_since_small_payoff REAL    NOT NULL DEFAULT 0,
     buildup                   INTEGER NOT NULL DEFAULT 0,           -- 蓄力值
     recent_high_streak        INTEGER NOT NULL DEFAULT 0,
-    updated_at                TEXT    NOT NULL DEFAULT (datetime('now'))
+    updated_at                TEXT    NOT NULL DEFAULT (datetime('now')),
+    low_streak                INTEGER NOT NULL DEFAULT 0,           -- v22/F3: 连续低谷章数
+    polarity_streak           INTEGER NOT NULL DEFAULT 0,           -- v22/F3: 同向转向连续章数
+    last_polarity             TEXT                                  -- v22/F3: 上一章实际转向
 );
 
 -- 7b) 分层叙事摘要（M2-②）：章摘要 → 卷滚动摘要(volumes.rolling_summary) → 全局梗概(meta_kv)
@@ -783,10 +799,47 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     prompt_version  TEXT,
     model_id        TEXT,
     started_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at     TEXT
+    finished_at     TEXT,
+    batch_id        TEXT    -- v22/F6: 多章连写批次（draft_batches.id）；单章流程为 NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_chapter ON pipeline_run(project_id, chapter);
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_status  ON pipeline_run(status);
+
+-- 13a) v22/F6 多章连写：一次长输出调用起草连续多章，逐章校验后才进入 draft_index。
+-- 未处理/被丢弃的章节正文只留在 draft_batch_chapters，不推进 next_chapter_no。
+CREATE TABLE IF NOT EXISTS draft_batches (
+    id              TEXT PRIMARY KEY,
+    start_chapter   INTEGER NOT NULL CHECK(start_chapter >= 1),
+    end_chapter     INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running'
+                        CHECK(status IN ('running','completed','partial','failed','canceled')),
+    origin          TEXT NOT NULL DEFAULT 'api',     -- api | autopilot | agent
+    model_id        TEXT,
+    tokens_spent    INTEGER NOT NULL DEFAULT 0,
+    usd_spent       REAL    NOT NULL DEFAULT 0,
+    detail_json     TEXT    NOT NULL DEFAULT '{}' CHECK(json_valid(detail_json)),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    CHECK(end_chapter >= start_chapter)
+);
+CREATE INDEX IF NOT EXISTS idx_draft_batches_status ON draft_batches(status);
+
+CREATE TABLE IF NOT EXISTS draft_batch_chapters (
+    id              TEXT PRIMARY KEY,
+    batch_id        TEXT NOT NULL REFERENCES draft_batches(id),
+    chapter         INTEGER NOT NULL,
+    seq             INTEGER NOT NULL CHECK(seq >= 1),
+    draft_text      TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','accepted','rejected','discarded')),
+    run_id          TEXT,                               -- 逐章校验对应的 pipeline_run
+    reason          TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(batch_id, chapter)
+);
+CREATE INDEX IF NOT EXISTS idx_draft_batch_chapters_chapter
+    ON draft_batch_chapters(chapter, status);
 
 -- 13b) autopilot_sessions 持久化（M1-③ 断点恢复）------------------------------
 -- AutopilotManager 写穿：start 时 INSERT，每章完成 UPDATE，终态 UPDATE。
@@ -1021,13 +1074,14 @@ CREATE TABLE IF NOT EXISTS chapter_plan_version_beats (
     seq              INTEGER NOT NULL CHECK(seq >= 1),
     beat_type        TEXT NOT NULL
                          CHECK(beat_type IN ('setup','turn','payoff_beat',
-                                             'tension_point','hook')),
+                                             'tension_point','aftermath','hook')),
     summary          TEXT NOT NULL,
     value_axis       TEXT,
     arc_id           TEXT,
     constraint_level TEXT NOT NULL DEFAULT 'soft'
                          CHECK(constraint_level IN ('soft','hard')),
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    witnesses_json   TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(witnesses_json)), -- v22/F5
     UNIQUE(plan_version_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_chapter_plan_version_beats_version

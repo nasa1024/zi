@@ -32,6 +32,74 @@ def _rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:
         return []
 
 
+_POLARITY_LABELS = {
+    "zh": {"+": "+（趋近主角目标）", "-": "-（远离目标/受挫）", "±": "±（得失参半/代价换取）"},
+    "en": {"+": "+ (toward the goal)", "-": "- (away from the goal)",
+           "±": "± (a gain with a cost)"},
+}
+_TURNING_LABELS = {
+    "zh": {"action": "行动（角色的选择与行动造成转折）", "revelation": "揭示（新信息造成转折）"},
+    "en": {"action": "action (a character's choice causes the turn)",
+           "revelation": "revelation (new information causes the turn)"},
+}
+_PROMISE_ACTION_LABELS = {
+    "zh": {"plant": "埋设", "remind": "提醒", "advance": "推进", "payoff": "兑现"},
+    "en": {"plant": "plant", "remind": "remind", "advance": "advance", "payoff": "pay off"},
+}
+
+
+def _contract_turn_lines(contract: dict[str, Any], lang: str) -> list[str]:
+    """v22: render the chapter's planned turn (polarity + turning point)."""
+    lines: list[str] = []
+    polarity = contract.get("polarity")
+    if polarity in _POLARITY_LABELS[lang]:
+        label = _POLARITY_LABELS[lang][polarity]
+        lines.append(f"- 本章转向：{label}" if lang == "zh" else f"- Turn direction: {label}")
+    turning = contract.get("turning_point")
+    if turning in _TURNING_LABELS[lang]:
+        label = _TURNING_LABELS[lang][turning]
+        lines.append(f"- 转折方式：{label}" if lang == "zh" else f"- Turning point: {label}")
+    return lines
+
+
+def _promise_action_lines(contract: dict[str, Any], lang: str) -> list[str]:
+    """v22: render the chapter's planned operations on reader promises."""
+    out: list[str] = []
+    labels = _PROMISE_ACTION_LABELS[lang]
+    for item in _as_list(contract.get("promise_actions"))[:12]:
+        if not isinstance(item, dict) or item.get("action") not in labels:
+            continue
+        name = item.get("label") or item.get("promise_id")
+        if not name:
+            continue
+        promise_id = item.get("promise_id")
+        line = f"{labels[item['action']]}：{name}" if lang == "zh" else f"{labels[item['action']]}: {name}"
+        if promise_id and item.get("label"):
+            line += f"（{promise_id}）" if lang == "zh" else f" ({promise_id})"
+        if item.get("note"):
+            line += f" — {item['note']}"
+        out.append(line)
+    return out
+
+
+def _beat_rows(conn: sqlite3.Connection, columns: str, table_sql: str, params=()) -> list[dict]:
+    """Select beats with the v22 ``witnesses_json`` column, decoded to ``witnesses``.
+
+    Pre-v22 databases (never migrated) fall back to the legacy column set.
+    """
+    try:
+        rows = [
+            dict(r) for r in conn.execute(
+                f"SELECT {columns}, witnesses_json {table_sql}", params,
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError:
+        return _rows(conn, f"SELECT {columns} {table_sql}", params)
+    for row in rows:
+        row["witnesses"] = _json(row.pop("witnesses_json", None), [])
+    return rows
+
+
 _CONTRACT_LIST_FIELDS = (
     "arc_targets",
     "volume_kr_targets",
@@ -224,10 +292,13 @@ class PlanContext:
                 chapter_lines.append(f"- 目标情绪：{contract['target_emotion']}")
             if contract.get("hook_text"):
                 chapter_lines.append(f"- 章末承诺：{contract['hook_text']}")
+            chapter_lines.extend(_contract_turn_lines(contract, "zh"))
             parts.append("## 本章硬契约\n" + "\n".join(chapter_lines))
 
             required_blocks = [
                 _bullet_block("### 必须推进", contract.get("must_advance")),
+                _bullet_block("### 承诺操作（伏笔埋设/提醒/推进/兑现）",
+                              _promise_action_lines(contract, "zh")),
                 _bullet_block("### 必须解决", contract.get("must_resolve")),
                 _bullet_block("### 必须出场实体", contract.get("must_include_entities")),
                 _bullet_block("### 服务的情节弧", contract.get("arc_targets")),
@@ -414,10 +485,13 @@ def _render_contract_for_draft_en(context: PlanContext) -> str:
             chapter_lines.append(f"- Target emotion: {contract['target_emotion']}")
         if contract.get("hook_text"):
             chapter_lines.append(f"- Ending promise: {contract['hook_text']}")
+        chapter_lines.extend(_contract_turn_lines(contract, "en"))
         parts.append("## Locked chapter contract\n" + "\n".join(chapter_lines))
 
         required = [
             _bullet_block("### Must advance", contract.get("must_advance")),
+            _bullet_block("### Promise actions (plant / remind / advance / pay off)",
+                          _promise_action_lines(contract, "en")),
             _bullet_block("### Must resolve", contract.get("must_resolve")),
             _bullet_block("### Required entities", contract.get("must_include_entities")),
             _bullet_block("### Story arcs served", contract.get("arc_targets")),
@@ -524,16 +598,16 @@ def _chapter_contract(conn: sqlite3.Connection, chapter: int) -> dict[str, Any] 
             payload = _json(version_rows[0].get("payload_json"), {})
             if isinstance(payload, dict):
                 value.update(payload)
-        version_beats = _rows(
+        version_beats = _beat_rows(
             conn,
-            "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level"
-            " FROM chapter_plan_version_beats WHERE plan_version_id=? ORDER BY seq",
+            "seq, beat_type, summary, value_axis, arc_id, constraint_level",
+            "FROM chapter_plan_version_beats WHERE plan_version_id=? ORDER BY seq",
             (version_id,),
         )
-    value["beats"] = version_beats or _rows(
+    value["beats"] = version_beats or _beat_rows(
         conn,
-        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level,"
-        " source_decision_id FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
+        "seq, beat_type, summary, value_axis, arc_id, constraint_level, source_decision_id",
+        "FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
         (chapter,),
     )
     return value
@@ -574,10 +648,10 @@ def gather_plan_context(
         " ORDER BY chapter",
         (chapter, chapter + max(0, lookahead_chapters)),
     ):
-        row["beats"] = _rows(
+        row["beats"] = _beat_rows(
             conn,
-            "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level"
-            " FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
+            "seq, beat_type, summary, value_axis, arc_id, constraint_level",
+            "FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
             (row["chapter"],),
         )
         lookahead.append(row)

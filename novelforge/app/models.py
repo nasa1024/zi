@@ -476,6 +476,7 @@ class PlannedBeat(BaseModel):
     value_axis: Optional[str] = None
     arc_id: Optional[str] = None
     constraint_level: Literal["soft", "hard"] = "soft"
+    witnesses: list[str] = Field(default_factory=list)   # v22/F5
 
 
 class ChapterCardModel(BaseModel):

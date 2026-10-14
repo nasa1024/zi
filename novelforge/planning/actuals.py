@@ -397,6 +397,9 @@ def extract_chapter_actuals(
         evidence_spans=_dedupe_spans(evidence_spans),
         extractor_version=EXTRACTOR_VERSION,
     )
+    # v22：特性扩展回填（实际转向 / 非主角反应证据…），确定性、隔离失败。
+    from ..craft.extensions import enrich_actuals
+    enrich_actuals(actuals, draft_text, plan_context)
     return ActualsExtraction(actuals=actuals, proposals=proposals)
 
 

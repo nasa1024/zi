@@ -47,8 +47,16 @@ class PacingController:
         beats: list[dict],
         draft_chars: int,
         conn: sqlite3.Connection,
+        *,
+        actuals=None,
+        contract: dict | None = None,
     ) -> PacingState:
-        """章节完成后更新 pacing_cursor。"""
+        """章节完成后更新 pacing_cursor。
+
+        v22：``actuals``（ChapterActuals，含实际 polarity）与 ``contract``（本章契约，
+        含计划 polarity/turning_point）供极性序列与抑扬上限（F3）使用；旧调用方可不传。
+        ``aftermath`` beat 是高潮后的平复，不计入高张力。
+        """
         state = self.get_state(conn)
 
         has_big_payoff = any(b.get("beat_type") == "payoff_beat" for b in beats)

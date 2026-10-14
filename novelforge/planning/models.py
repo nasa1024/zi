@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..craft.hooks import ENDING_HOOK_TYPES, OPENING_HOOK_TYPES
+from .contract_fields import (
+    Polarity,
+    PromiseActionKind,
+    TurningPoint,
+    normalize_polarity,
+    normalize_promise_actions,
+    normalize_turning_point,
+    normalize_witnesses,
+)
 
 OpeningHookType = Literal[*tuple(OPENING_HOOK_TYPES), "other"]
 EndingHookType = Literal[*tuple(ENDING_HOOK_TYPES), "other"]
@@ -56,11 +65,36 @@ class VolumePlanPayload(BaseModel):
 
 class BeatDraft(BaseModel):
     seq: int
-    beat_type: Literal["setup", "turn", "payoff_beat", "tension_point", "hook"]
+    # v22: aftermath = 高潮后的平复/余韵（猫腻"小高潮、平复期和余韵"）
+    beat_type: Literal[
+        "setup", "turn", "payoff_beat", "tension_point", "aftermath", "hook",
+    ]
     summary: str
     value_axis: Optional[str] = None
     arc_id: Optional[str] = None
     constraint_level: Literal["soft", "hard"] = "soft"
+    # v22: 必须对本 beat 作出可见反应的非主角角色（爽点三段式：动作→反应→收获展示）
+    witnesses: list[str] = Field(default_factory=list)
+
+    @field_validator("witnesses", mode="before")
+    @classmethod
+    def _coerce_witnesses(cls, value):
+        return normalize_witnesses(value)
+
+
+class PromiseAction(BaseModel):
+    """v22: the chapter's planned operation on one reader promise (foreshadow row)."""
+
+    promise_id: Optional[str] = None
+    label: Optional[str] = None
+    action: PromiseActionKind
+    note: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_reference(self):
+        if not self.promise_id and not self.label:
+            raise ValueError("promise action requires promise_id or label")
+        return self
 
 
 class ChapterPlanDraft(BaseModel):
@@ -84,6 +118,26 @@ class ChapterPlanDraft(BaseModel):
     hook_type: Optional[EndingHookType] = None
     expectation_score: Optional[int] = Field(default=None, ge=1, le=5)
     beats: list[BeatDraft] = Field(default_factory=list)
+    # v22: Story Grid 式"每章必须转"——转向（+ 趋近目标 / - 远离目标 / ± 得失参半）与转折类型
+    polarity: Optional[Polarity] = None
+    turning_point: Optional[TurningPoint] = None
+    # v22: 读者承诺账本——本章对伏笔/承诺的计划操作（plant/remind/advance/payoff）
+    promise_actions: list[PromiseAction] = Field(default_factory=list)
+
+    @field_validator("polarity", mode="before")
+    @classmethod
+    def _coerce_polarity(cls, value):
+        return normalize_polarity(value)
+
+    @field_validator("turning_point", mode="before")
+    @classmethod
+    def _coerce_turning_point(cls, value):
+        return normalize_turning_point(value)
+
+    @field_validator("promise_actions", mode="before")
+    @classmethod
+    def _coerce_promise_actions(cls, value):
+        return normalize_promise_actions(value)
 
     @model_validator(mode="after")
     def validate_target_state(self):
@@ -172,6 +226,18 @@ class RevealEvidence(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+class ReactionEvidence(BaseModel):
+    """v22: a non-protagonist's visible reaction to an action/payoff in the draft."""
+
+    reactor: str
+    target: Optional[str] = None
+    reaction: str = ""
+    attitude_shift: Optional[str] = None
+    beat_seq: Optional[int] = Field(default=None, ge=1)
+    evidence_spans: list[EvidenceSpan] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
 class ChapterActuals(BaseModel):
     chapter: int = Field(ge=1)
     draft_id: Optional[str] = None
@@ -184,6 +250,20 @@ class ChapterActuals(BaseModel):
     involved_entities: list[str] = Field(default_factory=list)
     evidence_spans: list[EvidenceSpan] = Field(default_factory=list)
     extractor_version: Optional[str] = None
+    # v22: 实际转向/转折（由 enrich_actuals 扩展回填）与非主角反应证据
+    polarity: Optional[Polarity] = None
+    turning_point: Optional[TurningPoint] = None
+    reactions: list[ReactionEvidence] = Field(default_factory=list)
+
+    @field_validator("polarity", mode="before")
+    @classmethod
+    def _coerce_polarity(cls, value):
+        return normalize_polarity(value)
+
+    @field_validator("turning_point", mode="before")
+    @classmethod
+    def _coerce_turning_point(cls, value):
+        return normalize_turning_point(value)
 
 
 class AlignmentFinding(BaseModel):

@@ -11,6 +11,7 @@ from typing import Optional
 
 from ..config import NovelForgeConfig
 from ..contracts import FactCandidate, RunContext, normalize_proposal_fact_type
+from ..craft.extensions import build_draft_briefs, settle_steps
 from ..craft.pacing import PacingController
 from ..dedup.dedup_engine import DeduplicationEngine
 from ..governance.conflict import ConflictSet, classify_risk, detect_conflict
@@ -407,6 +408,12 @@ class Orchestrator:
             if hint:
                 workspace["chapter_goal"] = (chapter_goal + "\n" + hint).strip()
 
+            # v22：特性扩展的动态提示块（承诺提醒/转机要求/信息差机会…）。
+            # 只进动态段（planner 与 draft 均在契约之后渲染），绝不进入稳定前缀。
+            workspace["craft_brief"] = build_draft_briefs(
+                conn, chapter, workspace, language=content_language, cfg=cfg,
+            )
+
             if progress_cb:
                 progress_cb("recall", "ok", {
                     "future_cards": len(plan_context.lookahead),
@@ -777,6 +784,9 @@ class Orchestrator:
             if settle.get("plan_reconcile") is not None:
                 run_detail = {**(run_detail or {}),
                               "plan_reconcile": settle["plan_reconcile"]}
+            if settle.get("extensions"):
+                run_detail = {**(run_detail or {}),
+                              "extensions": settle["extensions"]}
             if final_alignment_report is not None:
                 run_detail = {
                     **(run_detail or {}),
@@ -861,7 +871,8 @@ class Orchestrator:
         workspace = skill_ctx.workspace
         out: dict = {"degraded": False, "error": None, "failed_steps": [],
                      "gate_outcome": None, "committed_ids": [], "queued": [],
-                     "foreshadow_settle": None, "plan_reconcile": None}
+                     "foreshadow_settle": None, "plan_reconcile": None,
+                     "extensions": {}}
         successful_candidates: list[FactCandidate] = []
 
         # ── 步骤 A：canon 结算（失败清理后重试一次）──────────────────────────
@@ -956,6 +967,8 @@ class Orchestrator:
                 str((workspace.get("writing_profile") or {}).get("content_language") or "zh-CN"),
             ),
             conn,
+            actuals=workspace.get("chapter_actuals"),
+            contract=getattr(workspace.get("plan_context"), "current_contract", None),
         ))
         if getattr(cfg.recall, "enable_summaries", True) and draft_text:
             _step("summary", lambda: _persist_chapter_summary(
@@ -1017,6 +1030,15 @@ class Orchestrator:
                             "degraded" if "foreshadow_settle" in out["failed_steps"]
                             else "ok",
                             out["foreshadow_settle"] or {})
+
+        # v22：特性扩展的结算步骤（承诺账本校验 / 实际转向入库 …），各自降级互不阻塞。
+        if draft_text:
+            for ext_name, ext_settle in settle_steps():
+                def _run_extension(ext_name=ext_name, ext_settle=ext_settle) -> None:
+                    out["extensions"][ext_name] = ext_settle(
+                        conn, chapter, workspace, gateway=self._gw, cfg=cfg,
+                    ) or {}
+                _step(f"ext_{ext_name}", _run_extension)
         return out
 
     def _quality_pass(

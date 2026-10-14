@@ -117,10 +117,13 @@ class ChapterDraftSkill:
             ctx.workspace.get("chapter_contract_context")
             or ctx.workspace.get("future_guardrails", "")
         )
+        # v22：特性扩展动态提示（承诺提醒/转机要求/信息差机会），紧跟契约之后。
+        craft_brief = ctx.workspace.get("craft_brief", "")
         if is_english:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + (f"{anchor_block}\n\n" if anchor_block else "")
                 + "## Chapter Task\n"
                 + f"Chapter {ctx.target_chapter}\n"
@@ -133,6 +136,7 @@ class ChapterDraftSkill:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + (f"{anchor_block}\n\n" if anchor_block else "")
                 + f"## 本章任务\n"
                 f"第 {ctx.target_chapter} 章\n"
@@ -234,7 +238,12 @@ def _fmt_beats(beats: list[dict]) -> str:
         bt = b.get("beat_type", "?")
         sm = b.get("summary", "")
         va = b.get("value_axis", "")
-        lines.append(f"  {i}. [{bt}] {sm} (value_axis: {va})")
+        line = f"  {i}. [{bt}] {sm} (value_axis: {va})"
+        witnesses = [str(w) for w in (b.get("witnesses") or []) if str(w).strip()]
+        if witnesses:
+            # v22/F5：必须对本 beat 作出可见反应的在场角色
+            line += f" (witnesses: {', '.join(witnesses)})"
+        lines.append(line)
     return "\n".join(lines)
 
 

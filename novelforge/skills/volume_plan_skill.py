@@ -22,6 +22,13 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..craft.hooks import hook_menu
+from ..planning.contract_fields import (
+    BEAT_TYPES,
+    normalize_polarity,
+    normalize_promise_actions,
+    normalize_turning_point,
+    normalize_witnesses,
+)
 from ..writing_profiles import (
     compile_system_prompt,
     get_project_writing_profile,
@@ -72,8 +79,13 @@ _SYSTEM = """\
     "opening_hook_type": "章首钩子，从 __OPENING_HOOK_MENU__ 中选一",
     "hook_type": "章尾钩子，从 __ENDING_HOOK_MENU__ 中选一",
     "expectation_score": 4,
+    "polarity": "本章转向：+（趋近主角目标）| -（远离目标）| ±（得失参半）",
+    "turning_point": "action | revelation（本章由行动还是揭示转折）",
+    "promise_actions": [
+      {"promise_id": "待回收伏笔的 id（若上下文给出）", "label": "伏笔/承诺名", "action": "plant|remind|advance|payoff"}
+    ],
     "beats": [
-      {"beat_type": "setup|turn|tension_point|payoff_beat|hook", "summary": "...", "value_axis": "如 安全→危机", "arc_id": null, "constraint_level": "soft|hard"}
+      {"beat_type": "setup|turn|tension_point|payoff_beat|aftermath|hook", "summary": "...", "value_axis": "如 安全→危机", "arc_id": null, "constraint_level": "soft|hard", "witnesses": ["payoff_beat 时：必须对爽点作出可见反应的在场角色"]}
     ]
   }
 ]
@@ -87,6 +99,10 @@ _SYSTEM = """\
 - 每章至少一条 hard beat；hard beat 绑定 arc_id 时必须使用上下文给出的真实 ID
 - success_criteria 必须能验证 target_state，禁止项必须具体到可从正文举证
 - 若给出"待回收伏笔"，必须在其到期章或之前安排回收（payoff_beat）
+- 每章都要"转"：polarity 标明转向；同向转向不得连续超过 3 章，连续压抑后必须安排转机
+- 大爽点之后安排 aftermath（余韵/余波）beat，高潮越大平复越长
+- payoff_beat 写明 witnesses：爽点在于"看对方怎么输"，必须有在场者的反应
+- promise_actions 安排伏笔/承诺的埋设、提醒、推进与兑现；长线承诺不要长期不提
 - 章节号严格按给定范围连续编号，不重不漏
 只输出 plans 代码块，不要其他说明。
 """.replace("__OPENING_HOOK_MENU__", hook_menu("opening")).replace(
@@ -101,7 +117,9 @@ Return only a `plans` JSON code block. Every item uses the stable keys chapter,
 title, goal, arc_targets, volume_kr_targets, milestone_targets, must_advance,
 must_resolve, must_include_entities, must_not_reveal, must_not_resolve,
 forbidden_state_changes, target_state, success_criteria, hook_text,
-target_emotion, opening_hook_type, hook_type, expectation_score, and beats.
+target_emotion, opening_hook_type, hook_type, expectation_score, polarity,
+turning_point, promise_actions, and beats. Beat items use beat_type, summary,
+value_axis, arc_id, constraint_level, and (for payoff beats) witnesses.
 
 Plan rules:
 - Chapter numbers are consecutive and exactly match the requested range.
@@ -112,6 +130,15 @@ Plan rules:
 - Use only real arc or milestone ids supplied by context.
 - success_criteria and prohibitions must be observable in finished prose.
 - Do not force a power fantasy payoff into every genre.
+- Every chapter turns: polarity is "+" (toward the goal), "-" (away from it),
+  or "±" (a gain with a cost); never run more than 3 chapters in the same
+  direction, and schedule a turn after a sustained low. turning_point is
+  "action" or "revelation".
+- After a big payoff, add an "aftermath" beat for the cooldown and fallout.
+- payoff_beat lists witnesses who visibly react; the payoff lives in reactions.
+- promise_actions plant, remind, advance, or pay off reader promises
+  ({"promise_id" or "label", "action": "plant|remind|advance|payoff"}); do not
+  let a long promise go unmentioned for many chapters.
 - Every user-visible value, including nested target_state values and beat
   summaries/value axes, must be natural English. Keep schema keys, enum values,
   and supplied ids unchanged.
@@ -243,7 +270,7 @@ class VolumePlanSkill:
         )
 
 
-_VALID_BEAT_TYPES = {"setup", "turn", "payoff_beat", "tension_point", "hook"}
+_VALID_BEAT_TYPES = set(BEAT_TYPES)
 
 
 def _parse_plans(
@@ -291,6 +318,7 @@ def _parse_plans(
                     if b.get("constraint_level") in {"soft", "hard"}
                     else ("hard" if i == 0 or bt == "hook" else "soft")
                 ),
+                "witnesses": normalize_witnesses(b.get("witnesses")),
             })
         if beats and not any(b["constraint_level"] == "hard" for b in beats):
             beats[0]["constraint_level"] = "hard"
@@ -333,6 +361,9 @@ def _parse_plans(
             "opening_hook_type": normalize_hook_type(p.get("opening_hook_type"), "opening"),
             "hook_type": normalize_hook_type(p.get("hook_type"), "ending"),
             "expectation_score": exp,
+            "polarity": normalize_polarity(p.get("polarity")),
+            "turning_point": normalize_turning_point(p.get("turning_point")),
+            "promise_actions": normalize_promise_actions(p.get("promise_actions")),
             "beats": beats,
         })
     plans.sort(key=lambda x: x["chapter"])

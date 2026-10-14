@@ -447,8 +447,8 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
     if row is None:
         return None
     beats = conn.execute(
-        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level FROM beats"
-        " WHERE chapter=? AND status='planned' ORDER BY seq",
+        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level,"
+        " witnesses_json FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
         (chapter,),
     ).fetchall()
     return ChapterCardModel(
@@ -476,7 +476,9 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
         beats=[PlannedBeat(seq=b["seq"], beat_type=b["beat_type"],
                            summary=b["summary"], value_axis=b["value_axis"],
                            arc_id=b["arc_id"],
-                           constraint_level=b["constraint_level"]) for b in beats],
+                           constraint_level=b["constraint_level"],
+                           witnesses=_parse_json(b["witnesses_json"], []))
+               for b in beats],
     )
 
 

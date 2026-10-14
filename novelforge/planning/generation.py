@@ -677,9 +677,14 @@ _ROUTE_SYSTEM = """\
 chapters 每项字段 chapter,title,goal,arc_targets,volume_kr_targets,milestone_targets,
 must_advance,must_resolve,must_include_entities,must_not_reveal,must_not_resolve,
 forbidden_state_changes,target_state,success_criteria,hook_text,target_emotion,
-opening_hook_type,hook_type,expectation_score,beats。每章 3-6 个 beats，最后一项必须是 hook，
-并且至少一个 beat 的 constraint_level 为 hard。
-beats 字段：seq,beat_type,summary,value_axis,arc_id,constraint_level。
+opening_hook_type,hook_type,expectation_score,polarity,turning_point,promise_actions,beats。
+每章 3-6 个 beats，最后一项必须是 hook，并且至少一个 beat 的 constraint_level 为 hard。
+beats 字段：seq,beat_type,summary,value_axis,arc_id,constraint_level,witnesses；
+beat_type 取 setup/turn/payoff_beat/tension_point/aftermath/hook（aftermath=大爽点后的余韵）；
+payoff_beat 的 witnesses 列出必须作出可见反应的在场角色。
+polarity 为本章转向（+ 趋近目标 / - 远离目标 / ± 得失参半），同向不得连续超过 3 章；
+turning_point 为 action 或 revelation；promise_actions 为
+[{"promise_id"或"label","action":"plant|remind|advance|payoff"}]，长线承诺须定期提醒。
 opening_hook_type 只能来自：__OPENING_HOOK_MENU__；
 hook_type 只能来自：__ENDING_HOOK_MENU__。
 success_criteria 必须能验证 target_state；禁止项要明确到可从正文举证。
@@ -693,7 +698,12 @@ canon, plus the selected volume, active arcs, and future milestones as intent,
 generate three alternative routes for the requested future window. Return only
 a JSON array with route_title, route_summary, and chapters. Chapter items keep
 the supplied stable contract keys and contain 3-6 beats, ending in a hook with
-at least one hard beat. Write all visible values in natural American English.
+at least one hard beat. Beat types are setup, turn, payoff_beat, tension_point,
+aftermath (the cooldown after a big payoff), and hook; payoff beats list the
+witnesses who must visibly react. Each chapter also sets polarity ("+", "-" or
+"±"; never more than 3 chapters in one direction), turning_point ("action" or
+"revelation"), and promise_actions ([{"promise_id" or "label", "action":
+"plant|remind|advance|payoff"}]). Write all visible values in natural American English.
 Respect not_before boundaries, vary hook types, and make each chapter deliver a
 profile-appropriate change instead of imposing the same payoff pattern on every genre.
 """

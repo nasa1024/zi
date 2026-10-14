@@ -8,7 +8,12 @@ from typing import Any, Iterable
 
 from ..craft.volume_kr import normalize_key_results
 from ..ids import new_id
+from .contract_fields import normalize_witnesses
 from .models import ChapterPlanDraft, DecisionEnvelope, DecisionOptionDraft
+
+
+def _witnesses_json(beat: dict[str, Any]) -> str:
+    return json.dumps(normalize_witnesses(beat.get("witnesses")), ensure_ascii=False)
 
 
 class DecisionConflictError(ValueError):
@@ -391,7 +396,7 @@ def apply_plan_window(
             conn.execute(
                 "INSERT INTO chapter_plan_version_beats("
                 "id, plan_version_id, seq, beat_type, summary, value_axis, arc_id,"
-                " constraint_level) VALUES(?,?,?,?,?,?,?,?)",
+                " constraint_level, witnesses_json) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     new_id("cpvb"),
                     version_id,
@@ -401,6 +406,7 @@ def apply_plan_window(
                     beat.get("value_axis"),
                     beat.get("arc_id"),
                     beat.get("constraint_level", "soft"),
+                    _witnesses_json(beat),
                 ),
             )
 
@@ -458,8 +464,8 @@ def apply_plan_window(
         for index, beat in enumerate(chapter_data.get("beats") or [], start=1):
             conn.execute(
                 "INSERT INTO beats(id, chapter, seq, beat_type, summary, value_axis, arc_id,"
-                " status, source_decision_id, constraint_level)"
-                " VALUES(?,?,?,?,?,?,?,'planned',?,?)",
+                " status, source_decision_id, constraint_level, witnesses_json)"
+                " VALUES(?,?,?,?,?,?,?,'planned',?,?,?)",
                 (
                     new_id("beat"),
                     chapter,
@@ -470,6 +476,7 @@ def apply_plan_window(
                     beat.get("arc_id"),
                     decision_id,
                     beat.get("constraint_level", "soft"),
+                    _witnesses_json(beat),
                 ),
             )
         result.planned.append(chapter)
