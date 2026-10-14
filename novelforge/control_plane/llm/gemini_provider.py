@@ -11,7 +11,7 @@
 - 思考 token 计入 ``maxOutputTokens`` 并按输出计费：调用方给的 ``max_tokens`` 视为
   可见正文预算，本 provider 按思考强度在其上追加余量，避免推理吃光正文预算。
 - ``temperature`` / ``top_p`` / ``top_k`` 在 Gemini 3+/4 上被忽略，故不下发。
-- 不支持显式缓存：≥6,144 token 的共享前缀自动隐式缓存（95% 折扣）。system 与稳定
+- 不支持显式缓存：≥4,096 token（Vertex 为 6,144）的共享前缀自动隐式缓存（95% 折扣）。system 与稳定
   上下文本就排在最前，``CacheHint`` 无需切块；命中量记入 ``Usage.cache_read``。
 - 不支持以 model 回合结尾的预填充对话。
 """

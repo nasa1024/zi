@@ -14,7 +14,7 @@
 | 思考 | `thinkingLevel` = low / medium（默认）/ high；`thinkingBudget`、`minimal` 返回 400 | tier 映射为思考强度；模型 ID 支持 `@low/@medium/@high` 后缀 |
 | 思考计费 | 思考 token 计入 `maxOutputTokens`，按输出价计费 | 在调用方的正文预算之上自动追加思考余量（low 4K / medium 16K / high 32K）；思考吃光预算且无正文时自动加倍续接一次 |
 | 采样参数 | `temperature` / `top_p` / `top_k` 被忽略；`frequency_penalty` 等返回 400 | 不下发 temperature；多候选稿的差异来自模型自身采样 |
-| 缓存 | 不支持显式缓存；≥6,144 token 共享前缀自动隐式缓存（95% 折扣），续接跳在 TTL 内同样命中 | system + 稳定上下文本就排在 prompt 最前，无需额外改造；命中量记入 `cache_read` 并按缓存价计费 |
+| 缓存 | 不支持显式缓存；共享前缀自动隐式缓存（95% 折扣；Gemini API 文档门槛 ≥4,096 token，Vertex 文档为 6,144），续接跳在 TTL 内同样命中 | system + 稳定上下文本就排在 prompt 最前，无需额外改造；命中量记入 `cache_read` 并按缓存价计费 |
 | 对话 | 不支持以 model 回合结尾的预填充 | provider 直接拒绝，避免隐性 400 |
 | 价格 | 2026-11-30 前 $2 / $10（缓存 $0.10）；之后 $4 / $20（缓存 $0.20），每百万 token | 预算熔断按标准价保守估算 |
 | SDK | `google-genai >= 2.30.1` 才能自动续接；OpenAI 兼容层取不到长输出 | 不用 SDK / 兼容层，标准库 REST 直连，零新增依赖 |
