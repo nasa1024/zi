@@ -166,6 +166,10 @@ _ZH_NEGATED_RE = re.compile(
     r"(?:没有|并未|并无|并不|毫不|毫无|不曾|未曾|从不|没|未|不)"
     r"(?:丝毫|一丝|半点|任何|一点|半分)?(?:的)?$"
 )
+# 双重否定是强调肯定（"众人无不骇然""莫不脸色大变""不得不低下头""谁不震惊"），不算否定。
+_ZH_DOUBLE_NEGATION_RE = re.compile(
+    r"(?:无|莫|无一|无人|没人|没有|没有人|没有一个人?|谁|哪个|不得|不能)不$"
+)
 _EN_NEGATED_RE = re.compile(
     r"(?:\b(?:not|never|no|without)|n['’]t)(?:\s+(?:even|once|visibly|so much as))?\s*$",
     re.IGNORECASE,
@@ -335,7 +339,9 @@ def _find_mentions(
 def _negated(text: str, pos: int, en: bool) -> bool:
     """A negator right before the cue, inside the same clause ("没有丝毫震惊" / "did not flinch")."""
     window = _NEGATION_WINDOW_SPLIT_RE.split(text[max(0, pos - (24 if en else 8)):pos])[-1]
-    return bool((_EN_NEGATED_RE if en else _ZH_NEGATED_RE).search(window))
+    if en:
+        return bool(_EN_NEGATED_RE.search(window))
+    return not _ZH_DOUBLE_NEGATION_RE.search(window) and bool(_ZH_NEGATED_RE.search(window))
 
 
 def _find_cues(text: str, mask: bytearray, en: bool) -> list[_Hit]:

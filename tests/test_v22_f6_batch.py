@@ -401,6 +401,18 @@ class TestBatchPrompt:
         for marker in _FORBIDDEN_MARKERS:
             assert marker not in msg, marker
 
+    def test_window_brief_dedup_ignores_changing_counts(self):
+        # recheck：F1 到期提醒的"已 N 章未提及"逐章递增，逐字去重会让同一条提醒在窗口内每章重复
+        from novelforge.control_plane.batch import _brief_lines, _fresh_brief
+
+        seen = _brief_lines("## 承诺提醒\n- 血仇（第2章埋下，已 6 章未提及）")
+        ch2 = _fresh_brief("## 承诺提醒\n- 血仇（第2章埋下，已 7 章未提及）\n"
+                           "- 玉佩（第5章埋下，已 4 章未提及）", seen)
+        assert ch2 == "## 承诺提醒\n- 玉佩（第5章埋下，已 4 章未提及）"
+        ch3 = _fresh_brief("## 承诺提醒\n- 血仇（第2章埋下，已 8 章未提及）\n"
+                           "- 玉佩（第5章埋下，已 5 章未提及）\n\n## 爽点三段式\n- 王长老当众认错", seen)
+        assert ch3 == "## 爽点三段式\n- 王长老当众认错"
+
     def test_en_prompt_has_no_chinese_labels(self):
         from novelforge.skills.chapter_batch_draft_skill import _SYSTEM_EN, build_batch_prompt
 
@@ -952,8 +964,11 @@ class TestRunBatch:
         ch2 = next(o for o in out.outcomes if o.chapter == 2)
         assert ch2.ok and ch2.state_degraded and "exploded" in ch2.error
         assert [o.chapter for o in out.outcomes] == [1, 2, 3]
-        assert [r[:2] for r in _batch_rows(conn, out.batch_id)] == [
-            (1, "accepted"), (2, "accepted"), (3, "accepted")]
+        rows = _batch_rows(conn, out.batch_id)
+        assert [r[:2] for r in rows] == [(1, "accepted"), (2, "accepted"), (3, "accepted")]
+        # 第 2 章的 pipeline_run 停在 crashed：批次行写明原因，两处记录不互相矛盾
+        assert rows[1][2].startswith("post_persist_error:") and "exploded" in rows[1][2]
+        assert rows[0][2] is None and rows[2][2] is None
 
     def test_window_truncates_at_profile_switch(self, db):
         """写作配置自第 3 章切换（cache_key 变化）→ 窗口在切换前截断，第 3 章用新配置起草。"""

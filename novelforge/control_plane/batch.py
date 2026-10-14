@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -258,21 +259,29 @@ def _skill_ctx(orch: Orchestrator, conn, chapter: int, workspace: dict, profile:
     )
 
 
+_BRIEF_NUMBER_RE = re.compile(r"\d+")
+
+
+def _brief_key(line: str) -> str:
+    """去重键：数字归一（F1"已 N 章未提及"、短线"约 N 字"在窗口内逐章递增，仍是同一条提醒）。"""
+    return _BRIEF_NUMBER_RE.sub("#", line.strip())
+
+
 def _brief_lines(brief: str) -> set[str]:
-    return {line.strip() for line in str(brief or "").splitlines()
+    return {_brief_key(line) for line in str(brief or "").splitlines()
             if line.strip() and not line.lstrip().startswith("#")}
 
 
 def _fresh_brief(brief: str, seen: set[str]) -> str:
-    """窗口内后续章的 brief 只保留此前各章 brief 未出现过的条目（逐字相同的行只说一次，
-    如窗口开始前就欠下的爽点反应、通用提醒）；整块无新条目时连标题一起省略。"""
+    """窗口内后续章的 brief 只保留此前各章 brief 未出现过的条目（同一条只说一次，如窗口
+    开始前就欠下的爽点反应、到期承诺提醒——仅数字不同视为同一条）；整块无新条目时连标题一起省略。"""
     blocks: list[str] = []
     for block in str(brief or "").split("\n\n"):
         lines = [line for line in block.splitlines() if line.strip()]
         head = lines[:1] if lines and lines[0].lstrip().startswith("#") else []
         body = lines[len(head):]
-        fresh = [line for line in body if line.strip() not in seen]
-        seen.update(line.strip() for line in body)
+        fresh = [line for line in body if _brief_key(line) not in seen]
+        seen.update(_brief_key(line) for line in body)
         if fresh:
             blocks.append("\n".join(head + fresh))
     return "\n\n".join(blocks)
@@ -679,14 +688,18 @@ def _run_windows(conn, out: BatchOutcome, make_orchestrator, chapter_goals,
                 reasons[chapter] = "exception"
                 stop, stop_chapter = "fatal", chapter
                 break
+            accepted_reason = None
             if not outcome.ok and _persisted_since(conn, chapter, draft_mark):
                 # 正文落库之后才抛的异常（catch-all 返回 ok=False，但本章已进 draft_index）：
                 # 从本章重写会产生重复修订轮并二次结算。按结算降级处理（P1#11 正文已落袋）。
+                # 该章 pipeline_run 仍是 crashed、结算未跑：在批次行写明原因，供人工修复。
                 outcome.ok = True
                 outcome.state_degraded = True
+                accepted_reason = f"post_persist_error: {outcome.error or 'exception'}"[:300]
             _record(out, outcome, batch_id)
             if outcome.ok:
-                _mark_batch_chapter(conn, batch_id, chapter, "accepted", run_id=outcome.run_id)
+                _mark_batch_chapter(conn, batch_id, chapter, "accepted", run_id=outcome.run_id,
+                                    reason=accepted_reason)
                 window_accepted.append(outcome)
             else:
                 _mark_batch_chapter(conn, batch_id, chapter, "rejected", run_id=outcome.run_id,

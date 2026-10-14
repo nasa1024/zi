@@ -340,6 +340,20 @@ class TestDetector:
                                     protagonist_names=["林凡", "Kael"])
         assert [r.reaction for r in found] == [reaction]
 
+    @pytest.mark.parametrize("draft,reactor,reaction", [
+        # 双重否定 = 强调肯定：否定过滤不能把群像反应吞掉（integrated recheck 回归）
+        ("在场众人无不震惊。", "在场众人", "震惊"),
+        ("众人无不骇然。", "众人", "骇然"),
+        ("看得众人无不倒吸一口凉气。", "众人", "倒吸一口凉气"),
+        ("众人莫不脸色大变。", "众人", "脸色大变"),
+        ("众人无一不目瞪口呆。", "众人", "目瞪口呆"),
+        ("王虎不得不低下头。", "王虎", "低下头"),
+    ])
+    def test_double_negation_is_affirmative(self, draft, reactor, reaction):
+        found = pr.detect_reactions(draft, ["王虎"], language="zh-CN",
+                                    protagonist_names=["林凡"])
+        assert [(r.reactor, r.reaction) for r in found] == [(reactor, reaction)]
+
 
 # ── 2. enrich_actuals → chapter_actuals 持久化 ────────────────────────────────
 
