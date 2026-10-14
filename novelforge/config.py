@@ -131,6 +131,7 @@ class PlausibilityConfig:
     late_newcomer_progress: float = 0.75  # 卷进度超过此值后首次出现的新实体 → 告警
     new_ability_ratio_warn: float = 1.0   # 卷内 新增能力数 / 旧能力新用法数 超过此值 → 提示
     soft_magic: bool = False              # 软魔法体系：未展示能力解决冲突降为提示
+    resolving_tail_ratio: float = 0.4     # 无 payoff beat 的解决章：高潮段 = 正文末尾此比例（扣除章末钩子段）
 
 
 @dataclass

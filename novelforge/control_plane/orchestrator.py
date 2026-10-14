@@ -410,6 +410,7 @@ class Orchestrator:
 
             # v22：特性扩展的动态提示块（承诺提醒/转机要求/信息差机会…）。
             # 只进动态段（planner 与 draft 均在契约之后渲染），绝不进入稳定前缀。
+            workspace["cfg"] = cfg   # 供 craft 扩展检查读取各特性配置（F2 plausibility）
             workspace["craft_brief"] = build_draft_briefs(
                 conn, chapter, workspace, language=content_language, cfg=cfg,
             )
