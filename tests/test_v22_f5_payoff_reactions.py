@@ -267,6 +267,79 @@ class TestDetector:
                                     protagonist_names=["Lin Fan"])
         assert [(r.reactor, r.reaction) for r in found] == [expected]
 
+    # review：词表漏掉大量网文常用反应句式 → 误报"爽点无反应"
+    _ZH_STAPLES = (
+        "脸色变了", "脸色顿时变了", "的脸色变得极为难看", "脸色一僵", "面色一白",
+        "脸色青一阵白一阵", "脸色阴晴不定", "瞪大了眼睛", "双眼圆睁", "眼珠子都快瞪出来了",
+        "心中一凛", "心头一凛", "心中大骇", "大骇", "暗自心惊", "倒抽一口冷气", "倒抽了口凉气",
+        "倒吸一口气", "如遭雷击", "面面相觑", "议论纷纷", "僵在原地", "笑容僵在脸上",
+        "笑容凝固", "嘴角抽搐", "哑然", "语塞", "半晌无言", "沉默了", "傻了", "懵了",
+        "人都傻了", "两股战战", "瘫软在地", "浑身冰凉", "额头冒出冷汗", "眼中闪过一丝忌惮",
+        "握剑的手微微发抖", "吓了一跳", "震撼不已", "失语",
+    )
+    _EN_STAPLES = (
+        "'s face went slack", "'s jaw tightened", "'s eyes narrowed", " stiffened",
+        " went rigid", "'s breath caught", "'s grin vanished", "'s smile faded",
+        " felt the color drain from his face", " swallowed nervously",
+        " took an involuntary step back", " sputtered", " stammered", " went still",
+    )
+
+    @pytest.mark.parametrize("cue", _ZH_STAPLES)
+    def test_zh_staple_reactions_are_recalled(self, cue):
+        found = pr.detect_reactions(f"王虎{cue}。", ["王虎"], language="zh-CN",
+                                    protagonist_names=["林凡"])
+        assert [r.reactor for r in found] == ["王虎"]
+
+    @pytest.mark.parametrize("cue", _EN_STAPLES)
+    def test_en_staple_reactions_are_recalled(self, cue):
+        found = pr.detect_reactions(f"Dorn{cue}.", ["Dorn"], language="en-US",
+                                    protagonist_names=["Kael"])
+        assert [r.reactor for r in found] == ["Dorn"]
+
+    @pytest.mark.parametrize("draft,expected", [
+        ("A murmur ran through the crowd.", ("the crowd", "A murmur ran")),
+        ("Gasps rippled through the hall.", ("the hall", "Gasps")),
+        ("Whispers broke out among the onlookers.", ("the onlookers", "Whispers broke out")),
+        ("A hush fell over the room.", ("the room", "A hush fell")),
+        ("The crowd murmured.", ("the crowd", "murmured")),
+    ])
+    def test_en_crowd_after_cue_is_credited(self, draft, expected):
+        found = pr.detect_reactions(draft, [], language="en-US", protagonist_names=["Kael"])
+        assert [(r.reactor, r.reaction) for r in found] == [expected]
+
+    def test_zh_crowd_after_cue_is_credited(self):
+        found = pr.detect_reactions("惊呼声响彻全场。", [], language="zh-CN",
+                                    protagonist_names=["林凡"])
+        assert [(r.reactor, r.reaction) for r in found] == [("全场", "惊呼")]
+
+    def test_bare_murmured_speech_is_not_a_reaction(self):
+        assert pr.detect_reactions("Elder Wang murmured a reply and left.", ["Elder Wang"],
+                                   language="en-US", protagonist_names=["Lin Fan"]) == []
+
+    @pytest.mark.parametrize("draft,language", [
+        ("王虎脸上没有丝毫震惊，反而笑了起来。", "zh-CN"),
+        ("王虎毫不畏惧。", "zh-CN"),
+        ("王虎并未愣住。", "zh-CN"),
+        ("王虎并不后悔。", "zh-CN"),
+        ("Wang Hu did not flinch.", "en-US"),
+        ("Wang Hu never gasped.", "en-US"),
+        ("Wang Hu didn't even flinch.", "en-US"),
+    ])
+    def test_negated_reactions_are_not_credited(self, draft, language):
+        assert pr.detect_reactions(draft, ["王虎", "Wang Hu"], language=language,
+                                   protagonist_names=["林凡", "Kael"]) == []
+
+    @pytest.mark.parametrize("draft,language,reaction", [
+        ("王虎从未如此震惊过。", "zh-CN", "震惊"),
+        ("王虎忍不住倒吸一口凉气。", "zh-CN", "倒吸一口凉气"),
+        ("王虎不由得愣住了。", "zh-CN", "愣住"),
+        ("Wang Hu couldn't help but gasp.", "en-US", "gasp"),
+    ])
+    def test_non_negating_lead_ins_still_count(self, draft, language, reaction):
+        found = pr.detect_reactions(draft, ["王虎", "Wang Hu"], language=language,
+                                    protagonist_names=["林凡", "Kael"])
+        assert [r.reaction for r in found] == [reaction]
+
 
 # ── 2. enrich_actuals → chapter_actuals 持久化 ────────────────────────────────
 
@@ -431,6 +504,49 @@ class TestCraftChecks:
         _cast(conn)
         ctx = _ctx(conn, 3, "林凡一招击败赵师兄。", beats=[], plan_context=_plan_context(3))
         assert [i["category"] for i in pr.craft_checks(ctx)] == ["craft.payoff_no_reaction"]
+
+    def test_english_staple_reaction_is_silent(self, conn):
+        # review：曾因 "grin vanished"/"hands shook" 不在词表而误报 Payoff without a reaction
+        set_meta(conn, "content_language", "en-US")
+        set_meta(conn, "protagonist", "Kael")
+        conn.commit()
+        beats = [{"seq": 1, "beat_type": "payoff_beat", "summary": "Kael disarms Dorn",
+                  "witnesses": ["Dorn"]}]
+        draft = ("Kael's blade stopped at Dorn's throat. Dorn's grin vanished. "
+                 "His hands shook as he lowered the axe.")
+        assert pr.craft_checks(_ctx(conn, 3, draft, beats)) == []
+
+    _SOLO = [{"seq": 1, "beat_type": "setup", "summary": "林凡闭关"},
+             {"seq": 2, "beat_type": "payoff_beat", "summary": "林凡突破筑基",
+              "value_axis": "炼气→筑基", "witnesses": []}]
+    _SOLO_DRAFT = "洞府之中，林凡盘膝而坐。三日之后，他体内灵力轰然冲破瓶颈，筑基成功。"
+
+    def test_solo_payoff_defers_to_the_aftermath_window(self, conn):
+        # review：闭关突破/独自获宝本章无人在场，不在爽点章立刻告警，交给下一章的余波规则
+        _cast(conn)
+        assert pr.craft_checks(_ctx(conn, 3, self._SOLO_DRAFT, self._SOLO)) == []
+        # 下一章仍无任何反应 → 余波规则照常追究
+        _store_contract(conn, 3, self._SOLO)
+        _store_actuals(conn, 3, reactions=[])
+        plain = [{"seq": 1, "beat_type": "setup", "summary": "出关", "value_axis": "静→动"}]
+        issues = pr.craft_checks(_ctx(conn, 4, "林凡走出洞府，山风扑面。", plain))
+        assert [i["category"] for i in issues] == ["craft.payoff_reaction_deferred"]
+        assert pr.craft_checks(_ctx(conn, 4, "消息传开，众人哗然。", plain)) == []
+
+    def test_solo_payoff_warns_immediately_without_a_window(self, conn):
+        _cast(conn)
+        ctx = _ctx(conn, 3, self._SOLO_DRAFT, self._SOLO)
+        cfg = NovelForgeConfig()
+        cfg.payoff.reaction_window_chapters = 0
+        ctx.extra["cfg"] = cfg
+        assert [i["category"] for i in pr.craft_checks(ctx)] == ["craft.payoff_no_reaction"]
+
+    def test_unwitnessed_face_slap_still_warns_immediately(self, conn):
+        _cast(conn)
+        beats = [{"seq": 1, "beat_type": "payoff_beat", "summary": "林凡当众打脸赵师兄",
+                  "value_axis": "轻视→敬畏", "witnesses": []}]
+        issues = pr.craft_checks(_ctx(conn, 3, "林凡一招击败赵师兄，转身离开。", beats))
+        assert [i["category"] for i in issues] == ["craft.payoff_no_reaction"]
 
 
 class TestDeferredReaction:

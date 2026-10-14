@@ -310,6 +310,78 @@ class TestNewcomerResolver:
         draft = _draft("危急关头，" + "、".join(names) + "联手击退魔头。")
         assert len(_checks(dem.craft_checks(_ctx(conn, 5, draft)), dem.CHECK_NEWCOMER)) == 3
 
+    # review：本章新登场、在高潮被打脸的挑衅者曾被报成"解决者"（措辞与修复建议都反了）
+    _VILLAIN_CLIMAX = ("一个黑袍青年从天而降，自称赵无极，出手便要取林凡性命。"
+                       "林凡冷笑一声，一剑斩出，赵无极惨叫着倒飞出去，跪地求饶。")
+    _VILLAIN_PROPOSALS = [
+        {"op": "add", "fact_type": "event", "entity": "赵无极",
+         "new": {"subject": "赵无极", "predicate": "挑衅", "object": "林凡"}},
+    ]
+
+    def _history(self, conn):
+        _entity(conn, "e_lin", "林凡", first=1)
+        for chapter in (1, 2, 3, 4):
+            _index_chapter(conn, chapter, "林凡下山，继续赶路。")
+
+    def test_new_villain_defeated_in_climax_is_not_a_resolver(self, conn):
+        self._history(conn)
+        draft = _draft(self._VILLAIN_CLIMAX)
+        issues = dem.craft_checks(_ctx(conn, 5, draft, proposals=self._VILLAIN_PROPOSALS))
+        assert _checks(issues, dem.CHECK_NEWCOMER) == []
+
+    @pytest.mark.parametrize("climax", [
+        "危急关头，林凡一剑斩杀赵无极，魔头随之溃散。",          # 打击动词的宾语
+        "危急关头，赵无极被林凡一掌拍飞，再无还手之力。",        # 被动句
+        "危急关头，林凡一拳轰在赵无极胸口，魔头溃散。",
+    ])
+    def test_new_villain_as_object_or_passive_is_not_a_resolver(self, conn, climax):
+        _entity(conn, "e_zhao", "赵无极", first=5)
+        _entity(conn, "e_lin", "林凡", first=1)
+        assert _checks(dem.craft_checks(_ctx(conn, 5, _draft(climax))),
+                       dem.CHECK_NEWCOMER) == []
+
+    def test_new_ally_who_defeats_the_villain_is_still_a_resolver(self, conn):
+        self._history(conn)
+        _entity(conn, "e_xue", "血魔老祖", first=2)
+        climax = "危急关头，一道剑光落下，赵无极一剑斩出，血魔老祖惨叫着倒飞出去。"
+        proposals = [{"op": "add", "fact_type": "event", "entity": "赵无极",
+                      "new": {"subject": "赵无极", "predicate": "击退", "object": "血魔老祖"}}]
+        [issue] = _checks(dem.craft_checks(_ctx(conn, 5, _draft(climax), proposals=proposals)),
+                          dem.CHECK_NEWCOMER)
+        assert "「赵无极」" in issue["detail"]
+
+    def test_new_onlooker_who_only_reacts_is_not_a_resolver(self, conn):
+        _entity(conn, "e_lin", "林凡", first=1)
+        _entity(conn, "e_wang", "王长老", first=5)
+        climax = "林凡一剑击退魔头。王长老目瞪口呆，半晌说不出话。"
+        assert _checks(dem.craft_checks(_ctx(conn, 5, _draft(climax))),
+                       dem.CHECK_NEWCOMER) == []
+
+    def test_defeated_newcomer_late_in_volume_gets_the_softer_late_wording(self, conn):
+        _volume(conn, 1, 20)
+        _entity(conn, "e_lin", "林凡", first=1)
+        _entity(conn, "e_zhao", "赵无极", first=19)
+        issues = dem.craft_checks(_ctx(conn, 19, _draft(self._VILLAIN_CLIMAX)))
+        assert [i["check"] for i in issues] == [dem.CHECK_LATE_NEWCOMER]
+        assert "「赵无极」" in issues[0]["detail"]
+
+    def test_english_defeated_newcomer_is_not_a_resolver(self, conn):
+        set_meta(conn, "content_language", "en-US")
+        ws = {"writing_profile": {"content_language": "en-US"}}
+        _entity(conn, "e_kael", "Kael", first=1)
+        _entity(conn, "e_dorn", "Dorn", first=3)
+        filler = "Kael crossed the bridge and counted the lanterns. " * 8
+        tail = "Somewhere below, the river kept its slow count of the hours. " * 2
+        for climax in ("Kael's blade flashed, and Dorn was thrown into the mud. ",
+                       "Kael struck down Dorn with a single blow. ",
+                       "Dorn screamed and fell to his knees before Kael. "):
+            assert _checks(dem.craft_checks(_ctx(conn, 3, filler + climax + tail, workspace=ws)),
+                           dem.CHECK_NEWCOMER) == [], climax
+        # 对照：新人出手解决 → 照报
+        rescue = "Then Dorn stepped out of the fog and broke the siege. "
+        assert len(_checks(dem.craft_checks(_ctx(conn, 3, filler + rescue + tail, workspace=ws)),
+                           dem.CHECK_NEWCOMER)) == 1
+
 
 # ── b) 未经展示的能力 ────────────────────────────────────────────────────────
 
@@ -495,6 +567,44 @@ class TestUnpaidCost:
         assert dem._cost_keywords({"type": "精血", "amount": "三成"}) == ["精血"]
         assert dem._cost_keywords(["a memory", "ten years of lifespan"]) == ["memory", "lifespan"]
 
+    @pytest.mark.parametrize("cost,core", [
+        # review：只剥固定动词前缀/结果后缀，名词核心抽不出来 → 换个说法兑现也报"代价未付"
+        ("精神力消耗", "精神力"), ("短暂虚弱", "虚弱"), ("折寿十年", "寿"),
+        ("每次使用后虚弱三日", "虚弱"), ("内力消耗", "内力"),
+    ])
+    def test_cost_keyword_noun_core(self, cost, core):
+        assert core in dem._cost_keywords(cost)
+
+    def test_quantity_lead_in_does_not_leave_garbage(self):
+        assert dem._cost_keywords("三日内无法动用灵力") == ["灵力"]
+
+    @pytest.mark.parametrize("cost,paid", [
+        ("精神力消耗", "他只觉精神力大量消耗，头痛欲裂。"),
+        ("折寿十年", "他鬓角霜白，生生折了十年寿。"),
+        ("短暂虚弱", "落地后他虚弱得几乎站不稳。"),
+        ("三日内无法动用灵力", "此后三日，他体内灵力枯竭，连火球都搓不出来。"),
+    ])
+    def test_paraphrased_cost_in_prose_counts_as_paid(self, conn, cost, paid):
+        _gimmick(conn, "g1", "血遁术", 0, cost=cost)
+        draft = "林凡催动血遁术，遁出百里。" + paid
+        assert dem.craft_checks(_ctx(conn, 1, draft, beats=PLAIN_BEATS)) == []
+        # 对照：正文没写代价 → 照报
+        [issue] = dem.craft_checks(_ctx(conn, 1, "林凡催动血遁术，遁出百里。", beats=PLAIN_BEATS))
+        assert issue["check"] == dem.CHECK_UNPAID_COST
+
+    @pytest.mark.parametrize("draft", [
+        "此刻他已无法再施展血遁术。", "他从不轻易使用血遁术。", "林凡不再动用血遁术。",
+    ])
+    def test_negator_with_adverb_is_not_a_use(self, conn, draft):
+        _gimmick(conn, "g1", "血遁术", 0, cost={"寿元": 10})
+        assert dem.craft_checks(_ctx(conn, 1, draft, beats=PLAIN_BEATS)) == []
+        assert not dem._sentence_uses(draft, draft.index("血遁术"),
+                                      draft.index("血遁术") + 3, False)
+
+    def test_double_negation_with_adverb_is_still_a_use(self):
+        draft = "林凡不得不再次施展血遁术。"
+        assert dem._sentence_uses(draft, draft.index("血遁术"), draft.index("血遁术") + 3, False)
+
 
 # ── d) 卷末新人/新设定 ───────────────────────────────────────────────────────
 
@@ -535,6 +645,18 @@ class TestLateNewcomer:
         _entity(conn, "e2", "玄天老祖", first=19)
         issues = dem.craft_checks(_ctx(conn, 19, _draft(CLIMAX)))
         assert [i["check"] for i in issues] == [dem.CHECK_NEWCOMER]
+
+    def test_volume_finale_hook_character_is_not_flagged(self, conn):
+        # review：卷末章节以新人物现身作钩子是连载常态，不应按"卷末不宜引入新人"报
+        _volume(conn, 1, 20)
+        _entity(conn, "e9", "萧瑾", first=19)
+        hook = "山顶上，一道黑影缓缓现身，正是魔宗少主萧瑾。"
+        draft = FILLER * 8 + hook
+        assert dem.craft_checks(_ctx(conn, 19, draft, beats=PLAIN_BEATS)) == []
+        # 同一人物在正文中段登场 → 照报
+        draft = FILLER * 4 + hook + FILLER * 4
+        [issue] = dem.craft_checks(_ctx(conn, 19, draft, beats=PLAIN_BEATS))
+        assert issue["check"] == dem.CHECK_LATE_NEWCOMER and "「萧瑾」" in issue["detail"]
 
     def test_new_gimmick_late_in_volume(self, conn):
         _volume(conn, 1, 20)

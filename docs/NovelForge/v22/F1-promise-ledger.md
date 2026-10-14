@@ -97,7 +97,9 @@ COMMIT 后 _settle_chapter ─ foreshadow_settle（LLM，1 次）→ ext_promise
 - 交给结算员的未解伏笔仍 ≤20 条，但排序改为：正文点名的 → 读者可见 → 最久未触及 → 最早埋设 → id，
   被提醒块注入的休眠长线不会再被 `ORDER BY planted_chapter LIMIT 20` 挤掉。老库（无 v22 列）保持旧口径。
 - 每行附 `［长线·读者可见］` 标签与 `（父承诺：X）`；`## 未解伏笔列表` 标题与"单次调用"不变。
-- 结算仲裁新建的钩子默认 `line_type='short'`、`visibility='reader'`。
+- 结算仲裁新建的钩子默认 `line_type='short'`、`visibility='reader'`。它们的线型只是猜测、流水线里也无人能改，
+  所以"未确认"的结算钩子（origin=settle、importance ≤2、未设 remind_every）不参与短线超时（检查与提示同口径），
+  只走休眠提醒；调高重要度或设提醒周期即视为人工确认。
 
 ## 八、API
 

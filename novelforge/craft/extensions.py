@@ -54,10 +54,19 @@ _ISSUE_SEVERITIES = {"warn", "block"}
 _REPAIR_SCOPES = {"local", "structural"}
 
 
+# 导入失败的扩展模块：记一次日志后跳过（每章会多次查询钩子，不反复重试、刷屏）。
+_BROKEN: set[str] = set()
+
+
 def _load(name: str) -> ModuleType | None:
+    """Import one extension module; any import-time error (not only ImportError —
+    a module-level NameError/SyntaxError too) disables just that module."""
+    if name in _BROKEN:
+        return None
     try:
         return importlib.import_module(f"{__package__}.{name}")
-    except ImportError:
+    except Exception:
+        _BROKEN.add(name)
         logger.exception("craft extension %s failed to import", name)
         return None
 

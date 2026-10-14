@@ -129,6 +129,20 @@ class TestAxisPolarity:
     def test_axis_label_and_magnitude(self, axis, expected):
         assert polarity.axis_polarity(axis) == expected
 
+    @pytest.mark.parametrize("axis,expected", [
+        # review：裸写 "weak -> strong" 曾把 weak 当轴名（情感 -）而得 "-"（符号反了）
+        ("weak -> strong", "+"), ("Weak → Strong", "+"), ("from weak to strong", "+"),
+        ("weak -> very strong", "+"), ("weak -> strongest", "+"), ("weak -> high", "+"),
+        ("strong -> weak", "-"), ("weaker -> stronger", "+"), ("powerless -> powerful", "+"),
+        # 两态都只是量级词时，好坏由轴名决定（不看 weak/strong 本身的情感）
+        ("pressure: weak -> strong", "-"), ("enemy power: weak -> strong", "-"),
+        ("fear: strong -> weak", "+"), ("Kai: weak -> strong", "+"),
+        # 无轴名、无情感词的纯量级变化仍不猜
+        ("low -> high", None), ("high -> low", None),
+    ])
+    def test_bare_english_magnitude_pairs(self, axis, expected):
+        assert polarity.axis_polarity(axis) == expected
+
     def test_far_negator_does_not_flip(self):
         assert polarity.state_value("无敌的希望") == "+"
 

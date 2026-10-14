@@ -404,6 +404,17 @@ class TestCraftChecks:
         assert not _checks(pl.craft_checks(_ctx(conn, 6, draft, actions=actions)),
                            "promise_thin_setup")
 
+    def test_thin_setup_message_counts_the_plant_explicitly(self, conn):
+        # review：触及数含埋设本身，文案曾写成"建议至少 2 次提醒/推进"，与计数单位不符
+        _fs(conn, "fs_big", "灭门真相", planted=2, importance=4)
+        actions = [{"promise_id": "fs_big", "action": "payoff"}]
+        [thin] = _checks(pl.craft_checks(_ctx(conn, 6, "灭门真相大白于天下。", actions=actions)),
+                         "promise_thin_setup")
+        assert "只被触及 1 次（埋设算 1 次；大爽点前建议至少触及 2 次）" in thin["detail"]
+        [en] = _checks(pl.craft_checks(_ctx(conn, 6, "The truth is out.", actions=actions,
+                                            language="en-US")), "promise_thin_setup")
+        assert "touched only 1 time(s), counting the plant" in en["detail"]
+
     def test_small_short_payoff_needs_no_setup(self, conn):
         _fs(conn, "fs_small", "今晚的约战", planted=5, line_type="short", importance=2)
         actions = [{"promise_id": "fs_small", "action": "payoff"}]
@@ -536,6 +547,19 @@ class TestDraftBrief:
         en = pl.draft_brief(conn, 9, workspace, language="en-US", cfg=None).splitlines()
         assert en[1].startswith("- Planned payoff: 复仇 (planted in chapter 7): 血债血偿")
         assert 'close the inner promise(s) "仇人的名字" first' in en[1]
+
+    def test_brief_covers_every_dormant_promise_the_check_would_warn_about(self, conn):
+        # review：提示只注入 2 条，检查却逐条报到 3 条——照提示写完仍挨第 3 条的 warn
+        for i, label in enumerate(("血仇", "断剑", "古卷")):
+            _fs(conn, f"fs{i}", label, planted=1 + i)
+        brief = pl.draft_brief(conn, 20, {}, language="zh-CN", cfg=None)
+        assert [line.split("（")[0] for line in brief.splitlines()[1:]] == [
+            "- 血仇", "- 断剑", "- 古卷"]
+        assert pl.craft_checks(_ctx(conn, 20, "他想起血仇、断剑与那卷古卷。")) == []
+        # 注入上限设为 0（关闭注入）时不放宽
+        cfg = NovelForgeConfig()
+        cfg.promises.inject_dormant_limit = 0
+        assert pl.draft_brief(conn, 20, {}, language="zh-CN", cfg=cfg) == ""
 
     def test_overdue_short_line_is_announced(self, conn):
         # 第11章刚推进过（不在提醒周期内），但已超出短线预算：写手必须事先知道
@@ -985,3 +1009,26 @@ class TestForeshadowSettleLedger:
                            " WHERE label='黑袍人身份'").fetchone()
         assert (row["line_type"], row["visibility"], row["origin"]) == (
             "short", "reader", "settle")
+
+    def test_settle_created_hook_is_not_short_overdue_by_default(self, conn):
+        # review：结算自动建档的钩子一律是 short、流水线里没人能改成 long，按"自埋下起
+        # 3 万字"会从第 12 章起每章都报（并每章往提示里塞"本章推进或揭开它"）。
+        from novelforge.craft.foreshadow_settle import settle_foreshadow
+
+        gw, _ = _settle_gw({"settlements": [], "new_hooks": [
+            {"label": "黑袍人身份", "description": "雪夜出现的黑袍人到底是谁"}]})
+        settle_foreshadow(gw, "fast", conn, 1, "正文。")
+        conn.execute("UPDATE foreshadow SET last_mentioned_chapter=10 WHERE label='黑袍人身份'")
+        conn.commit()
+        row = conn.execute("SELECT * FROM foreshadow WHERE label='黑袍人身份'").fetchone()
+        assert pl.is_unconfirmed_settle_hook(dict(row))
+        assert pl.craft_checks(_ctx(conn, 12, _PLAIN)) == []
+        brief = pl.draft_brief(conn, 12, {}, language="zh-CN", cfg=None)
+        assert "预算" not in brief and "本章推进或揭开它" not in brief   # 只是到期提醒
+        # 被遗忘时仍由休眠检查提醒（提一笔即可消除，可执行）
+        dormant = _checks(pl.craft_checks(_ctx(conn, 15, _PLAIN)), "promise_dormant")
+        assert len(dormant) == 1 and "黑袍人身份" in dormant[0]["detail"]
+        # 人工确认（调高重要度或设提醒周期）后，短线预算照常生效
+        conn.execute("UPDATE foreshadow SET importance=3 WHERE label='黑袍人身份'")
+        conn.commit()
+        assert _checks(pl.craft_checks(_ctx(conn, 12, _PLAIN)), "promise_short_overdue")

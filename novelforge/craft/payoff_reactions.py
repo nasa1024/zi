@@ -34,16 +34,26 @@ from ..planning.models import EvidenceSpan, ReactionEvidence
 
 _ZH_CUES: tuple[tuple[str, str], ...] = (
     # 震惊 / 失神
-    (r"倒吸(?:了)?(?:一口)?(?:冷气|凉气)", "shock"),
+    (r"倒(?:吸|抽)(?:了)?(?:一?口)?(?:冷气|凉气)|倒(?:吸|抽)(?:了)?一口气", "shock"),
     (r"目瞪口呆|瞠目结舌|呆若木鸡|张大了嘴(?:巴)?", "shock"),
-    (r"不敢置信|难以置信|不可置信|不敢相信|无法相信", "shock"),
-    (r"震惊|吃惊|大惊|惊愕|愕然|错愕|骇然|惊骇|惊呆", "shock"),
-    (r"愣住|愣在|一愣|愣了|呆住|呆立|怔住|一怔|怔在|傻眼", "shock"),
+    (r"不敢置信|难以置信|不可置信|不敢相信|无法相信|不可思议", "shock"),
+    (r"震惊|吃惊|大惊|惊愕|愕然|错愕|骇然|惊骇|惊呆|大骇|震撼", "shock"),
+    (r"愣住|愣在|一愣|愣了|呆住|呆立|怔住|一怔|怔在|傻眼|(?:傻|懵)(?:住)?了|人都傻了", "shock"),
     (r"瞳孔(?:猛地|骤然)?(?:一缩|骤缩|猛缩|收缩|紧缩)", "shock"),
     (r"惊呼|惊叫|失声|哗然|心头一震|心中一震|浑身一震", "shock"),
-    # 惧 / 色变
-    (r"(?:脸色|面色|神色)(?:大变|骤变|剧变|一变|狂变|煞白|惨白|发白|苍白|铁青|难看)", "fear"),
+    (r"(?:心中|心头|心里|心下)(?:一凛|一紧|一沉|大骇|暗惊|一突|巨震|大震|狂震)"
+     r"|暗自心惊|心惊肉跳|如遭雷击|面面相觑|议论纷纷|交头接耳", "shock"),
+    (r"瞪大(?:了)?(?:眼睛|双眼|眼)|双眼圆睁|眼珠子(?:都)?(?:快)?(?:要)?(?:瞪|掉)", "shock"),
+    (r"僵在(?:了)?(?:原地|那里|当场)|(?:身子|身体|浑身)一僵|笑容(?:一僵|僵住|僵在|凝固|消失)"
+     r"|嘴角(?:抽搐|抽动|一抽)|眼中闪过一丝(?:忌惮|惧意|惊骇|惊恐|慌乱)", "shock"),
+    # 惧 / 色变（"脸色变了""脸色顿时变得难看""面色一白"等都算）
+    (r"(?:脸色|面色|神色)(?:顿时|瞬间|骤然|立刻|陡然|当即|一下子|猛地)?"
+     r"(?:大变|骤变|剧变|一变|狂变|微变|变了|一僵|一白|一青|煞白|惨白|发白|苍白|铁青|难看"
+     r"|阴晴不定|青一阵白一阵|变得(?:极为|十分|异常|无比|很|极其)?(?:难看|苍白|煞白|惨白|铁青))",
+     "fear"),
     (r"变了脸色|面如死灰|面无人色|冷汗|头皮发麻|双腿发软|腿一软|双膝一软", "fear"),
+    (r"两股战战|瘫(?:软|坐)在地|浑身冰凉|吓了一(?:大)?跳|吓得"
+     r"|(?:手|双手|身子|身体|双腿|嘴唇)(?:都|在|不停地|不住地)?(?:微微)?(?:发抖|颤抖|哆嗦)", "fear"),
     # 后退须带"受惊"限定：单纯的"后退一步"多是招式身法，不算反应。
     (r"连退|连连后退|踉跄(?:着)?(?:后退|倒退)|(?:吓|惊)得(?:连连)?(?:后退|倒退)"
      r"|(?:后|倒)?退了(?:一|两|三|几|半|数)步|倒退(?:一|两|三|几|半|数)步", "fear"),
@@ -60,6 +70,7 @@ _ZH_CUES: tuple[tuple[str, str], ...] = (
     # 噤声
     (r"噤声|噤若寒蝉|鸦雀无声|一片死寂|死一般的(?:寂静|安静)|寂静无声", "silence"),
     (r"说不出话|哑口无言|无言以对|屏住(?:了)?呼吸", "silence"),
+    (r"哑然|语塞|失语|半晌无言|(?:沉默|默然)(?:了|下来|不语)|一片寂静|落针可闻", "silence"),
     # 悔 / 恨
     (r"后悔|悔不当初|懊悔|悔恨|悔青", "regret"),
     (r"咬牙|咬紧(?:了)?牙关|牙关紧咬|(?:攥|握)紧(?:了)?(?:拳头|双拳)|怨毒|恨恨|不甘", "resentment"),
@@ -72,6 +83,16 @@ _EN_CUES: tuple[tuple[str, str], ...] = (
     (r"speechless|disbelief|(?:could|can)(?:\s*not|n['’]t)\s+believe", "shock"),
     (r"(?:jaws?|mouths?)\s+(?:dropped|fell open|hung open|fell slack)", "shock"),
     (r"eyes\s+(?:widened|went wide|bulged)", "shock"),
+    (r"(?:face|expression|features)\s+(?:went|fell)\s+slack|slack-jawed", "shock"),
+    (r"stiffened|went (?:rigid|stiff|still)|(?:breath|breathing)\s+(?:caught|hitched)", "shock"),
+    (r"(?:grin|smile|smirk|sneer)s?\s+(?:vanished|faded|froze|died|slipped|disappeared"
+     r"|fell away)", "shock"),
+    (r"sputtered|spluttered|stammered|stuttered", "shock"),
+    # 单独的 murmured 多是说话动词（"Elder Wang murmured, ..."），只认群像或带情绪的。
+    (r"(?<=crowd )murmured|(?<=onlookers )murmured|(?<=spectators )murmured"
+     r"|(?<=audience )murmured|murmured in (?:surprise|astonishment|disbelief|shock|awe)"
+     r"|whispers?\s+(?:broke out|spread|rippled|ran)"
+     r"|murmurs?\s+(?:ran|rippled|spread|broke out|rose)", "shock"),
     # A bare "stared" is a stage direction; only a dumbstruck stare counts.
     (r"froze|frozen in place|gaped|gawked|did a double take"
      r"|star(?:ed|ing)\s+(?:dumbly|blankly|wide-eyed|open-mouthed"
@@ -79,6 +100,10 @@ _EN_CUES: tuple[tuple[str, str], ...] = (
     (r"erupted (?:in(?:to)? )?(?:an )?(?:uproar|gasps|exclamations)|(?:in|into) an uproar", "shock"),
     (r"(?:went|turned|grew)\s+(?:pale|white|ashen|gr[ae]y|bloodless)|paled|blanched|ashen", "fear"),
     (r"flinch(?:ed|es)?|trembl(?:ed|ing)|shudder(?:ed|ing)|recoiled", "fear"),
+    (r"(?:colou?r|blood)\s+drain(?:ed|ing|s)?\s+from|drained of colou?r", "fear"),
+    (r"(?:hands?|fingers|knees|legs)\s+(?:shook|were shaking|began to shake|went weak)", "fear"),
+    (r"swallowed (?:nervously|dryly|thickly|convulsively)"
+     r"|took an? (?:involuntary|half|hasty|startled|nervous|unsteady) step back(?:ward)?", "fear"),
     # Stepping back is often just footwork; it needs a scared qualifier.
     (r"backed away|stumbled back(?:ward)?|staggered back(?:ward)?|swallowed hard|cold sweat"
      r"|(?:stepped|took a step) back (?:involuntarily|in (?:fear|shock|alarm|horror))", "fear"),
@@ -99,6 +124,8 @@ _EN_CUES: tuple[tuple[str, str], ...] = (
      r"|retracted", "regret"),
     (r"gritted (?:his|her|their) teeth|clenched (?:his|her|their) (?:jaw|fists?)"
      r"|(?:face|expression) darkened|scowled|glared", "resentment"),
+    (r"jaws?\s+(?:tightened|clenched|set)|eyes\s+narrowed|narrowed (?:his|her|their) eyes",
+     "resentment"),
 )
 
 # 通用群像反应者（不需要在 witnesses 里点名）。
@@ -125,6 +152,25 @@ _EN_OPPONENT_RE = re.compile(
 # 主角作主语时宾语前的介词（"林凡向王长老道歉"）：其后的 cue 仍是主角的动作。
 _ZH_DIRECTION_RE = re.compile(r"(?:向|朝|对|冲|给|替)着?$")
 _EN_DIRECTION_RE = re.compile(r"\b(?:to|toward|towards|at)$", re.IGNORECASE)
+# cue 在前、群像在后（"A murmur ran through the crowd" / "惊呼声响彻全场"）：两者之间只允许
+# 这类"传遍/穿过"的连接，群像才算反应者。
+_EN_CROWD_GAP_RE = re.compile(
+    r"(?:(?:ran|rippled|spread|swept|went up|broke out|rose|erupted|fell)\s+)?"
+    r"(?:through|across|over|among|from|in)",
+    re.IGNORECASE,
+)
+_ZH_CROWD_GAP_RE = re.compile(r"声?(?:在|从|响彻|传遍)|了")
+# 紧邻 cue 之前的否定（"没有丝毫震惊""毫不畏惧" / "did not flinch""never gasped"）：
+# 不是反应，而是刻意的"不为所动"。"从未如此震惊""忍不住倒吸一口凉气"不算否定。
+_ZH_NEGATED_RE = re.compile(
+    r"(?:没有|并未|并无|并不|毫不|毫无|不曾|未曾|从不|没|未|不)"
+    r"(?:丝毫|一丝|半点|任何|一点|半分)?(?:的)?$"
+)
+_EN_NEGATED_RE = re.compile(
+    r"(?:\b(?:not|never|no|without)|n['’]t)(?:\s+(?:even|once|visibly|so much as))?\s*$",
+    re.IGNORECASE,
+)
+_NEGATION_WINDOW_SPLIT_RE = re.compile(r"[，,；;：:。！？!?.\n]|——|—|--")
 _ZH_COORD_RE = re.compile(r"\s*(?:、|和|与|及|以及|跟|同)\s*")
 _EN_COORD_RE = re.compile(r"\s*(?:and|&|as well as)\s*", re.IGNORECASE)
 _ZH_CLAUSE_SEP_RE = re.compile(r"[，,；;：:]|——")
@@ -286,13 +332,19 @@ def _find_mentions(
     return _resolve_overlaps(hits)
 
 
+def _negated(text: str, pos: int, en: bool) -> bool:
+    """A negator right before the cue, inside the same clause ("没有丝毫震惊" / "did not flinch")."""
+    window = _NEGATION_WINDOW_SPLIT_RE.split(text[max(0, pos - (24 if en else 8)):pos])[-1]
+    return bool((_EN_NEGATED_RE if en else _ZH_NEGATED_RE).search(window))
+
+
 def _find_cues(text: str, mask: bytearray, en: bool) -> list[_Hit]:
     hits: list[_Hit] = []
     for pattern, attitude in (_EN_CUE_RES if en else _ZH_CUE_RES):
         for match in pattern.finditer(text):
             if not mask[match.start()]:
                 hits.append(_Hit(match.start(), match.end(), match.group(0), "cue", attitude))
-    return _resolve_overlaps(hits)
+    return [hit for hit in _resolve_overlaps(hits) if not _negated(text, hit.start, en)]
 
 
 def _coordinated(text: str, left: _Hit, right: _Hit, en: bool) -> bool:
@@ -377,12 +429,15 @@ def _attribute(
             return [], 0.0, clause
         return _non_protagonist(group), 0.7, clause
 
-    # B. 定语式："脸色大变的王长老" / "a stunned Elder Wang"。
+    # B. 定语式："脸色大变的王长老" / "a stunned Elder Wang"；
+    #    群像在 cue 之后："A murmur ran through the crowd" / "惊呼声响彻全场"。
     after = [m for m in in_clause if m.start >= cue.end]
     if after:
         gap = text[cue.end:after[0].start].strip()
         if (en and gap == "") or (not en and gap == "的"):
             return _non_protagonist([after[0]]), 0.8, clause
+        if after[0].kind == "crowd" and (_EN_CROWD_GAP_RE if en else _ZH_CROWD_GAP_RE).fullmatch(gap):
+            return [after[0]], 0.7, clause
 
     # C. "对方面如死灰"：对手指代只会指向非主角——本句 cue 前、否则同段前两句里最近的一个。
     if (_EN_OPPONENT_RE if en else _ZH_OPPONENT_RE).search(text, clause[0], cue.start):
@@ -529,6 +584,22 @@ class PayoffBeat:
     seq: int
     summary: str
     witnesses: tuple[str, ...]
+    # 打脸/羞辱/当众…：本拍写明需要观众（见 _needs_audience）
+    audience: bool = False
+
+
+# 本拍文字写明"要有人看着"的爽点（打脸/羞辱/当众…，与 payoff_binding 的在场者要求同口径）。
+# 未点名在场者、也不属于此类的爽点（闭关突破、独自获宝）本章可能本就无人在场。
+_AUDIENCE_WORDS: tuple[str, ...] = (
+    "打脸", "羞辱", "当众", "众目睽睽", "众人面前", "face_slap", "face-slap", "face slap",
+    "humiliat", "comeuppance", "turn the tables", "turns the tables", "in public",
+    "publicly", "in front of",
+)
+
+
+def _needs_audience(beat: Mapping[str, Any]) -> bool:
+    text = f"{beat.get('summary') or ''} {beat.get('value_axis') or ''}".lower()
+    return any(word in text for word in _AUDIENCE_WORDS)
 
 
 def _witness_list(raw: Any) -> list[str]:
@@ -556,6 +627,7 @@ def payoff_beats(beats: Any) -> list[PayoffBeat]:
             seq=max(1, seq),
             summary=str(beat.get("summary") or "").strip(),
             witnesses=tuple(_witness_list(beat.get("witnesses"))),
+            audience=_needs_audience(beat),
         ))
     return out
 
@@ -834,7 +906,8 @@ def _visible_reactors(
 
 def _restrict(beats: Sequence[PayoffBeat], kept: Sequence[str]) -> list[PayoffBeat]:
     allowed = set(kept)
-    return [PayoffBeat(b.seq, b.summary, tuple(w for w in b.witnesses if w in allowed))
+    return [PayoffBeat(b.seq, b.summary, tuple(w for w in b.witnesses if w in allowed),
+                       b.audience)
             for b in beats]
 
 
@@ -1148,8 +1221,13 @@ def craft_checks(ctx: Any) -> list[dict]:
             protagonist_names=protagonist.names, aliases=aliases,
         )
         if not reactions:
-            issues.append(_no_reaction_issue(beats, witnesses, draft_text, en=en,
-                                             window=settings.window))
+            # 未点名在场者、也不是打脸/当众类的独处爽点（闭关突破、独自获宝）：本章可能
+            # 本就无人在场，按"爽点章或下一章"的口径交给余波规则（_pending_payoffs）在
+            # 窗口内追究，不在本章立刻告警；窗口为 0 时没有后续规则，照常告警。
+            solo = not witnesses and not any(b.audience for b in beats)
+            if not (solo and settings.window > 0):
+                issues.append(_no_reaction_issue(beats, witnesses, draft_text, en=en,
+                                                 window=settings.window))
         elif witnesses and not {r.reactor for r in reactions} & set(witnesses):
             crowd = [r for r in reactions if is_crowd_reactor(r.reactor)]
             issues.append(_crowd_only_issue(witnesses, crowd, en=en))

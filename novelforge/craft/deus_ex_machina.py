@@ -11,11 +11,12 @@ Brooks 第二情节点后"no newcomers"。
 五项检查全部确定性（无 LLM）、只读、默认 ``warn``（设计说明见
 ``docs/NovelForge/v22/F2-deus-ex-machina.md``）：
 
-a) newcomer_resolver       高潮段由本章首次出现的具名实体解决
+a) newcomer_resolver       高潮段由本章首次出现的具名实体解决（在高潮被打败或只在旁观的新人不算
+                           "解决者"，见 _mention_role）
 b) undemonstrated_ability  高潮段动用（或仅出现）此前从未展示/使用过的金手指；明确动用与
                            仅提及措辞不同，否定句（"没敢动用"）不报；soft_magic 时措辞降级
 c) unpaid_cost             有 cost_json 的金手指本章被使用，但提案与正文都没有兑现代价
-d) late_newcomer           卷进度超过阈值后首次出现的具名实体（跳过无名龙套，≤3 条）
+d) late_newcomer           卷进度超过阈值后首次出现的具名实体（跳过无名龙套与章末钩子段，≤3 条）
 e) new_ability_ratio       本章新增能力，且本卷"新增能力数 ÷ 旧能力新用法数"超阈值
 
 "首次出现"判定（宁漏勿误报）：此前任一章（1..N-1）留有痕迹即视为已铺垫——
@@ -109,6 +110,64 @@ _EN_USE_VERB = re.compile(
 _EN_NEGATION = re.compile(
     r"(?:\bnot|\bnever|n't|\bwithout|\bno longer|\brefused to)\W+(?:\w+\W+)?$", re.IGNORECASE,
 )
+# 否定词与动词之间可隔一个副词（"已无法再施展""从不轻易使用"）。
+_ZH_NEGATED_VERB = re.compile(
+    r"(?:没有|并未|不曾|未曾|无法|不敢|不能|没|未|不|别|莫|勿)"
+    r"(?:再|轻易|随意|贸然|继续|立刻|马上|随便)$"
+)
+
+# ── a) "解决者"判定：高潮段里新登场者是出手的一方，还是被打败/只在旁观的一方 ──────
+# 新登场的挑衅者在高潮被打脸是爽文最常见的章节形态，乌贼/Sanderson/Brooks 的规则针对的
+# 是"新的解决办法"，不是"新的被解决者"。主语视角：名字之后、直到另一个已知名字出现前的
+# 文字（跨分句承前省略主语）。
+_ZH_DEFEAT = re.compile(
+    r"倒飞|惨叫|惨嚎|跪地|跪倒|跪下|求饶|败退|溃败|落败|大败|惨败|吐血|喷血|咳血|呕血|身亡|毙命"
+    r"|倒地|倒下|不敌|重伤|昏死|昏迷过去|狼狈逃|逃窜|伏诛|陨落|灰飞烟灭|魂飞魄散|认输|服输"
+)
+# 名字前紧挨着的打击动词（"一剑斩杀赵无极""一拳轰在赵无极胸口"）或处置式"将/把"。
+_ZH_HIT_BEFORE = re.compile(
+    r"(?:击败|打败|击退|逼退|斩杀|击杀|诛杀|格杀|重创|镇压|制服|擒住|抓住|刺穿|将|把"
+    r"|斩|杀|刺|轰|劈|拍|踢|踹|废|擒|打|击)(?:了|掉|翻|飞|退|倒|在|向|中|住)?$"
+)
+_ZH_PASSIVE_AFTER = re.compile(r"^(?:竟|却|也|又|终|终于|直接|当场|顿时|瞬间|已)?(?:被|遭)")
+_ZH_ACTION = re.compile(
+    "出手|救|挡|拦|护|击|斩|轰|劈|杀|破|镇压|化解|制服|拍|刺|" + "|".join(_ZH_USE_VERBS)
+)
+_ZH_ONLOOKER = re.compile(
+    r"目瞪口呆|瞠目结舌|呆若木鸡|震惊|吃惊|大惊|惊呆|愣住|愣在|一愣|怔住|倒吸|惊呼|难以置信"
+    r"|不敢置信|骇然|哗然|面如死灰|(?:脸色|面色|神色)(?:大变|骤变|一变|煞白|苍白|变了)"
+)
+_EN_DEFEAT = re.compile(
+    r"\b(?:fell(?!\s+(?:silent|quiet|still|asleep))|collapsed|crumpled|screamed|shrieked"
+    r"|howled|begged|pleaded|knelt|surrendered|yielded|fled|retreated|died|flew back(?:ward)?"
+    r"|(?:was|were|got) (?:defeated|beaten|thrown|hurled|knocked|struck|slain|killed|disarmed"
+    r"|pinned|sent flying)|went down|lay (?:still|dead|broken)|coughed (?:up )?blood"
+    r"|spat blood)\b",
+    re.IGNORECASE,
+)
+_EN_HIT_BEFORE = re.compile(
+    r"\b(?:defeated|struck|killed|slew|felled|beat|knocked|threw|hurled|disarmed|pinned"
+    r"|stabbed|pierced|kicked|punched|cut down|struck down|smashed|crushed|overpowered)"
+    r"\s+(?:down\s+)?$",
+    re.IGNORECASE,
+)
+_EN_PASSIVE_AFTER = re.compile(
+    r"^(?:\s+\w+)?\s+(?:was|were|got)\s+(?:\w+\s+)?(?:defeated|beaten|thrown|hurled|knocked"
+    r"|struck|slain|killed|disarmed|pinned|sent)",
+    re.IGNORECASE,
+)
+_EN_ACTION = re.compile(
+    r"\b(?:saved|rescued|struck|blocked|parried|defeated|killed|slew|stopped|shielded"
+    r"|intervened|stepped in|caught|deflected|destroyed|smashed|cut down|attacked|lunged"
+    r"|broke)\b",
+    re.IGNORECASE,
+)
+_EN_ONLOOKER = re.compile(
+    r"\b(?:gasped|stared|froze|paled|stunned|shocked|gaped|speechless|watched)\b",
+    re.IGNORECASE,
+)
+_ZH_SUBJECT_BREAK = re.compile(r"(?:他|她|它|众人|对方)")
+_EN_SUBJECT_BREAK = re.compile(r"^\s*(?:and\s+)?(?:he|she|they|it|everyone)\b", re.IGNORECASE)
 
 # ── 代价关键词（cost_json → 正文里可检索的词）────────────────────────────────
 _COST_SCHEMA_KEYS = frozenset({
@@ -119,8 +178,19 @@ _COST_SCHEMA_KEYS = frozenset({
 _ZH_COST_VERB_PREFIX = re.compile(
     r"^(消耗|燃烧|损失|付出|牺牲|折损|献祭|透支|损耗|扣除|减少|降低|失去|丧失|折|耗|损|扣)"
 )
-_ZH_COST_RESULT_SUFFIX = re.compile(r"(耗尽|枯竭|透支|受损|大损|衰竭|折损|流失|减半|尽失)$")
+_ZH_COST_RESULT_SUFFIX = re.compile(
+    r"(耗尽|枯竭|透支|受损|大损|衰竭|折损|流失|减半|尽失|消耗|损耗|下降|降低|减少|衰退|不足|大减|减弱)$"
+)
 _ZH_QUANTITY = re.compile(r"[0-9０-９一二三四五六七八九十百千万两半数几]+[年月日天成点倍次滴口层份个缕道条名]?")
+# 代价描述里修饰性的前缀（"短暂虚弱""大量精血""三日内无法动用灵力"）：剥掉后剩下名词核心，
+# 正文换个说法（"精神力大量消耗""虚弱得站不稳"）也能认出代价已付。
+_ZH_COST_MODIFIER_PREFIX = re.compile(
+    r"^(短暂|暂时|大量|大幅|严重|轻微|少量|部分|些许|每次|永久|一定|(?:无法|不能|不可|难以)?再?"
+    r"(?:动用|使用|调动|施展|运转|催动|运用)(?:之后|以后|后)?)"
+)
+_ZH_QUANTITY_TAIL = re.compile(r"^(之内|以内|之后|以后|内|后)")
+# 单字也有意义的代价核心（"折寿十年" → 寿：正文"折了十年寿""寿元大减"都算兑现）。
+_ZH_SINGLE_CHAR_COSTS = frozenset({"寿"})
 _EN_STOPWORDS = frozenset({
     "cost", "costs", "price", "pays", "paid", "with", "from", "that", "this", "each", "every",
     "uses", "used", "using", "into", "some", "temporary", "temporarily", "after", "before",
@@ -208,7 +278,8 @@ def craft_checks(ctx: Any) -> list[dict]:
         progress = _volume_progress(span, chapter)
         threshold = float(cfg.late_newcomer_progress)
         if progress is not None and progress > threshold:
-            issues += guard.check_late_newcomer(progress, threshold, flagged)
+            hook_start = _hook_start(len(draft), beats, _tail_ratio(cfg))
+            issues += guard.check_late_newcomer(progress, threshold, flagged, hook_start)
         issues += guard.check_ability_ratio(span)
     return issues
 
@@ -370,11 +441,33 @@ class _Guard:
 
     # ― a) 高潮由本章新登场者解决 ―
 
+    def may_be_resolver(self, entity: _Entity, regions: list[Region]) -> bool:
+        """高潮段里该实体是否可能是"解决者"（宁漏勿误报）。
+
+        任一高潮段提及显示它被打败（倒飞/惨叫/求饶、被动句、打击动词的宾语）→ 不是；
+        所有提及都只是旁观反应（目瞪口呆、脸色大变）→ 不是；其余（出手、或看不出）→ 是。
+        """
+        own = set(entity.names)
+        others = [n for n in self._all_names if n not in own]
+        roles: list[str] = []
+        for name in entity.names:
+            for pos in self.mentions(name):
+                if _in_regions(pos, regions):
+                    roles.append(_mention_role(self.draft, pos, pos + len(name), others,
+                                               self.english))
+        if not roles:
+            return True
+        if "victim" in roles:
+            return False
+        return not all(role == "onlooker" for role in roles)
+
     def check_newcomer_resolver(self, regions: list[Region], flagged: set[str]) -> list[dict]:
         hits: list[tuple[int, str, _Entity, Region]] = []
         for entity in self.entities:
             loc = self.first_mention(entity.names, regions)
-            if loc is not None and self.entity_new(entity) is True:
+            if (loc is not None and self.entity_new(entity) is True
+                    and self.may_be_resolver(entity, regions)):
+                # 本章新登场却在高潮被打败/只是旁观：不是"天降外挂"；卷末时仍由 d) 提示。
                 hits.append((loc[0], entity.name, entity, loc))
         issues = []
         for _, _, entity, loc in sorted(hits, key=lambda h: h[:2])[:_MAX_ISSUES_PER_CHECK]:
@@ -434,19 +527,26 @@ class _Guard:
 
     def check_late_newcomer(
         self, progress: float, threshold: float, flagged: set[str],
+        hook_start: Optional[int] = None,
     ) -> list[dict]:
+        """``hook_start``：章末钩子段起点。首次出现在钩子段里的新人/新设定是给下一卷/下一章
+        埋的钩子（"山顶上，一道黑影缓缓现身"），连载正是这样收尾，不报。"""
+        def in_hook(loc: Region) -> bool:
+            return hook_start is not None and loc[0] >= hook_start
+
         hits: list[tuple[int, str, Region]] = []
         for entity in self.entities:
             if entity.name in flagged or _is_extra(entity.name):
                 continue
             loc = self.first_mention(entity.names)
-            if loc is not None and self.entity_new(entity) is True:
+            if loc is not None and not in_hook(loc) and self.entity_new(entity) is True:
                 hits.append((loc[0], entity.name, loc))
         for gimmick in self.gimmicks:
             if gimmick.name in flagged or not gimmick.new_at(self.chapter):
                 continue
             loc = self.first_mention(gimmick.names)
-            if loc is not None and self.gimmick_undemonstrated(gimmick) is True:
+            if (loc is not None and not in_hook(loc)
+                    and self.gimmick_undemonstrated(gimmick) is True):
                 hits.append((loc[0], gimmick.name, loc))
         issues = []
         for _, name, loc in sorted(hits)[:_MAX_ISSUES_PER_CHECK]:
@@ -901,6 +1001,14 @@ def _resolving_regions(length: int, beats: list[Mapping], tail_ratio: float) -> 
     return merged
 
 
+def _hook_start(length: int, beats: list[Mapping], tail_ratio: float) -> Optional[int]:
+    """最后一个 beat 是 hook 时，章末钩子段的起点（与 _resolving_regions 去掉的段同口径）。"""
+    n = len(beats)
+    if n < 2 or beats[-1].get("beat_type") != "hook":
+        return None
+    return int(length * (1.0 - min(1.0 / n, tail_ratio / 2)))
+
+
 def _in_regions(pos: int, regions: list[Region]) -> bool:
     return any(lo <= pos < hi for lo, hi in regions)
 
@@ -1028,13 +1136,64 @@ def _use_verb_negations(segment: str, english: bool) -> list[bool]:
 
 
 def _zh_negated(text: str, pos: int) -> bool:
-    """动词前两字内有否定词即否定；"不得不/忍不住/不断"之类的双重否定、伪否定除外。"""
+    """动词前两字内有否定词即否定；"不得不/忍不住/不断"之类的双重否定、伪否定除外。
+
+    否定词与动词之间隔一个副词也算（"已无法再施展""从不轻易使用"）。
+    """
     if text[max(0, pos - 3):pos] in _ZH_DOUBLE_NEGATION:
         return False
     before = text[max(0, pos - 2):pos]
     if before in _ZH_PSEUDO_NEGATION:
         return False
-    return any(neg in before for neg in _ZH_NEGATION)
+    if any(neg in before for neg in _ZH_NEGATION):
+        return True
+    wider = text[max(0, pos - 6):pos]
+    if any(d in wider for d in _ZH_DOUBLE_NEGATION):
+        return False
+    return bool(_ZH_NEGATED_VERB.search(wider))
+
+
+def _mention_role(
+    text: str, start: int, end: int, others: list[str], english: bool,
+) -> str:
+    """一次提及在高潮段里的角色：victim（被打败）/ actor（出手）/ onlooker（旁观）/ other。
+
+    主语视角的文字 = 名字之后到句末，遇到另一个已知名字或换主语的代词即截断
+    （"赵无极一剑斩出，血魔老祖惨叫着倒飞"里的"倒飞"不属于赵无极）。
+    """
+    sentence_ends = _EN_SENTENCE_END if english else _ZH_SENTENCE_END
+    lo, _ = _bounds(text, start, end, sentence_ends + _CLAUSE_SEPARATORS)
+    _, hi = _bounds(text, start, end, sentence_ends)
+    prefix = text[lo:start]
+    after = text[end:hi]
+    cut = len(after)
+    for other in others:
+        pos = after.find(other)
+        if 0 <= pos < cut:
+            cut = pos
+    for match in re.finditer(r"[，,；;：:]", after[:cut]):
+        rest = after[match.end():cut]
+        breaker = (_EN_SUBJECT_BREAK.match(rest) if english
+                   else _ZH_SUBJECT_BREAK.match(rest.lstrip()))
+        if breaker:
+            cut = match.end()
+            break
+    run = after[:cut]
+    if english:
+        victim = (_EN_HIT_BEFORE.search(prefix) or _EN_PASSIVE_AFTER.match(run)
+                  or _EN_DEFEAT.search(run))
+        actor = _EN_ACTION.search(run) or _EN_USE_VERB.search(run)
+        onlooker = _EN_ONLOOKER.search(run)
+    else:
+        victim = (_ZH_HIT_BEFORE.search(prefix) or _ZH_PASSIVE_AFTER.match(run)
+                  or _ZH_DEFEAT.search(run))
+        actor = _ZH_ACTION.search(run)
+        onlooker = _ZH_ONLOOKER.search(run)
+    if victim:
+        return "victim"
+    if actor:
+        return "actor"
+    return "onlooker" if onlooker else "other"
 
 
 def _sentence_uses(text: str, start: int, end: int, english: bool) -> bool:
@@ -1090,24 +1249,28 @@ def _cost_keywords(cost: Any) -> list[str]:
 
 
 def _zh_cost_terms(segment: str) -> list[str]:
-    """"消耗十年寿元" → ["消耗十年寿元", "寿元"]；"灵力耗尽" → ["灵力耗尽", "灵力"]。"""
+    """"消耗十年寿元" → ["消耗十年寿元", "寿元"]；"灵力耗尽" → ["灵力耗尽", "灵力"]；
+    "精神力消耗" → [.., "精神力"]；"短暂虚弱" → [.., "虚弱"]；"折寿十年" → [.., "寿"]；
+    "三日内无法动用灵力" → ["灵力"]（整段超过 8 字不单独作关键词）。"""
     segment = segment.strip()
     if len(segment) < 2:
         return []
     core = segment
-    for _ in range(4):
+    for _ in range(6):
         stripped = _ZH_COST_VERB_PREFIX.sub("", core)
+        stripped = _ZH_COST_MODIFIER_PREFIX.sub("", stripped)
         stripped = _ZH_COST_RESULT_SUFFIX.sub("", stripped)
         match = _ZH_QUANTITY.match(stripped)
         if match:
-            stripped = stripped[match.end():]
-        if stripped == core:
+            stripped = _ZH_QUANTITY_TAIL.sub("", stripped[match.end():])
+        if stripped == core or not stripped:
             break
         core = stripped
     terms: list[str] = []
     for part in [segment, *_ZH_QUANTITY.split(core)]:
         part = part.strip()
-        if 2 <= len(part) <= 8 and not _ZH_QUANTITY.fullmatch(part) and part not in terms:
+        usable = 2 <= len(part) <= 8 or part in _ZH_SINGLE_CHAR_COSTS
+        if usable and not _ZH_QUANTITY.fullmatch(part) and part not in terms:
             terms.append(part)
     return terms
 

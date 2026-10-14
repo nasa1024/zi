@@ -135,6 +135,26 @@ class TestExtensionRegistry:
         monkeypatch.setattr(polarity_mod, "craft_checks", boom, raising=False)
         assert extensions.run_craft_checks(object()) == []
 
+    def test_import_time_error_is_isolated_and_logged_once(self, monkeypatch):
+        # review：_load 只捕获 ImportError，模块级 NameError 会让 run_craft_checks /
+        # settle_steps 整体抛出（结算阶段会把已提交的章节标成 crashed）。
+        real_import = extensions.importlib.import_module
+        calls: list[str] = []
+
+        def fake_import(name, *args, **kwargs):
+            if name.endswith(".polarity"):
+                calls.append(name)
+                raise NameError("broken module")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(extensions, "_BROKEN", set())
+        monkeypatch.setattr(extensions.importlib, "import_module", fake_import)
+        assert isinstance(extensions.run_craft_checks(object()), list)
+        names = [name for name, _ in extensions.settle_steps()]
+        assert "polarity" not in names and "promise_ledger" in names
+        extensions.enrich_actuals(None, "", None)
+        assert len(calls) == 1          # 坏模块只尝试导入一次
+
     def test_issue_normalisation(self, monkeypatch):
         import novelforge.craft.promise_ledger as promise_mod
 

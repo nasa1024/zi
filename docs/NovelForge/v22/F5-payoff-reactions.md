@@ -48,13 +48,15 @@
    **礼节与身法不算反应**：抱拳/拱手/躬身/行礼须接认输/赔罪/求饶；"跪"须带下/倒/地/伏/拜/了
    （排除"跪坐"）；后退须带受惊限定（连退/踉跄后退/退了N步）；英文 stared 须 dumbly/in disbelief…，
    bowed 须 his head/in defeat…，erupted 须 in cheers/applause/an uproar，stepped back 须 in fear…
+   **紧邻否定不算**："没有丝毫震惊""毫不畏惧" / "did not flinch""never gasped"（"从未如此震惊""忍不住"除外）。
 2. **反应者**：beat 的 witnesses（检查时再并入 `entity_aliases` 别名；英文名额外匹配去掉称谓后的
    首/尾词，如 Elder Wang → Wang）+ 通用群像（众人/全场/围观者/所有人…；everyone/the crowd/the hall…）。
 3. **归属**（按句、分句结构，而非"同句共现"）：
    - A 同分句、cue 之前的主语（含并列"王长老、赵师兄"）；主语是主角时取最近的非主角提及
      （"林凡看着王长老脸色大变" → 王长老），但宾语前是"向/朝/对/冲/给/替 · to/toward/at"时
      动作仍属主角（"林凡向王长老道歉"不算王长老的反应）；
-   - B 定语式"脸色大变的王长老 / a stunned Elder Wang"；
+   - B 定语式"脸色大变的王长老 / a stunned Elder Wang"；群像在 cue 之后、中间只有"传遍/穿过"类连接
+     （"A murmur ran through the crowd""惊呼声响彻全场"）也归群像；
    - C "对方/对手/his opponent" 只指向非主角（本句或同段前两句）；
    - D 承前省略主语"王长老看着林凡，脸色大变"（被承接的主语须在其分句开头 ≤4 字/≤2 词）；
    - E 代词承接同段上一句"王长老盯着碎玉。他脸色大变。"
@@ -72,7 +74,7 @@
 
 | category | 触发 | 文案要点 |
 |---|---|---|
-| `craft.payoff_no_reaction` | 本章有 payoff beat，正文没有任何非主角反应 | "爽点无反应：第2拍「…」之后没有任何非主角角色的可见反应（在场者 X/Y 没有可见反应）"；fix 点名在场者，窗口>0 时提示"也可在下一章开头用余波补上"；span 指向爽点所在句 |
+| `craft.payoff_no_reaction` | 本章有 payoff beat，正文没有任何非主角反应（未点名在场者、又非打脸/当众类的独处爽点——闭关突破、独自获宝——在窗口>0 时不在本章报，交给下一章的余波规则） | "爽点无反应：第2拍「…」之后没有任何非主角角色的可见反应（在场者 X/Y 没有可见反应）"；fix 点名在场者，窗口>0 时提示"也可在下一章开头用余波补上"；span 指向爽点所在句 |
 | `craft.payoff_crowd_only` | 有 witnesses，但只有群像反应 | 点名缺席的在场者，span 为群像反应句 |
 | `craft.payoff_reaction_deferred` | 窗口内第 p 章契约有爽点、其 current actuals 存在且（剔除主角后）0 条反应、重读 p 的正文也无反应，其间各章也没补上，且本章正文仍无这些在场者的反应 | "上一章爽点缺少反应，本章应补上余波反应：…" |
 

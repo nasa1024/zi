@@ -556,19 +556,36 @@ def touch_count(conn: Optional[sqlite3.Connection], row: Mapping[str, Any],
     return 1 + sum(1 for c in chapters if c > planted)
 
 
+def is_unconfirmed_settle_hook(row: Mapping[str, Any]) -> bool:
+    """A hook the settler created on its own (``origin='settle'``) that nobody has
+    curated since: still the creation defaults (importance ≤ 2, no ``remind_every``).
+
+    Its ``line_type='short'`` is only a guess — many such hooks are really long
+    threads the settler keeps mentioning/advancing — and nothing in the pipeline
+    can retag it, so the short-line budget would nag about it every chapter
+    forever.  Such rows are left to the dormancy check (which a mention clears);
+    raising the importance or setting ``remind_every`` confirms the row."""
+    return (
+        str(row.get("origin") or "") == "settle"
+        and (_int(row.get("importance"), 2) or 0) <= 2
+        and _int(row.get("remind_every")) is None
+    )
+
+
 def overdue_short_lines(
     conn: Optional[sqlite3.Connection], rows: Iterable[Mapping[str, Any]], chapter: int,
     cfg: PromiseConfig, language: Any, *, skip_ids: Iterable[str] = (),
 ) -> list[tuple[int, dict]]:
     """Open reader-visible short lines whose content since planting (chapters
     ``planted <= c < chapter``) exceeds the short-line budget, as
-    ``[(units, row)]`` most over budget first."""
+    ``[(units, row)]`` most over budget first.  Unconfirmed settle hooks are
+    skipped (see :func:`is_unconfirmed_settle_hook`)."""
     limit = short_line_limit(cfg, language)
     skip = set(skip_ids)
     out: list[tuple[int, dict]] = []
     for row in rows:
         if (row["id"] in skip or not is_open(row) or row.get("line_type") != "short"
-                or row.get("visibility") != "reader"):
+                or row.get("visibility") != "reader" or is_unconfirmed_settle_hook(row)):
             continue
         planted = _int(row.get("planted_chapter"), chapter) or chapter
         units = content_units_between(conn, planted, chapter, language=language)
@@ -702,7 +719,7 @@ _TEXT = {
         "missing": "本章契约计划{verb}承诺「{label}」，但正文里找不到相关内容",
         "missing_fix": "在本章{verb}「{label}」{note}",
         "thin": "本章计划兑现「{label}」，但它自第{planted}章埋下后只被触及 {touches} 次"
-                "（大爽点前建议至少 {need} 次提醒/推进）——扣子没挖够，兑现会显得突兀",
+                "（埋设算 1 次；大爽点前建议至少触及 {need} 次）——扣子没挖够，兑现会显得突兀",
         "thin_fix": "兑现时回扣此前埋下的细节，让兑现有来处；铺垫按此前章节的提醒/推进计数，"
                     "本章内补的提醒不算——若扣子确实不够，把本章的兑现改为推进（advance），"
                     "后续章节再提醒/推进 {more} 次后兑现",
@@ -754,8 +771,9 @@ _TEXT = {
                    "never touches it.",
         "missing_fix": '{verb_cap} "{label}" in this chapter{note}.',
         "thin": 'This chapter plans to pay off "{label}", but since it was planted in '
-                "chapter {planted} it has been touched only {touches} time(s) (a big payoff "
-                "wants at least {need}); the setup is too thin and the payoff may feel unearned.",
+                "chapter {planted} it has been touched only {touches} time(s), counting the "
+                "plant (a big payoff wants at least {need} touches); the setup is too thin and "
+                "the payoff may feel unearned.",
         "thin_fix": "Call back to the details planted earlier so the payoff feels earned. Setup "
                     "is counted from earlier chapters, so a reminder added in this chapter does "
                     "not count; if the setup really is too thin, turn this chapter's payoff into "
@@ -1055,7 +1073,9 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
     """Dynamic "promise reminders" block for the planner and the drafter.
 
     Lists up to ``inject_dormant_limit`` reader-visible open promises that are
-    due for a reminder (most dormant first), up to as many short lines that are
+    due for a reminder (most dormant first; raised to the dormant promises the
+    ``promise_dormant`` check would warn about, at most ``_ISSUE_CAP``), up to
+    ``inject_dormant_limit`` short lines that are
     over their character/word budget (the ``promise_short_overdue`` check's
     rule), plus the contract's planned promise actions not already listed, each
     with ledger context.  Returns "" when nothing applies.  Also records the
@@ -1102,8 +1122,13 @@ def draft_brief(conn: Optional[sqlite3.Connection], chapter: int, workspace: Any
         return hints
 
     limit = max(0, _int(pcfg.inject_dormant_limit, 2) or 0)
+    # craft check promise_dormant 最多逐条报 _ISSUE_CAP 条休眠承诺：休眠的比注入上限多时，
+    # 把会被告警的那几条也列进来（休眠行的 dormancy_rank 必然排在仅到期的行前面），
+    # 否则照提示写完的稿子仍会因第 3 条休眠承诺挨一条 warn。
+    dormant_count = sum(1 for r in open_rows if is_dormant(r, chapter, pcfg))
+    due_limit = max(limit, min(_ISSUE_CAP, dormant_count)) if limit else 0
     due = sorted((r for r in open_rows if is_due_for_reminder(r, chapter, pcfg)),
-                 key=lambda r: dormancy_rank(r, chapter, pcfg))[:limit]
+                 key=lambda r: dormancy_rank(r, chapter, pcfg))[:due_limit]
     # 超出预算的短线（craft check promise_short_overdue 的同一口径）：即使刚推进过、
     # 不在提醒周期内，也要让写手知道它该收了——否则告警无从预见。
     short_limit = short_line_limit(pcfg, language)

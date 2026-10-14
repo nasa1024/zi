@@ -158,7 +158,7 @@ _EN_POSITIVE = frozenset((
     "confident", "confidence", "acceptance", "accepted", "promoted", "promotion", "upgrade",
     "gain", "gained", "love", "loved", "joy", "relief", "relieved", "peace", "calm",
     "escape", "escaped", "revenge", "vindicated", "vindication", "strength", "stronger",
-    "empowered", "glory", "honor", "honour", "praise", "praised", "approval", "belonging",
+    "strong", "strongest", "powerful", "empowered", "glory", "honor", "honour", "praise", "praised", "approval", "belonging",
     "healed", "recovery", "recovered", "solved", "comeback", "upper", "regain", "regained",
     "restored", "repaired", "mended", "rebuilt", "renewed",
 ))
@@ -425,14 +425,23 @@ def _shift_polarity(label: Optional[str], start: str, end: str) -> Optional[str]
     if e == "±":
         return "±"
     s_num, e_num = _NUMERIC.get(s or "", 0), _NUMERIC.get(e or "", 0)
+    start_bare, end_bare = _magnitude_only(start), _magnitude_only(end)
+    # "<轴名>：A→B" 且两态都只是量级词（"pressure: weak -> strong"）：好坏由轴名决定，
+    # 不能拿 weak/strong 本身的情感比——压力变强是坏事、敌人变强也是坏事。
+    if label is not None and start_bare and end_bare:
+        sign = _subject_sign(label)
+        step = _magnitude(end)[0] - _magnitude(start)[0]
+        if sign and step:
+            return "+" if sign * step > 0 else "-"
     # "实力弱→强" / "status low -> high"（无冒号）：一侧是"价值词+量级词"、另一侧只有
     # 量级词时，价值词是轴名而不是状态——不能拿它和量级词比情感。（"强→失败"里的
-    # "失败"不带量级词，仍是状态。）
+    # "失败"不带量级词，仍是状态。）本身只是量级词的一侧（"weak -> strong" 的 weak）
+    # 不是轴名：把它当轴名会以它的情感（weak 为 -）定方向，符号反了。
     if (label is None and e is None and s in _NUMERIC and _magnitude(start)[1]
-            and _magnitude_only(end)):
+            and not start_bare and end_bare):
         label, s_num = start, 0
     elif (label is None and s is None and e in _NUMERIC and _magnitude(end)[1]
-            and _magnitude_only(start)):
+            and not end_bare and start_bare):
         label, e_num = end, 0
     delta = e_num - s_num
     if delta:
