@@ -460,6 +460,7 @@ class ForeshadowHealth(BaseModel):
     oldest_overdue_chapter: Optional[int] = None   # 最早到期且仍未回收的章号
     due_soon: list[dict] = Field(default_factory=list)  # 3 章内到期 [{label, due_chapter}]
     status: str = "green"        # green(无逾期) / yellow(≤2) / red(>2)
+    dormant_count: int = 0       # v22/F1: 下一章时已休眠的读者可见长/短线承诺数
 
 
 # ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
@@ -838,6 +839,12 @@ class ForeshadowCreateRequest(BaseModel):
     due_chapter: Optional[int] = Field(None, ge=1)
     related_entity_id: Optional[str] = None
     importance: int = Field(3, ge=1, le=5)
+    # v22/F1 读者承诺账本
+    promise_kind: Optional[str] = Field(None, max_length=40)   # 推荐词表见 craft.promise_ledger
+    line_type: Literal["long", "short", "micro"] = "long"
+    visibility: Literal["reader", "hidden"] = "reader"
+    parent_id: Optional[str] = None          # 嵌套的外层承诺（后开先关）
+    remind_every: Optional[int] = Field(None, ge=1, le=1000)   # 提醒周期（章）；空=按线型默认
 
 
 class ForeshadowUpdateRequest(BaseModel):
@@ -846,6 +853,12 @@ class ForeshadowUpdateRequest(BaseModel):
     paid_off_chapter: Optional[int] = Field(None, ge=1)
     importance: Optional[int] = Field(None, ge=1, le=5)
     description: Optional[str] = None
+    # v22/F1：promise_kind / parent_id / remind_every 显式传 null 表示清空
+    promise_kind: Optional[str] = Field(None, max_length=40)
+    line_type: Optional[Literal["long", "short", "micro"]] = None
+    visibility: Optional[Literal["reader", "hidden"]] = None
+    parent_id: Optional[str] = None
+    remind_every: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class ForeshadowResponse(BaseModel):
@@ -864,6 +877,20 @@ class ForeshadowResponse(BaseModel):
     advance_count: int = 0
     last_advanced_chapter: Optional[int] = None
     origin: str = "manual"
+    # v22/F1 读者承诺账本
+    promise_kind: Optional[str] = None
+    line_type: str = "long"
+    visibility: str = "reader"
+    parent_id: Optional[str] = None
+    remind_every: Optional[int] = None
+
+
+class ForeshadowDormantResponse(ForeshadowResponse):
+    """v22/F1: a dormant reader promise (``GET /foreshadow/dormant``)."""
+    last_touch_chapter: int              # max(埋设, 最近提及, 最近推进)
+    chapters_since_touch: int
+    effective_remind_every: int          # 显式 remind_every 或按线型的默认值
+    dormant_after: int                   # 超过此章数未触及即休眠
 
 
 # ── Style anchors（P1#9 文风锚点 few-shot）────────────────────────────────────

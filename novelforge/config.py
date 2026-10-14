@@ -118,6 +118,7 @@ class PromiseConfig:
     default_remind_every: int = 5        # 长线默认提醒周期（章）
     dormant_factor: int = 2              # 超过 remind_every × factor 章未触及 → 休眠告警
     short_line_max_chars: int = 30_000   # 短线超过此字数未推进 → 超时告警（千幻冰云：3 万字内揭开）
+    short_line_max_words: int = 20_000   # 英文 profile 的短线上限（词；≈10 章 × 2000 词）
     opening_window_chapters: int = 3     # 开篇窗口：结束时需至少 1 长线 + 1 短线读者可见承诺
     max_payoffs_per_chapter: int = 2     # 同章兑现超过此数 → 张力断崖提示
     big_payoff_min_touches: int = 2      # 大爽点兑现前至少被提醒/推进的次数
