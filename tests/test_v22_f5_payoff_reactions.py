@@ -348,6 +348,10 @@ class TestDetector:
         ("众人莫不脸色大变。", "众人", "脸色大变"),
         ("众人无一不目瞪口呆。", "众人", "目瞪口呆"),
         ("王虎不得不低下头。", "王虎", "低下头"),
+        ("众人无一人不骇然。", "众人", "骇然"),
+        ("众人没一个不目瞪口呆。", "众人", "目瞪口呆"),
+        ("王虎不是不震惊。", "王虎", "震惊"),
+        ("王虎不可能不后悔。", "王虎", "后悔"),
     ])
     def test_double_negation_is_affirmative(self, draft, reactor, reaction):
         found = pr.detect_reactions(draft, ["王虎"], language="zh-CN",

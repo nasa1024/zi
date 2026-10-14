@@ -413,6 +413,22 @@ class TestBatchPrompt:
                            "- 玉佩（第5章埋下，已 5 章未提及）\n\n## 爽点三段式\n- 王长老当众认错", seen)
         assert ch3 == "## 爽点三段式\n- 王长老当众认错"
 
+    def test_window_brief_dedup_keeps_chapter_specific_numbers(self):
+        # Fable 复审：数字全归一会把"第 5 章是大高潮"的余韵要求当成"第 3 章"那条吞掉
+        from novelforge.control_plane.batch import _brief_lines, _fresh_brief
+
+        seen = _brief_lines("")
+        ch4 = "## 节奏要求\n- 上一章（第 3 章）是大高潮：本章开头安排余韵"
+        ch6 = "## 节奏要求\n- 上一章（第 5 章）是大高潮：本章开头安排余韵"
+        assert _fresh_brief(ch4, seen) == ch4
+        assert _fresh_brief("", seen) == ""
+        assert _fresh_brief(ch6, seen) == ch6
+        en = ("## Promise reminders\n- Oath (planted in chapter 2, untouched for {} chapters)\n"
+              "- Map (short line, planted in chapter 4, still open after about {} words, "
+              "over the 3,000-word budget)")
+        assert _fresh_brief(en.format(6, "3,200"), seen) == en.format(6, "3,200")
+        assert _fresh_brief(en.format(7, "3,450"), seen) == ""
+
     def test_en_prompt_has_no_chinese_labels(self):
         from novelforge.skills.chapter_batch_draft_skill import _SYSTEM_EN, build_batch_prompt
 

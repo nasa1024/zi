@@ -259,12 +259,17 @@ def _skill_ctx(orch: Orchestrator, conn, chapter: int, workspace: dict, profile:
     )
 
 
-_BRIEF_NUMBER_RE = re.compile(r"\d+")
+# 只归一窗口内逐章变化的计数器（F1"已 N 章未提及"/短线"约 N 字"，见 promise_ledger 的
+# brief_due / brief_overdue 模板）。其余数字是内容本身（F3"上一章（第 N 章）是大高潮"
+# 在窗口内可对不同章各出现一次），不能归一。
+_BRIEF_COUNTER_RE = re.compile(
+    r"(?<=已 )\d+(?= 章未提及)|(?<=约 )[\d,]+(?= 字)"
+    r"|(?<=untouched for )\d+(?= chapters)|(?<=about )[\d,]+(?= words)"
+)
 
 
 def _brief_key(line: str) -> str:
-    """去重键：数字归一（F1"已 N 章未提及"、短线"约 N 字"在窗口内逐章递增，仍是同一条提醒）。"""
-    return _BRIEF_NUMBER_RE.sub("#", line.strip())
+    return _BRIEF_COUNTER_RE.sub("#", line.strip())
 
 
 def _brief_lines(brief: str) -> set[str]:
@@ -274,7 +279,7 @@ def _brief_lines(brief: str) -> set[str]:
 
 def _fresh_brief(brief: str, seen: set[str]) -> str:
     """窗口内后续章的 brief 只保留此前各章 brief 未出现过的条目（同一条只说一次，如窗口
-    开始前就欠下的爽点反应、到期承诺提醒——仅数字不同视为同一条）；整块无新条目时连标题一起省略。"""
+    开始前就欠下的爽点反应、到期承诺提醒——仅计数器不同视为同一条）；整块无新条目时连标题一起省略。"""
     blocks: list[str] = []
     for block in str(brief or "").split("\n\n"):
         lines = [line for line in block.splitlines() if line.strip()]
