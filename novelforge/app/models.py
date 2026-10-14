@@ -433,6 +433,10 @@ class ChapterStat(BaseModel):
     tokens_spent: Optional[int] = None   # 逐章成本（v11）
     usd_spent: Optional[float] = None
     payoff_closed: bool = False          # P1#10: 本章有确定性爽点闭环证据
+    # v22/F4：分维度质量门结论（None=未评分）+ 未过线项（如 "hook 4<5"）
+    quality_low: Optional[bool] = None
+    quality_gate_reasons: list[str] = Field(default_factory=list)
+    judge_disagreement: Optional[bool] = None   # v22/F4：评委正反两序胜者不一致（None=未做两序校验）
 
 
 class PipelineStats(BaseModel):
@@ -445,11 +449,15 @@ class PipelineStats(BaseModel):
     chapters_completed: int = 0
     total_words: int = 0
     avg_quality_score: Optional[float] = None
-    low_quality_count: int = 0      # 低于 min_score 阈值的章数
+    low_quality_count: int = 0      # 未过质量门的章数（v22/F4：分维度下限；无维度分时 < min_score）
     min_score_threshold: float = 6.0
     total_tokens_spent: int = 0     # 成本曲线汇总（v11；旧数据无成本列时为 0）
     total_usd_spent: float = 0.0
     payoff_loop_rate: Optional[float] = None   # P1#10: 闭环章/完成章（≥0.7 高 0.5-0.7 中 <0.5 低）
+    # v22/F4：评委去偏看板（LongJudgeBench：换序改判率 10.6%–78.7%）
+    judge_runs: int = 0                        # 做过正反两序校验的章数
+    judge_disagreements: int = 0               # 两序胜者不一致 → 确定性回落的章数
+    judge_disagreement_rate: Optional[float] = None
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────

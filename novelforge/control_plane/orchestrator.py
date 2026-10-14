@@ -496,6 +496,7 @@ class Orchestrator:
                     gateway=self._gw,
                     judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
                     writing_profile=writing_profile,
+                    judge_both_orders=getattr(cfg.candidates, "judge_both_orders", True),
                 )
                 winner = cand_list[report["winner"]]
                 workspace["draft_text"] = winner["draft_text"]
@@ -527,6 +528,7 @@ class Orchestrator:
                         "winner": report["winner"],
                         "scores": report["scores"],
                         "reason": report["reason"],
+                        "judge_disagreement": report.get("judge_disagreement"),
                     })
 
             _draft_length = _content_units(
@@ -778,6 +780,9 @@ class Orchestrator:
             if workspace.get("quality_dimensions"):
                 run_detail = {**(run_detail or {}),
                               "quality_dimensions": workspace["quality_dimensions"]}
+            if workspace.get("quality_gate"):
+                run_detail = {**(run_detail or {}),
+                              "quality_gate": workspace["quality_gate"]}
             if settle["foreshadow_settle"] is not None:
                 run_detail = {**(run_detail or {}),
                               "foreshadow_settle": settle["foreshadow_settle"]}
@@ -1045,84 +1050,110 @@ class Orchestrator:
         self, ctx: SkillContext, cfg, hard_blocks: list[dict],
         all_issues: list[dict], progress_cb=None,
     ) -> Optional[float]:
-        """M5-⑦：质量评分；低分或 craft warn 堆积时做一轮润色，取分高版本。
+        """M5-⑦：质量评分；未过质量门或 craft warn 堆积时做一轮润色，取更优版本。
 
-        维度分（钩子/节奏/人物/文笔）写入 workspace["quality_dimensions"]，
-        随 detail_json 落库；多候选复用评委总分的路径无维度分（省一次调用）。
+        v22/F4：是否"低质量"统一由 craft.quality_gate.evaluate_quality 判定（默认
+        gate_mode="dimensions"：任一维度低于下限即低分，总分只作展示；无维度分时回落
+        min_score）。维度分写入 workspace["quality_dimensions"]，门控结论（含当时阈值）
+        写入 workspace["quality_gate"]，随 detail_json 落库。
+
+        多候选路径的评委只给总分：gate_mode="total" 时照旧复用评委（两序均值）分数省一次
+        调用；维度门控下对终稿（已 revise）调用一次 score_chapter_detailed 取总分+维度，
+        与润色复评同一量表；评分失败时回落评委分数。
 
         Returns 最终质量分（评分失败返回 None，等同未启用）。
         """
         from ..craft.candidate_judge import score_chapter_detailed
+        from ..craft.quality_gate import (
+            GATE_DIMENSIONS,
+            evaluate_quality,
+            gate_mode,
+            is_improvement,
+            verdict_detail,
+        )
 
         qcfg = cfg.quality
         judge_tier = getattr(cfg.candidates, "judge_tier", "mid")
         chapter_goal = ctx.workspace.get("chapter_goal", "")
 
-        # 多候选模式下评委已给胜者打过分 → 复用，避免重复调用
-        score: Optional[float] = None
-        report = ctx.workspace.get("candidate_report") or {}
-        w = report.get("winner")
-        scores = report.get("scores") or []
-        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
-            score = float(scores[w])
-        if score is None:
-            detail = score_chapter_detailed(
+        def _score(text: str) -> Optional[dict]:
+            return score_chapter_detailed(
                 self._gw,
                 judge_tier,
                 chapter_goal,
-                ctx.workspace.get("draft_text", ""),
+                text,
                 ctx.extra.get("writing_profile")
                 or get_project_writing_profile(
                     ctx.conn, chapter=ctx.target_chapter,
                 ),
             )
+
+        # 多候选模式下评委已给胜者打过分（总分、无维度）
+        score: Optional[float] = None
+        dims: dict = {}
+        report = ctx.workspace.get("candidate_report") or {}
+        w = report.get("winner")
+        scores = report.get("scores") or []
+        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
+            score = float(scores[w])
+        if score is None or gate_mode(qcfg) == GATE_DIMENSIONS:
+            detail = _score(ctx.workspace.get("draft_text", ""))
             if detail is not None:
                 score = detail["score"]
-                if detail["dimensions"]:
-                    ctx.workspace["quality_dimensions"] = detail["dimensions"]
+                dims = dict(detail["dimensions"] or {})
+                if dims:
+                    ctx.workspace["quality_dimensions"] = dims
         if score is None:
             return None
 
+        verdict = evaluate_quality(score, dims, qcfg)
         craft_warns = [i for i in ctx.workspace.get("craft_issues", [])
                        if i.get("severity") == "warn"]
         need_polish = (qcfg.polish_enabled and not hard_blocks and
-                       (score < qcfg.min_score or len(craft_warns) >= 3))
+                       (verdict.low or len(craft_warns) >= 3))
         if need_polish:
+            old_draft = ctx.workspace.get("draft_text", "")
+            old_craft = list(ctx.workspace.get("craft_issues", []))
             try:
-                old_draft = ctx.workspace.get("draft_text", "")
-                old_craft = list(ctx.workspace.get("craft_issues", []))
                 if self._gw.ledger and hasattr(self._gw.ledger, "charge_revise_round"):
                     self._gw.ledger.charge_revise_round()
                 polished = self._polish(ctx, craft_warns)
                 if polished and polished != old_draft:
                     ctx.workspace["draft_text"] = polished
                     self._reg.invoke("craft_check", ctx)
-                    new_detail = score_chapter_detailed(
-                        self._gw,
-                        judge_tier,
-                        chapter_goal,
-                        polished,
-                        ctx.extra.get("writing_profile")
-                        or get_project_writing_profile(
-                            ctx.conn, chapter=ctx.target_chapter,
-                        ),
+                    new_detail = _score(polished)
+                    new_verdict = (
+                        evaluate_quality(new_detail["score"], new_detail["dimensions"], qcfg)
+                        if new_detail is not None else None
                     )
-                    if new_detail is not None and new_detail["score"] >= score:
+                    if new_verdict is not None and is_improvement(
+                        score, verdict, new_detail["score"], new_verdict,
+                    ):
                         score = new_detail["score"]
-                        if new_detail["dimensions"]:
-                            ctx.workspace["quality_dimensions"] = new_detail["dimensions"]
+                        dims = dict(new_detail["dimensions"] or {})
+                        verdict = new_verdict
+                        # 维度分必须与保留的正文同源：新评分无维度时清掉旧稿的维度
+                        if dims:
+                            ctx.workspace["quality_dimensions"] = dims
+                        else:
+                            ctx.workspace.pop("quality_dimensions", None)
                     else:
                         # 润色变差 → 回退（HoLLMwood 渐进精炼 + 保底）
                         ctx.workspace["draft_text"] = old_draft
                         ctx.workspace["craft_issues"] = old_craft
             except Exception:
-                pass  # 预算熔断等 → 保留原稿原分
+                # 预算熔断等 → 保留原稿原分
+                ctx.workspace["draft_text"] = old_draft
+                ctx.workspace["craft_issues"] = old_craft
 
+        gate = verdict_detail(verdict, qcfg)
+        ctx.workspace["quality_gate"] = gate
         if progress_cb:
             progress_cb("quality", "ok", {
                 "score": score, "polished": need_polish,
                 "min_score": qcfg.min_score,
                 "dimensions": ctx.workspace.get("quality_dimensions"),
+                "gate": gate,
             })
         return score
 

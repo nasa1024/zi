@@ -91,7 +91,11 @@ class TestSelectBest:
         from novelforge.control_plane.llm.fake_provider import FakeProvider
         from novelforge.control_plane.llm.gateway import LLMGateway
 
-        fake = FakeProvider(responses=['{"winner": 1, "scores": [6.5, 8.0], "reason": "钩子更强"}'])
+        # v22/F4：正序、逆序各判一次；逆序里原 #1 排在位置 0，两次都选它 → 采纳
+        fake = FakeProvider(responses=[
+            '{"winner": 1, "scores": [6.5, 8.0], "reason": "钩子更强"}',
+            '{"winner": 0, "scores": [8.0, 6.5], "reason": "钩子更强"}',
+        ])
         gw = LLMGateway(fake, BudgetLedger(max_tokens=1_000_000, max_usd=10.0))
         cands = [
             {"draft_text": "a" * 2000, "proposals": [{}]},
@@ -102,6 +106,8 @@ class TestSelectBest:
         assert r["judge_used"]
         assert r["scores"][1] == 8.0
         assert r["reason"] == "钩子更强"
+        assert r["judge_disagreement"] is False
+        assert len(fake.calls) == 2
 
     def test_judge_failure_falls_back_to_longest(self):
         from novelforge.control_plane.budget import BudgetLedger

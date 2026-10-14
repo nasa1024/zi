@@ -32,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from ..craft.quality_gate import evaluate_quality
 from ..ids import new_id
 
 # 会话 TTL：运行中会话超过此时间无心跳则标为 error（防客户端崩溃后僵死）
@@ -449,8 +450,8 @@ class AutopilotManager:
                     hard_issues = [i for i in (outcome.issues or []) if i.get("severity") == "block"]
                     # M5-⑦：质量分低于阈值视同一次 hard issue，连续低分同样触发降级
                     q_score = getattr(outcome, "quality_score", None)
-                    low_quality = (cfg.quality.enabled and q_score is not None
-                                   and q_score < cfg.quality.min_score)
+                    low_quality = cfg.quality.enabled and evaluate_quality(  # v22/F4 分维度门控
+                        q_score, getattr(outcome, "quality_dimensions", None), cfg.quality).low
                     # P1#11：结算降级计入连续问题——连续失败自然转人审
                     degraded = getattr(outcome, "state_degraded", False)
                     auto_degraded_now = False

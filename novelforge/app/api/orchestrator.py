@@ -293,22 +293,57 @@ def _payoff_closed_chapters(conn) -> set[int]:
     return closed
 
 
+def _stat_signals(raw_detail, score, default_qcfg) -> tuple:
+    """v22/F4：从 detail_json 复算本章质量门结论 + 读取评委两序一致性。
+
+    质量门按该 run 落库的阈值（detail_json["quality_gate"]）复算，换稿后分数/维度
+    更新也随之生效；旧数据无 quality_gate 时用默认 QualityConfig（无维度分 → 旧口径
+    score < min_score）。Returns (quality_low|None, reasons, judge_disagreement|None)。
+    """
+    from ...craft.quality_gate import MODE_UNSCORED, evaluate_quality
+
+    detail: dict = {}
+    if raw_detail:
+        try:
+            parsed = _json.loads(raw_detail)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            detail = parsed
+    gate_cfg = detail.get("quality_gate")
+    if not isinstance(gate_cfg, dict):
+        gate_cfg = default_qcfg
+    verdict = evaluate_quality(score, detail.get("quality_dimensions"), gate_cfg)
+    quality_low = None if verdict.mode == MODE_UNSCORED else verdict.low
+    disagreement = detail.get("judge_disagreement")
+    return (
+        quality_low,
+        list(verdict.reasons),
+        disagreement if isinstance(disagreement, bool) else None,
+    )
+
+
 @router.get("/{project_id}/pipeline/stats", response_model=PipelineStats)
 def pipeline_stats(
     project_id: str,
     registry: ProjectRegistry = Depends(get_registry),
 ):
-    """M6 质量趋势：逐章序列（每章取最新 completed run）+ 汇总指标。"""
+    """M6 质量趋势：逐章序列（每章取最新 completed run）+ 汇总指标。
+
+    v22/F4：low_quality_count 按分维度质量门统计；judge_* 为评委正反两序不一致率
+    （分母只计做过两序校验的章）。
+    """
     from ...config import QualityConfig
 
     if registry.get(project_id) is None:
         raise HTTPException(404, f"项目不存在: {project_id}")
-    threshold = QualityConfig().min_score
+    default_qcfg = QualityConfig()
+    threshold = default_qcfg.min_score
     conn = registry.open_conn(project_id)
     try:
         rows = conn.execute(
             "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count,"
-            "       pr.tokens_spent, pr.usd_spent"
+            "       pr.tokens_spent, pr.usd_spent, pr.detail_json"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id=? AND pr.status='completed'"
@@ -321,24 +356,39 @@ def pipeline_stats(
         ).fetchall()
 
         closed = _payoff_closed_chapters(conn)
-        series = [ChapterStat(
-            chapter=r["chapter"], word_count=r["word_count"],
-            quality_score=r["quality_score"], finished_at=r["finished_at"],
-            tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
-            payoff_closed=r["chapter"] in closed,
-        ) for r in rows]
+        series = []
+        for r in rows:
+            quality_low, gate_reasons, judge_disagreement = _stat_signals(
+                r["detail_json"], r["quality_score"], default_qcfg,
+            )
+            series.append(ChapterStat(
+                chapter=r["chapter"], word_count=r["word_count"],
+                quality_score=r["quality_score"], finished_at=r["finished_at"],
+                tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
+                payoff_closed=r["chapter"] in closed,
+                quality_low=quality_low,
+                quality_gate_reasons=gate_reasons,
+                judge_disagreement=judge_disagreement,
+            ))
         scores = [s.quality_score for s in series if s.quality_score is not None]
+        judge_runs = sum(1 for s in series if s.judge_disagreement is not None)
+        judge_disagreements = sum(1 for s in series if s.judge_disagreement)
         return PipelineStats(
             series=series,
             chapters_completed=len(series),
             total_words=sum(s.word_count or 0 for s in series),
             avg_quality_score=round(sum(scores) / len(scores), 2) if scores else None,
-            low_quality_count=sum(1 for s in scores if s < threshold),
+            low_quality_count=sum(1 for s in series if s.quality_low),
             min_score_threshold=threshold,
             total_tokens_spent=sum(s.tokens_spent or 0 for s in series),
             total_usd_spent=round(sum(s.usd_spent or 0.0 for s in series), 4),
             payoff_loop_rate=(round(sum(1 for s in series if s.payoff_closed)
                                     / len(series), 3) if series else None),
+            judge_runs=judge_runs,
+            judge_disagreements=judge_disagreements,
+            judge_disagreement_rate=(
+                round(judge_disagreements / judge_runs, 3) if judge_runs else None
+            ),
         )
     finally:
         conn.close()
@@ -523,6 +573,7 @@ def select_candidate(
     from ...control_plane.skill_base import SkillContext
     from ...control_plane.skill_registry import SkillRegistry
     from ...craft.pacing import PacingController
+    from ...craft.quality_gate import evaluate_quality, verdict_detail
     from ...memory.l1_atoms import persist_proposal_atoms
     from ...memory.recall import gather_hard_context
     from ...planning.alignment import (
@@ -826,6 +877,15 @@ def select_candidate(
                 detail["quality_dimensions"] = (
                     validation.get("quality") or {}
                 ).get("dimensions") or {}
+                # v22/F4：门控结论随换稿复算（沿用该 run 落库时的阈值）
+                gate_cfg = detail.get("quality_gate")
+                if not isinstance(gate_cfg, dict):
+                    gate_cfg = cfg.quality
+                detail["quality_gate"] = verdict_detail(
+                    evaluate_quality(validation["quality_score"],
+                                     detail["quality_dimensions"], gate_cfg),
+                    gate_cfg,
+                )
 
         detail["winner"] = idx
         detail["selected_by"] = "human"
