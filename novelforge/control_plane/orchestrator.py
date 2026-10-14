@@ -1269,28 +1269,40 @@ def _content_units(text: str, language: str) -> int:
 
 
 def _profile_pacing_hint(profile: dict, pacing: PacingController, state) -> str:
-    """Keep legacy cadence for Chinese; English rules follow the profile."""
+    """Keep legacy cadence for Chinese; English rules follow the profile.
+
+    v22/F3: once ``state.needs_turn`` (``max_low_streak`` chapters in a row turned
+    against the protagonist) the next chapter must turn, whatever the profile
+    (Story Grid: every chapter turns).  That note comes first; the profile's
+    cadence note may follow it.
+    """
     if not str(profile.get("content_language") or "").startswith("en"):
         return pacing.recommend_beat_hint(state)
+    notes: list[str] = []
+    if getattr(state, "needs_turn", False):
+        notes.append(
+            f"Pacing note: the last {state.low_streak} chapters all turned against the "
+            "protagonist (polarity -). This chapter must turn toward the goal "
+            "(polarity + or ±) so the pressure does not go numb."
+        )
+    quality = profile.get("quality_rules") or {}
     if state.needs_cooldown:
-        return (
+        notes.append(
             "Pacing note: recent chapters have stayed at high tension. Let this chapter "
             "breathe through character reaction, consequence, or relationship movement."
         )
-    quality = profile.get("quality_rules") or {}
-    if not quality.get("requires_progress_event"):
-        return ""
-    if state.needs_big_payoff and state.buildup >= 5:
-        return (
-            "Pacing note: deliver an earned major progress event that resolves prior setup "
-            "and creates a concrete new cost or objective."
-        )
-    if state.needs_small_payoff:
-        return (
-            "Pacing note: include at least one observable, earned progress event or useful "
-            "feedback loop in this chapter."
-        )
-    return ""
+    elif quality.get("requires_progress_event"):
+        if state.needs_big_payoff and state.buildup >= 5:
+            notes.append(
+                "Pacing note: deliver an earned major progress event that resolves prior "
+                "setup and creates a concrete new cost or objective."
+            )
+        elif state.needs_small_payoff:
+            notes.append(
+                "Pacing note: include at least one observable, earned progress event or "
+                "useful feedback loop in this chapter."
+            )
+    return "\n".join(notes)
 
 
 def _proposals_to_candidates(
