@@ -1994,9 +1994,23 @@ function PipelinePanel({
                   　⚡ 爽点闭环 {Math.round(stats.payoff_loop_rate * 100)}%
                 </span>
               )}
+              {stats.judge_disagreement_rate != null && (
+                <span
+                  title={`评委正反两序各判一次，胜者不一致即不采信、按确定性规则选稿（${stats.judge_disagreements ?? 0}/${stats.judge_runs ?? 0} 章）。持续偏高说明评委位置偏差大，择优结果更多来自确定性漏斗`}
+                  style={{
+                    color: stats.judge_disagreement_rate <= 0.2 ? '#4ade80'
+                      : stats.judge_disagreement_rate <= 0.4 ? '#fbbf24' : '#f87171',
+                  }}
+                >
+                  　⚖ 评委不一致 {Math.round(stats.judge_disagreement_rate * 100)}%
+                </span>
+              )}
               {stats.low_quality_count > 0 && (
-                <span style={{ color: 'var(--nf-warn, #fa0)' }}>
-                  　⚠ {stats.low_quality_count} 章低于 {stats.min_score_threshold} 分
+                <span
+                  style={{ color: 'var(--nf-warn, #fa0)' }}
+                  title={`任一维度（钩子/节奏/人物/文笔）低于下限即未过；无维度分时按总分 ${stats.min_score_threshold} 分判定`}
+                >
+                  　⚠ {stats.low_quality_count} 章未过质量门
                 </span>
               )}
             </span>
@@ -2004,16 +2018,17 @@ function PipelinePanel({
           {stats.series.some((s) => s.quality_score != null) && (
             <div
               style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 56, marginTop: '0.4rem' }}
-              title="逐章质量分（0-10）；红色 = 低于阈值——崩坏实证高发于卷中段，趋势下行时及时介入"
+              title="逐章质量分（0-10）；红色 = 未过质量门——崩坏实证高发于卷中段，趋势下行时及时介入"
             >
               {stats.series.map((s) => {
                 const score = s.quality_score;
                 const h = score == null ? 4 : Math.max(4, (score / 10) * 56);
-                const low = score != null && score < stats.min_score_threshold;
+                const low = s.quality_low ?? (score != null && score < stats.min_score_threshold);
+                const gateNote = s.quality_gate_reasons?.length ? ` · 未过线 ${s.quality_gate_reasons.join(', ')}` : '';
                 return (
                   <div
                     key={s.chapter}
-                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}${s.payoff_closed ? ' · ⚡爽点闭环' : ''}`}
+                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${gateNote}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}${s.payoff_closed ? ' · ⚡爽点闭环' : ''}${s.judge_disagreement ? ' · ⚖评委两序不一致' : ''}`}
                     style={{
                       width: 'clamp(4px, 100%, 18px)',
                       flex: '1 1 0',

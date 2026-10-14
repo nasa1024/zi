@@ -269,8 +269,10 @@ class TestAgentDecisions:
         import novelforge.planning.generation as generation
 
         monkeypatch.delenv("NOVELFORGE_PROVIDER", raising=False)
+        # v22/F4：评委正序、逆序各判一次；逆序 [2,1,0] 中原 #2 位于下标 0。
         gateway = LLMGateway(
-            FakeProvider(responses=['{"option_index":2,"reason":"终局铺垫更完整"}']),
+            FakeProvider(responses=['{"option_index":2,"reason":"终局铺垫更完整"}',
+                                    '{"option_index":0,"reason":"终局铺垫更完整"}']),
             BudgetLedger(max_tokens=10_000, max_usd=1.0),
         )
         monkeypatch.setattr(generation, "_gateway", lambda *args, **kwargs: gateway)
@@ -292,6 +294,7 @@ class TestAgentDecisions:
         assert option_id == "opt2"
         assert meta["source"] == "llm_judge"
         assert meta["option_index"] == 2
+        assert meta["judge_disagreement"] is False
 
     def test_reroll_supersedes_old_decision(self, client, project):
         session = _start(client, project)

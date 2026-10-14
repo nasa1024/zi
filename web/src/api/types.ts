@@ -856,6 +856,9 @@ export interface ChapterStat {
   tokens_spent?: number | null;   // 逐章成本（v11）
   usd_spent?: number | null;
   payoff_closed?: boolean;        // P1#10: 本章有确定性爽点闭环证据
+  quality_low?: boolean | null;   // v22/F4: 未过分维度质量门（null=未评分）
+  quality_gate_reasons?: string[]; // v22/F4: 未过线项，如 "hook 4<5"
+  judge_disagreement?: boolean | null; // v22/F4: 评委正反两序胜者不一致（null=未做两序校验）
 }
 
 export interface PipelineStats {
@@ -868,6 +871,9 @@ export interface PipelineStats {
   total_tokens_spent: number;     // 成本曲线汇总（v11）
   total_usd_spent: number;
   payoff_loop_rate?: number | null;  // P1#10: 闭环章/完成章
+  judge_runs?: number;               // v22/F4: 做过正反两序校验的章数
+  judge_disagreements?: number;      // v22/F4: 两序不一致 → 确定性回落的章数
+  judge_disagreement_rate?: number | null;
 }
 
 export interface ForeshadowHealth {
