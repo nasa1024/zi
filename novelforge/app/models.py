@@ -463,6 +463,38 @@ class ForeshadowHealth(BaseModel):
     dormant_count: int = 0       # v22/F1: 下一章时已休眠的读者可见长/短线承诺数
 
 
+# ── Pacing（v22/F3 极性序列与抑扬上限）──────────────────────────────────────────
+
+class PacingCursorView(BaseModel):
+    chapters_since_big_payoff: int = 0
+    kchars_since_small_payoff: float = 0.0
+    buildup: int = 0
+    recent_high_streak: int = 0
+    low_streak: int = 0                    # 连续低谷（转向 -）章数
+    polarity_streak: int = 0               # 与 last_polarity 同向的连续章数
+    last_polarity: Optional[Literal["+", "-", "±"]] = None
+    needs_turn: bool = False               # 连续低谷已达上限：下一章必须安排转机
+    needs_cooldown: bool = False
+    needs_small_payoff: bool = False
+    needs_big_payoff: bool = False
+
+
+class PacingChapterView(BaseModel):
+    chapter: int
+    tension_level: int                     # 1 平缓 … 4 大爽点 / 5 大高潮
+    pace: Optional[str] = None             # slow / steady / fast / climax
+    polarity: Optional[Literal["+", "-", "±"]] = None
+    turning_point: Optional[Literal["action", "revelation"]] = None
+    detail: dict = Field(default_factory=dict)   # notes JSON（来源 / beat 类型 / 是否余韵）
+
+
+class PacingOverview(BaseModel):
+    cursor: PacingCursorView
+    chapters: list[PacingChapterView] = Field(default_factory=list)   # 最近 20 章，按章号升序
+    max_same_polarity_streak: int = 3
+    max_low_streak: int = 3
+
+
 # ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
 
 class VolumePlanRequest(BaseModel):

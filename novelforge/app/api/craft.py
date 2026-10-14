@@ -14,6 +14,8 @@
   GET    /{project_id}/foreshadow/overdue          → list[ForeshadowResponse]（到期未兑现）
   GET    /{project_id}/foreshadow/dormant          → list[ForeshadowDormantResponse]（v22 休眠承诺）
   GET    /{project_id}/foreshadow/health           → ForeshadowHealth
+
+  GET    /{project_id}/pacing                      → PacingOverview（v22/F3 节奏游标 + 近 20 章转向）
 """
 from __future__ import annotations
 
@@ -307,6 +309,79 @@ def foreshadow_health(
             due_soon=[dict(r) for r in due_soon],
             status=status,
             dormant_count=len(dormant_promises(conn, next_ch)),
+        )
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pacing")
+def pacing_overview(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """v22/F3 节奏游标 + 最近 20 章的实际转向与张力（只读，按章号升序）。"""
+    import logging
+    import sqlite3
+
+    from ...config import PolarityConfig
+    from ...control_plane.llm.runtime import build_project_config
+    from ...craft.pacing import PacingController, PacingState
+    from ..models import PacingChapterView, PacingCursorView, PacingOverview
+
+    conn = registry.open_conn(project_id)
+    try:
+        project = registry.get(project_id)
+        try:   # 项目实际生效的阈值（与流水线同源）；配置读取失败时退回默认值
+            limits = build_project_config(
+                project_id, project.db_path if project else "novel.db", conn,
+            ).polarity
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "pacing overview: project config unavailable, using defaults", exc_info=True,
+            )
+            limits = PolarityConfig()
+        try:
+            state = PacingController().get_state(conn, max_low_streak=limits.max_low_streak)
+        except sqlite3.OperationalError:   # 极旧库没有 pacing_cursor
+            state = PacingState(max_low_streak=limits.max_low_streak)
+        try:
+            rows = conn.execute(
+                "SELECT chapter, tension_level, pace, polarity, turning_point, notes"
+                " FROM pacing_state ORDER BY chapter DESC LIMIT 20"
+            ).fetchall()
+        except sqlite3.OperationalError:   # 未迁移到 v22 的库
+            rows = []
+        chapters = []
+        for row in reversed(rows):
+            try:
+                detail = json.loads(row["notes"]) if row["notes"] else {}
+            except (json.JSONDecodeError, TypeError):
+                detail = None
+            chapters.append(PacingChapterView(
+                chapter=row["chapter"],
+                tension_level=row["tension_level"],
+                pace=row["pace"],
+                polarity=row["polarity"],
+                turning_point=row["turning_point"],
+                detail=detail if isinstance(detail, dict) else {"text": str(row["notes"])},
+            ))
+        return PacingOverview(
+            cursor=PacingCursorView(
+                chapters_since_big_payoff=state.chapters_since_big_payoff,
+                kchars_since_small_payoff=state.kchars_since_small_payoff,
+                buildup=state.buildup,
+                recent_high_streak=state.recent_high_streak,
+                low_streak=state.low_streak,
+                polarity_streak=state.polarity_streak,
+                last_polarity=state.last_polarity,
+                needs_turn=state.needs_turn,
+                needs_cooldown=state.needs_cooldown,
+                needs_small_payoff=state.needs_small_payoff,
+                needs_big_payoff=state.needs_big_payoff,
+            ),
+            chapters=chapters,
+            max_same_polarity_streak=limits.max_same_polarity_streak,
+            max_low_streak=limits.max_low_streak,
         )
     finally:
         conn.close()
