@@ -170,6 +170,10 @@ class ProjectRegistry:
                         conn.close()
                         raise
                     self._migrated_projects.add(project_id)
+                    # v22/F6：本进程首次打开该项目 → 上个进程残留的 running 连写批次
+                    # 必然已中断（批次只能在本进程打开连接之后启动），标记 failed。
+                    from ..db.l0 import sweep_stale_batches
+                    sweep_stale_batches(conn)
         return conn
 
 

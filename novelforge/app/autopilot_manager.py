@@ -303,6 +303,7 @@ class AutopilotManager:
                 "pause_on_degrade": getattr(req, "pause_on_degrade", True),
                 "quality_check": getattr(req, "quality_check", False),
                 "n_candidates": getattr(req, "n_candidates", 1),
+                "batch_size": getattr(req, "batch_size", None),
             }, ensure_ascii=False)
             conn = registry.open_conn(session.project_id)
             try:
@@ -347,73 +348,31 @@ class AutopilotManager:
     # ── 内部循环 ──────────────────────────────────────────────────────────────
 
     def _run_loop(self, session: AutopilotSession, req, registry, api_key: Optional[str]):
-        from ..config import NovelForgeConfig
-        from ..control_plane.budget import BudgetLedger, CircuitTripped
         from ..control_plane.llm.runtime import build_configured_gateway
         from ..control_plane.orchestrator import Orchestrator
         from ..control_plane.skill_registry import SkillRegistry
         from ..skills import register_default_skills
 
+        # v22/F6：长输出模型 → 多章连写窗口；否则（含测试的 gateway=None）走旧的逐章循环
+        batch_size = self._batch_window_size(session, req, registry, api_key)
+        if batch_size:
+            if self._run_batch_loop(session, req, registry, api_key, batch_size):
+                return
+            self._finish_session(session, registry)
+            return
+
         for chapter in range(session.from_chapter, session.to_chapter + 1):
             with self._lock:
-                # 检查取消标志
-                if session._cancel_requested:
-                    session.status = "canceled"
-                    session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
-                    self._db_update(session, registry)
-                    self._emit_session(session, "canceled")
-                    self._emit(session, None)
-                    return
-                # 检查降级标志
-                if session._degrade_requested and session.policy_mode != "human_gate":
-                    session.policy_mode = "human_gate"
-                    session.status = "degraded"
-                    session._degrade_requested = False
-                elif session.status not in ("running", "degraded"):
-                    break
-                # 检查会话级预算封顶（E4 跨章累计）
-                if (session.budget_session_max_tokens and
-                        session.budget_tokens_total >= session.budget_session_max_tokens):
-                    session.status = "circuit_broken"
-                    session.last_error = "session token budget exceeded"
-                    session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
-                    self._db_update(session, registry)
-                    self._emit_session(session, "circuit_broken")
-                    self._emit(session, None)
-                    return
-                if (session.budget_session_max_usd and
-                        session.budget_usd_total >= session.budget_session_max_usd):
-                    session.status = "circuit_broken"
-                    session.last_error = "session USD budget exceeded"
-                    session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
-                    self._db_update(session, registry)
-                    self._emit_session(session, "circuit_broken")
-                    self._emit(session, None)
-                    return
+                gate = self._gate_before_chapter(session, registry)
+            if gate == "stop":
+                return
+            if gate == "break":
+                break
 
             conn = None
             try:
                 conn = registry.open_conn(session.project_id)
-                cfg = NovelForgeConfig(
-                    project_id=session.project_id,
-                    db_path=registry.get(session.project_id).db_path if registry.get(session.project_id) else "novel.db",
-                )
-                cfg.governance.mode = session.policy_mode
-                if req.budget_max_tokens_per_chapter:
-                    cfg.budget.max_tokens_per_chapter = req.budget_max_tokens_per_chapter
-                if req.budget_max_usd_per_chapter:
-                    cfg.budget.max_usd_per_chapter = req.budget_max_usd_per_chapter
-                if getattr(req, "quality_check", False):
-                    cfg.quality.enabled = True
-                _n_cands = getattr(req, "n_candidates", 1) or 1
-                if _n_cands > 1:
-                    cfg.candidates.n_candidates = max(1, min(3, _n_cands))
-                from ..config import apply_project_memory_settings, apply_runtime_env
-                from ..control_plane.llm.runtime import apply_provider_env
-                apply_project_memory_settings(cfg, conn)
-                apply_runtime_env(cfg)   # env 覆盖项目记忆设置（运维优先级最高）
-                # 与 build_project_config 同序：provider 端点不得充当 embedding 回退端点
-                apply_provider_env(cfg, api_key=api_key)
+                cfg = self._chapter_cfg(session, req, registry, conn, api_key)
 
                 gw = build_configured_gateway(cfg)
                 reg = SkillRegistry()
@@ -439,55 +398,8 @@ class AutopilotManager:
                                                 progress_cb=_on_stage)
 
                 with self._lock:
-                    # 跨章累计（E4：会话级 budget 累加）
-                    session.budget_tokens_total += outcome.usage_tokens
-                    session.budget_usd_total += outcome.usage_usd
-                    session.chapters_done += 1
-                    session.current_chapter = chapter + 1
-                    session._touch()
-
-                    hard_issues = [i for i in (outcome.issues or []) if i.get("severity") == "block"]
-                    # M5-⑦：质量分低于阈值视同一次 hard issue，连续低分同样触发降级
-                    q_score = getattr(outcome, "quality_score", None)
-                    low_quality = (cfg.quality.enabled and q_score is not None
-                                   and q_score < cfg.quality.min_score)
-                    # P1#11：结算降级计入连续问题——连续失败自然转人审
-                    degraded = getattr(outcome, "state_degraded", False)
-                    auto_degraded_now = False
-                    if hard_issues or low_quality or degraded:
-                        session.consecutive_hard_issues += 1
-                        if session.consecutive_hard_issues >= req.auto_degrade_after_consecutive_issues:
-                            prev_mode = session.policy_mode
-                            session.policy_mode = "human_gate"
-                            if session.status == "running":
-                                session.status = "degraded"
-                            # P0#1：auto_promote（无干预连写）连续失败 → 暂停挂机，
-                            # 抛降级预警交回作者；hybrid 保持旧行为（human_gate 续写）
-                            auto_degraded_now = (
-                                prev_mode == "auto_promote"
-                                and getattr(req, "pause_on_degrade", True)
-                            )
-                    else:
-                        session.consecutive_hard_issues = 0
-                    if auto_degraded_now:
-                        session.status = "paused"
-                        session.last_error = (
-                            f"auto-degraded: 连续 {session.consecutive_hard_issues} 章"
-                            " hard block/低分/结算降级未消除（修订上限内无法自愈），"
-                            "策略已退化为 human_gate 并暂停挂机；处理审核队列后可 resume 续写"
-                        )
-                        session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
-                        self._db_update(session, registry)
-                        self._emit(session, {
-                            "event": "session", "reason": "degrade_alert",
-                            "chapter": chapter,
-                            "consecutive_hard_issues": session.consecutive_hard_issues,
-                            "session": _session_snapshot(session),
-                        })
-                        self._emit(session, None)
+                    if self._account_chapter(session, req, registry, cfg, chapter, outcome):
                         return
-                    self._db_update(session, registry)  # 每章一次写穿（天然 checkpoint）
-                    self._emit_session(session, "chapter_done")
 
             except Exception as exc:
                 from ..control_plane.budget import CircuitTripped
@@ -507,6 +419,9 @@ class AutopilotManager:
                     except Exception:
                         pass
 
+        self._finish_session(session, registry)
+
+    def _finish_session(self, session: AutopilotSession, registry) -> None:
         with self._lock:
             if session.status in ("running", "degraded"):
                 session.status = "completed"
@@ -515,6 +430,278 @@ class AutopilotManager:
             self._db_update(session, registry)
         self._emit_session(session, "finished")
         self._emit(session, None)
+
+    def _gate_before_chapter(self, session: AutopilotSession, registry) -> Optional[str]:
+        """每章开始前（调用方持有 _lock）：取消 / 降级 / 会话预算检查。
+
+        返回 ``"stop"``（已写终态并广播，调用方直接 return）、``"break"``（会话已非
+        运行态，跳到收尾）或 ``None``（继续写下一章）。
+        """
+        # 检查取消标志
+        if session._cancel_requested:
+            session.status = "canceled"
+            session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+            self._db_update(session, registry)
+            self._emit_session(session, "canceled")
+            self._emit(session, None)
+            return "stop"
+        # 检查降级标志
+        if session._degrade_requested and session.policy_mode != "human_gate":
+            session.policy_mode = "human_gate"
+            session.status = "degraded"
+            session._degrade_requested = False
+        elif session.status not in ("running", "degraded"):
+            return "break"
+        # 检查会话级预算封顶（E4 跨章累计）
+        if (session.budget_session_max_tokens and
+                session.budget_tokens_total >= session.budget_session_max_tokens):
+            session.status = "circuit_broken"
+            session.last_error = "session token budget exceeded"
+            session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+            self._db_update(session, registry)
+            self._emit_session(session, "circuit_broken")
+            self._emit(session, None)
+            return "stop"
+        if (session.budget_session_max_usd and
+                session.budget_usd_total >= session.budget_session_max_usd):
+            session.status = "circuit_broken"
+            session.last_error = "session USD budget exceeded"
+            session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+            self._db_update(session, registry)
+            self._emit_session(session, "circuit_broken")
+            self._emit(session, None)
+            return "stop"
+        return None
+
+    def _chapter_cfg(self, session: AutopilotSession, req, registry, conn, api_key: Optional[str]):
+        """逐章配置（手工构建，不经 build_project_config；与旧循环逐项一致）。"""
+        from ..config import NovelForgeConfig
+
+        cfg = NovelForgeConfig(
+            project_id=session.project_id,
+            db_path=registry.get(session.project_id).db_path if registry.get(session.project_id) else "novel.db",
+        )
+        cfg.governance.mode = session.policy_mode
+        if req.budget_max_tokens_per_chapter:
+            cfg.budget.max_tokens_per_chapter = req.budget_max_tokens_per_chapter
+        if req.budget_max_usd_per_chapter:
+            cfg.budget.max_usd_per_chapter = req.budget_max_usd_per_chapter
+        if getattr(req, "quality_check", False):
+            cfg.quality.enabled = True
+        _n_cands = getattr(req, "n_candidates", 1) or 1
+        if _n_cands > 1:
+            cfg.candidates.n_candidates = max(1, min(3, _n_cands))
+        from ..config import apply_project_memory_settings, apply_runtime_env
+        from ..control_plane.llm.runtime import apply_provider_env
+        apply_project_memory_settings(cfg, conn)
+        apply_runtime_env(cfg)   # env 覆盖项目记忆设置（运维优先级最高）
+        # 与 build_project_config 同序：provider 端点不得充当 embedding 回退端点
+        apply_provider_env(cfg, api_key=api_key)
+        return cfg
+
+    def _account_chapter(self, session: AutopilotSession, req, registry, cfg,
+                         chapter: int, outcome, *, batch: bool = False) -> bool:
+        """每章完成后的会话记账与降级判定（调用方持有 _lock）。返回 True = 已暂停挂机
+        （终态已写入并广播），调用方必须立即结束循环。
+
+        ``batch=True``（多章连写）时未落库的失败章只记成本：连写编排会从该章重写，
+        不计入完成数，也不推进断点。
+        """
+        if batch and not outcome.ok:
+            session.budget_tokens_total += outcome.usage_tokens
+            session.budget_usd_total += outcome.usage_usd
+            session._touch()
+            self._db_update(session, registry)
+            return False
+
+        # 跨章累计（E4：会话级 budget 累加）
+        session.budget_tokens_total += outcome.usage_tokens
+        session.budget_usd_total += outcome.usage_usd
+        session.chapters_done += 1
+        session.current_chapter = chapter + 1
+        session._touch()
+
+        hard_issues = [i for i in (outcome.issues or []) if i.get("severity") == "block"]
+        # M5-⑦：质量分低于阈值视同一次 hard issue，连续低分同样触发降级
+        q_score = getattr(outcome, "quality_score", None)
+        low_quality = (cfg.quality.enabled and q_score is not None
+                       and q_score < cfg.quality.min_score)
+        # P1#11：结算降级计入连续问题——连续失败自然转人审
+        degraded = getattr(outcome, "state_degraded", False)
+        auto_degraded_now = False
+        if hard_issues or low_quality or degraded:
+            session.consecutive_hard_issues += 1
+            if session.consecutive_hard_issues >= req.auto_degrade_after_consecutive_issues:
+                prev_mode = session.policy_mode
+                session.policy_mode = "human_gate"
+                if session.status == "running":
+                    session.status = "degraded"
+                # P0#1：auto_promote（无干预连写）连续失败 → 暂停挂机，
+                # 抛降级预警交回作者；hybrid 保持旧行为（human_gate 续写）
+                auto_degraded_now = (
+                    prev_mode == "auto_promote"
+                    and getattr(req, "pause_on_degrade", True)
+                )
+        else:
+            session.consecutive_hard_issues = 0
+        if auto_degraded_now:
+            session.status = "paused"
+            session.last_error = (
+                f"auto-degraded: 连续 {session.consecutive_hard_issues} 章"
+                " hard block/低分/结算降级未消除（修订上限内无法自愈），"
+                "策略已退化为 human_gate 并暂停挂机；处理审核队列后可 resume 续写"
+            )
+            session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+            self._db_update(session, registry)
+            self._emit(session, {
+                "event": "session", "reason": "degrade_alert",
+                "chapter": chapter,
+                "consecutive_hard_issues": session.consecutive_hard_issues,
+                "session": _session_snapshot(session),
+            })
+            self._emit(session, None)
+            return True
+        self._db_update(session, registry)  # 每章一次写穿（天然 checkpoint）
+        self._emit_session(session, "chapter_done")
+        return False
+
+    # ── v22/F6 多章连写 ────────────────────────────────────────────────────────
+
+    def _batch_window_size(self, session: AutopilotSession, req, registry,
+                           api_key: Optional[str]) -> int:
+        """探测连写容量：返回单次连写章数（≥ 门槛），0 = 走旧逐章循环。
+
+        ``batch_size=1`` 显式要求逐章；gateway 不可构建/不可探测（测试里
+        build_gateway 返回 None）或模型未声明 long_output → 0。
+        """
+        requested = getattr(req, "batch_size", None)
+        if requested == 1:
+            return 0
+        conn = None
+        try:
+            from ..control_plane.batch import batch_capacity, batch_threshold
+            from ..control_plane.llm.runtime import build_configured_gateway
+            from ..writing_profiles import get_project_writing_profile
+
+            conn = registry.open_conn(session.project_id)
+            cfg = self._chapter_cfg(session, req, registry, conn, api_key)
+            gateway = build_configured_gateway(cfg)
+            if gateway is None:
+                return 0
+            capacity = batch_capacity(
+                gateway, cfg, get_project_writing_profile(conn, chapter=session.from_chapter),
+            )
+            if requested:
+                capacity = min(capacity, int(requested))
+            return capacity if capacity >= batch_threshold(cfg) else 0
+        except Exception:
+            return 0
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _run_batch_loop(self, session: AutopilotSession, req, registry,
+                        api_key: Optional[str], batch_size: int) -> bool:
+        """多章连写窗口（run_batch）。逐章记账/降级复用 ``_account_chapter``；
+        取消/降级/预算在每章与每次连写调用前检查。返回 True = 终态已广播。"""
+        from ..control_plane.batch import run_batch
+        from ..control_plane.llm.runtime import build_configured_gateway
+        from ..control_plane.orchestrator import Orchestrator
+        from ..control_plane.skill_registry import SkillRegistry
+        from ..skills import register_default_skills
+
+        state: dict = {"terminal": False, "gate": None}
+        conn = None
+        outcome = None
+        try:
+            conn = registry.open_conn(session.project_id)
+            acct_cfg = self._chapter_cfg(session, req, registry, conn, api_key)
+
+            def make_orchestrator(budget_scale: int = 1):
+                # 每次全新 cfg/gateway/ledger：policy_mode 随降级实时生效，revise_rounds 不串章
+                cfg = self._chapter_cfg(session, req, registry, conn, api_key)
+                scale = max(1, int(budget_scale or 1))
+                if scale > 1:
+                    cfg.budget.max_tokens_per_chapter = int(cfg.budget.max_tokens_per_chapter * scale)
+                    cfg.budget.max_usd_per_chapter = float(cfg.budget.max_usd_per_chapter * scale)
+                reg = SkillRegistry()
+                register_default_skills(reg)
+                return Orchestrator(build_configured_gateway(cfg), reg, cfg)
+
+            def cancel_cb() -> bool:
+                if state["terminal"] or state["gate"]:
+                    return True
+                with self._lock:
+                    gate = self._gate_before_chapter(session, registry)
+                if gate:
+                    state["gate"] = gate
+                    state["terminal"] = gate == "stop"
+                    return True
+                return False
+
+            def chapter_cb(chapter: int, chapter_outcome) -> None:
+                with self._lock:
+                    if self._account_chapter(session, req, registry, acct_cfg,
+                                             chapter, chapter_outcome, batch=True):
+                        state["terminal"] = True
+
+            def progress_cb(event: dict) -> None:
+                kind = event.get("event")
+                if kind == "batch_draft":
+                    # 连写调用的成本在调用发生时计入会话预算；顺带刷新心跳（长调用防 TTL 误杀）
+                    with self._lock:
+                        session.budget_tokens_total += int(event.get("tokens") or 0)
+                        session.budget_usd_total += float(event.get("usd") or 0.0)
+                        session._touch()
+                        self._db_update(session, registry)
+                if kind in ("stage", "batch_start", "batch_draft", "batch_discarded",
+                            "batch_regenerate"):
+                    self._emit(session, event)
+
+            outcome = run_batch(
+                conn,
+                start_chapter=session.from_chapter,
+                count=session.to_chapter - session.from_chapter + 1,
+                make_orchestrator=make_orchestrator,
+                chapter_goals=req.chapter_goals or {},
+                origin="autopilot",
+                progress_cb=progress_cb,
+                cancel_cb=cancel_cb,
+                chapter_cb=chapter_cb,
+                batch_size=batch_size,
+            )
+        except Exception as exc:
+            from ..control_plane.budget import CircuitTripped
+            if state["terminal"]:
+                return True
+            with self._lock:
+                session.status = "circuit_broken" if isinstance(exc, CircuitTripped) else "error"
+                session.last_error = str(exc)[:500]
+                session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+                self._db_update(session, registry)
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        if state["terminal"]:
+            return True
+        with self._lock:
+            session.current_chapter = max(session.current_chapter, outcome.next_chapter)
+            if outcome.error and session.status in ("running", "degraded"):
+                session.status = (
+                    "circuit_broken" if outcome.error_kind == "circuit_broken" else "error"
+                )
+                session.last_error = outcome.error[:500]
+                session.finished_at = datetime.datetime.now(datetime.UTC).isoformat()
+            self._db_update(session, registry)
+        return False
 
 
 # 全局单例（与 deps._registry 模式一致）

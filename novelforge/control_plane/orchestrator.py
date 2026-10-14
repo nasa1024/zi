@@ -264,6 +264,19 @@ class Orchestrator:
         self._reg = registry or get_registry()
         self._cfg = cfg or NovelForgeConfig()
 
+    # 只读访问器（v22/F6 连写编排器复用同一 gateway/registry/cfg 构造批量调用）
+    @property
+    def gateway(self) -> LLMGateway:
+        return self._gw
+
+    @property
+    def registry(self) -> SkillRegistry:
+        return self._reg
+
+    @property
+    def config(self) -> NovelForgeConfig:
+        return self._cfg
+
     def generate_chapter(
         self,
         chapter: int,
@@ -274,7 +287,17 @@ class Orchestrator:
         keyword_query: Optional[str] = None,
         interaction_mode: Optional[str] = None,
         progress_cb=None,  # Optional[Callable[[str, str, dict], None]]
+        predrafted_text: Optional[str] = None,
+        predrafted_beats: Optional[list[dict]] = None,
+        batch_id: Optional[str] = None,
     ) -> ChapterOutcome:
+        """生成并提交一章。
+
+        v22/F6 多章连写：``predrafted_text`` 给出时跳过 DRAFT（正文来自一次长输出
+        连写调用），PLAN 优先采用 ``predrafted_beats``（起草该正文所依据的节拍），
+        其后的 check → revise → quality → persist → actuals → settle 与单章完全一致；
+        ``batch_id`` 记入 ``pipeline_run.batch_id``。三者缺省时行为与旧版逐字节一致。
+        """
         cfg = self._cfg
         ledger = self._gw.ledger
         writing_profile = get_project_writing_profile(conn, chapter=chapter)
@@ -295,6 +318,7 @@ class Orchestrator:
         _begin_pipeline_run(
             conn, chapter, cfg.project_id, run_id,
             writing_profile=writing_profile, model_id=generation_model,
+            batch_id=batch_id,
         )
         workspace: dict = {
             "chapter_goal": chapter_goal,
@@ -324,27 +348,11 @@ class Orchestrator:
 
         try:
             # ── 1. RECALL + PACING ────────────────────────────────────────────
-            entity_ids = entity_ids or _infer_entity_ids(conn, chapter)
-            mcfg = getattr(cfg, "memory", None)
-            _vec_on = getattr(cfg.recall, "enable_vector", False) and mcfg is not None
-            _embedder = None
-            if _vec_on:
-                from ..memory.embedding import build_embedder
-                _embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
-            recall_pack = gather_hard_context(
-                entity_ids,
-                chapter - 1,
-                conn,
+            recall_pack = gather_recall_pack(
+                cfg, conn, chapter,
+                entity_ids=entity_ids,
                 keyword_query=keyword_query,
-                max_keywords=cfg.recall.max_keywords,
-                context_window=cfg.recall.context_window_chapters,
-                summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
-                enable_summaries=getattr(cfg.recall, "enable_summaries", True),
-                embedder=_embedder,
-                enable_vector=_vec_on,
-                scene_query=keyword_query or chapter_goal,
-                vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
-                rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
+                chapter_goal=chapter_goal,
             )
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
@@ -352,16 +360,7 @@ class Orchestrator:
             # M1-⑥：稳定前缀一次构建（含标题头，保证各 skill 的 user 消息从第 0 字节
             # 起完全一致），draft/check/revise 共享，吃 provider 前缀缓存
             content_language = writing_profile["content_language"]
-            _stable = recall_pack.to_stable_context_str(content_language)
-            _world_stable = (
-                (f"## Stable world context\n{_stable}" if content_language.startswith("en")
-                 else f"## 世界设定（稳定）\n{_stable}")
-                if _stable else ""
-            )
-            workspace["stable_context"] = "\n\n".join(
-                part for part in (profile_prompt_block(writing_profile), _world_stable)
-                if part
-            )
+            workspace["stable_context"] = compose_stable_context(writing_profile, recall_pack)
             workspace["dynamic_context"] = recall_pack.to_dynamic_context_str(
                 content_language,
             )
@@ -423,7 +422,16 @@ class Orchestrator:
                 })
 
             # ── 2. PLAN ───────────────────────────────────────────────────────
-            if plan_context.has_locked_contract:
+            if predrafted_text is not None and predrafted_beats is not None:
+                # v22/F6：连写正文按这些节拍起草，校验必须对照同一份节拍。
+                workspace["beats"] = [dict(b) for b in predrafted_beats if isinstance(b, dict)]
+                workspace["planner_source"] = "batch"
+                if progress_cb:
+                    progress_cb("plan", "ok", {
+                        "source": "batch",
+                        "beats": len(workspace["beats"]),
+                    })
+            elif plan_context.has_locked_contract:
                 # 用户/Agent 已选细纲就是本章契约。Planner 不得静默重写。
                 workspace["beats"] = plan_context.selected_beats
                 workspace["planner_source"] = "selected_contract"
@@ -446,7 +454,12 @@ class Orchestrator:
             #             候选间无依赖 → 线程池并行，单章等待时间 ≈ 最慢一稿）──
             n_cands = max(1, min(3, getattr(getattr(cfg, "candidates", None),
                                             "n_candidates", 1) or 1))
-            if n_cands <= 1:
+            if predrafted_text is not None:
+                # v22/F6：正文已由多章连写调用产出，跳过起草；其后流程逐字节不变。
+                workspace["draft_text"] = predrafted_text
+                workspace["candidate_report"] = {"selected_by": "batch", "batch_id": batch_id}
+                draft_ok = bool(predrafted_text.strip())
+            elif n_cands <= 1:
                 draft_result = self._reg.invoke("chapter_draft", skill_ctx)
                 draft_ok = draft_result.ok
             else:
@@ -842,8 +855,19 @@ class Orchestrator:
             )
 
         except Exception as e:
+            # 未预期异常（含熔断）：回滚半截事务并把本次 run 标为 crashed，
+            # 不再留下 status='running' 的僵尸行等启动期 sweep。
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _fail_pipeline_run(conn, run_id, "exception", {
+                "chapter": chapter,
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+            })
             return ChapterOutcome(
-                chapter=chapter, ok=False,
+                chapter=chapter, ok=False, run_id=run_id,
                 error=str(e),
                 usage_tokens=ledger.tokens_spent - _tokens0,
                 usage_usd=ledger.usd_spent - _usd0,
@@ -1262,6 +1286,56 @@ def _infer_entity_ids(conn: sqlite3.Connection, chapter: int, limit: int = 10) -
     return [r["id"] for r in rows]
 
 
+def gather_recall_pack(
+    cfg: NovelForgeConfig,
+    conn: sqlite3.Connection,
+    chapter: int,
+    *,
+    entity_ids: Optional[list[str]] = None,
+    keyword_query: Optional[str] = None,
+    chapter_goal: str = "",
+):
+    """as_of(chapter-1) 的召回包。单章流程与多章连写（v22/F6）共用，保证两者
+    的稳定前缀逐字节一致。"""
+    entity_ids = entity_ids or _infer_entity_ids(conn, chapter)
+    mcfg = getattr(cfg, "memory", None)
+    _vec_on = getattr(cfg.recall, "enable_vector", False) and mcfg is not None
+    _embedder = None
+    if _vec_on:
+        from ..memory.embedding import build_embedder
+        _embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
+    return gather_hard_context(
+        entity_ids,
+        chapter - 1,
+        conn,
+        keyword_query=keyword_query,
+        max_keywords=cfg.recall.max_keywords,
+        context_window=cfg.recall.context_window_chapters,
+        summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
+        enable_summaries=getattr(cfg.recall, "enable_summaries", True),
+        embedder=_embedder,
+        enable_vector=_vec_on,
+        scene_query=keyword_query or chapter_goal,
+        vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
+        rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
+    )
+
+
+def compose_stable_context(writing_profile: dict, recall_pack) -> str:
+    """稳定前缀 = 锁定写作配置 + 稳定世界设定（含标题头）。只放慢变内容。"""
+    content_language = writing_profile["content_language"]
+    _stable = recall_pack.to_stable_context_str(content_language)
+    _world_stable = (
+        (f"## Stable world context\n{_stable}" if content_language.startswith("en")
+         else f"## 世界设定（稳定）\n{_stable}")
+        if _stable else ""
+    )
+    return "\n\n".join(
+        part for part in (profile_prompt_block(writing_profile), _world_stable)
+        if part
+    )
+
+
 def _content_units(text: str, language: str) -> int:
     from ..text_metrics import count_content_units
 
@@ -1369,8 +1443,12 @@ def _begin_pipeline_run(
     *,
     writing_profile: Optional[dict] = None,
     model_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
 ) -> None:
-    """在 pipeline_run 表插入 'running' 行（F6 状态机开始）。"""
+    """在 pipeline_run 表插入 'running' 行（F6 状态机开始）。
+
+    ``batch_id``（v22 多章连写）记入 ``pipeline_run.batch_id``；老库无此列时静默跳过。
+    """
     try:
         profile = writing_profile or {}
         try:
@@ -1392,6 +1470,13 @@ def _begin_pipeline_run(
                 " VALUES(?, ?, ?, 'running')",
                 (run_id, chapter, project_id),
             )
+        if batch_id:
+            try:
+                conn.execute(
+                    "UPDATE pipeline_run SET batch_id=? WHERE run_id=?", (batch_id, run_id),
+                )
+            except sqlite3.OperationalError:
+                pass   # pre-v22 库
         conn.commit()
     except Exception:
         pass

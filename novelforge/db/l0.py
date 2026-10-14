@@ -205,3 +205,43 @@ def sweep_crashed_runs(conn: sqlite3.Connection) -> list[str]:
         return run_ids
     except Exception:
         return []
+
+
+def sweep_stale_batches(conn: sqlite3.Connection) -> list[str]:
+    """启动期连写批次扫描（v22/F6）。
+
+    进程崩溃时仍为 ``status='running'`` 的 ``draft_batches`` 行标为 ``failed``
+    （detail_json.failure_reason='interrupted'），其下尚未处理的 ``pending`` 章标为
+    ``discarded``。这些正文从未进入 ``draft_index``，丢弃不影响章节进度。
+
+    Returns:
+        已标记为 failed 的 batch id 列表（老库缺表时为空）。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id FROM draft_batches WHERE status='running'"
+        ).fetchall()
+        batch_ids = [r[0] for r in rows]
+        for batch_id in batch_ids:
+            conn.execute(
+                "UPDATE draft_batches SET status='failed',"
+                " detail_json=json_set(CASE WHEN json_valid(detail_json) THEN detail_json"
+                " ELSE '{}' END, '$.failure_reason', 'interrupted'),"
+                " updated_at=datetime('now') WHERE id=?",
+                (batch_id,),
+            )
+            conn.execute(
+                "UPDATE draft_batch_chapters SET status='discarded',"
+                " reason=COALESCE(reason, 'interrupted'), updated_at=datetime('now')"
+                " WHERE batch_id=? AND status='pending'",
+                (batch_id,),
+            )
+        if batch_ids:
+            conn.commit()
+        return batch_ids
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []

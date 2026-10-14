@@ -14,6 +14,9 @@ import type {
   AutopilotSessionInfo,
   AutopilotStartRequest,
   AutopilotStreamHandlers,
+  BatchRunRequest,
+  BatchRunResponse,
+  BatchStreamHandlers,
   BibleRenderResponse,
   ChapterCard,
   ChapterCardUpdateRequest,
@@ -23,6 +26,8 @@ import type {
   ChapterPlanVersion,
   ChapterReplanRequest,
   ChapterReplanResponse,
+  DraftBatchDetail,
+  DraftBatchInfo,
   ForeshadowHealth,
   GeneratedPlanWindow,
   GenreCatalogItem,
@@ -53,6 +58,7 @@ import type {
   SettingSuggestRequest,
   SettingSuggestResponse,
   SettleKrResponse,
+  SSEBatchEvent,
   SSEPipelineEvent,
   StateQueryRequest,
   StoryMap,
@@ -109,6 +115,42 @@ export function getApiKey(): string | null {
 }
 
 type HttpMethod = 'GET' | 'POST' | 'DELETE' | 'PUT' | 'PATCH';
+
+/**
+ * Split an SSE text buffer into complete `data:` payloads.
+ * Returns the parsed JSON payloads and the trailing partial line (feed it back
+ * with the next chunk). Comment lines (`: ping`) and malformed JSON are skipped.
+ */
+export function parseSSEBuffer(buffer: string): { events: unknown[]; rest: string } {
+  const lines = buffer.split('\n');
+  const rest = lines.pop() ?? '';
+  const events: unknown[] = [];
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (!line.startsWith('data: ')) continue;
+    try {
+      events.push(JSON.parse(line.slice(6)));
+    } catch { /* malformed line */ }
+  }
+  return { events, rest };
+}
+
+/** Route one multi-chapter batch SSE payload (v22/F6) to its handler. */
+export function dispatchBatchEvent(raw: unknown, handlers: BatchStreamHandlers): void {
+  if (!raw || typeof raw !== 'object') return;
+  const ev = raw as SSEBatchEvent;
+  switch (ev.event) {
+    case 'batch_start': handlers.onStart?.(ev); break;
+    case 'batch_draft': handlers.onDraft?.(ev); break;
+    case 'stage': handlers.onStage?.(ev); break;
+    case 'chapter_done': handlers.onChapterDone?.(ev); break;
+    case 'batch_discarded': handlers.onDiscarded?.(ev); break;
+    case 'batch_regenerate': handlers.onRegenerate?.(ev); break;
+    case 'batch_done': handlers.onDone?.(ev); break;
+    case 'error': handlers.onError?.(ev); break;
+    default: break;
+  }
+}
 
 function fastApiDetailMessage(detail: unknown): string | undefined {
   if (typeof detail === 'string') return detail;
@@ -853,6 +895,65 @@ export const api = {
         } catch { /* malformed line */ }
       }
     }
+  },
+
+  // v22/F6 多章连写：长输出模型一次起草 N 章再逐章校验提交；否则逐章顺序写。
+  runBatch(id: string, req: BatchRunRequest): Promise<BatchRunResponse> {
+    return request<BatchRunResponse>('POST', `/v1/${encodeURIComponent(id)}/pipeline/batch`, req);
+  },
+
+  // 事件：batch_start → [batch_draft] → stage(带 chapter)… → chapter_done …
+  // → [batch_discarded → batch_regenerate …] → batch_done；异常推 error。
+  async runBatchStream(
+    id: string,
+    req: BatchRunRequest,
+    handlers: BatchStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+    const key = getApiKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+
+    const res = await fetch(API_BASE + `/v1/${encodeURIComponent(id)}/pipeline/batch/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(text || res.statusText, res.status);
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = parseSSEBuffer(buffer);
+      buffer = parsed.rest;
+      for (const ev of parsed.events) dispatchBatchEvent(ev, handlers);
+    }
+  },
+
+  listDraftBatches(id: string, limit = 20): Promise<DraftBatchInfo[]> {
+    return request<DraftBatchInfo[]>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/batches?limit=${limit}`,
+    );
+  },
+
+  getDraftBatch(id: string, batchId: string, includeText = false): Promise<DraftBatchDetail> {
+    return request<DraftBatchDetail>(
+      'GET',
+      `/v1/${encodeURIComponent(id)}/pipeline/batches/${encodeURIComponent(batchId)}`
+        + (includeText ? '?include_text=true' : ''),
+    );
   },
 
   foreshadowHealth(id: string): Promise<ForeshadowHealth> {

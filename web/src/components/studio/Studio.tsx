@@ -26,6 +26,7 @@ import type {
   WorldStateSnapshot,
 } from '../../api/types';
 import VolumesPanel from './VolumesPanel';
+import BatchDraftPanel from './BatchDraftPanel';
 import SummariesPanel from './SummariesPanel';
 import AgentPanel from './AgentPanel';
 import MemoryPanel from './MemoryPanel';
@@ -1050,6 +1051,10 @@ function PipelinePanel({
   const [apMaxTokens, setApMaxTokens] = useState<string>('');
   const [apMaxUsd, setApMaxUsd] = useState<string>('');
   const [apGoals, setApGoals] = useState<string>('');
+  // v22/F6：挂机每批章数（空 = 自动按模型容量；1 = 逐章）
+  const [apBatchSize, setApBatchSize] = useState<string>('');
+  // v22/F6：多章连写进行中（与单章生成/挂机互斥）
+  const [batchBusy, setBatchBusy] = useState<boolean>(false);
 
   // 卷规划（M4-④：批量生成章节卡，供「下一章」最优建议消费）
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
@@ -1309,10 +1314,12 @@ function PipelinePanel({
         const m = line.match(/^\s*(\d+)\s*[:：]\s*(.+)$/);
         if (m) goals[m[1]] = m[2].trim();
       }
+      const batchSize = Number.parseInt(apBatchSize, 10);
       const session = await api.autopilotStart(projectId, {
         from_chapter: from,
         to_chapter: from + count - 1,
         mode: apMode,
+        batch_size: Number.isFinite(batchSize) && batchSize > 0 ? Math.min(30, batchSize) : undefined,
         quality_check: qualityCheck || undefined,
         n_candidates: nCandidates > 1 ? nCandidates : undefined,
         budget_session_max_tokens: Number.isFinite(sessTok) && sessTok > 0 ? sessTok : undefined,
@@ -1531,7 +1538,7 @@ function PipelinePanel({
           />
         </div>
         <div className="nf-actions" style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy || apActive}>
+          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy || apActive || batchBusy}>
             {busy && !chainProgress ? (
               <>
                 <span className="nf-spin" /> 生成中…
@@ -1545,7 +1552,7 @@ function PipelinePanel({
             type="button"
             className="nf-btn"
             onClick={() => void runAuto()}
-            disabled={busy || apActive}
+            disabled={busy || apActive || batchBusy}
             title="自动取「已完成最大章 +1」为章号，并按卷大纲 / 章节卡 / 待回收伏笔自动拼装本章目标"
           >
             {chainProgress ? (
@@ -1612,6 +1619,22 @@ function PipelinePanel({
           </div>
         )}
       </div>
+
+      {/* ── v22/F6 多章连写 ─────────────────────────────── */}
+      <BatchDraftPanel
+        projectId={projectId}
+        mode={mode}
+        nCandidates={nCandidates}
+        qualityCheck={qualityCheck}
+        disabled={busy || apActive}
+        onBusyChange={setBatchBusy}
+        onChanged={() => {
+          onChanged();
+          void loadHistory();
+          chapterNoTouched.current = false;
+          void loadSuggestion();
+        }}
+      />
 
       {/* ── Autopilot 挂机连写 ───────────────────────────── */}
       <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
@@ -1686,11 +1709,30 @@ function PipelinePanel({
             style={{ width: '5rem' }}
           />
         </label>
+        <label
+          htmlFor="ap-batch"
+          style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}
+          title="每次长输出调用连续起草的章数（多章连写）；空 = 按模型容量自动，1 = 逐章生成。非长输出模型始终逐章；连写时每章只有一稿（候选稿数不生效），需要多候选择优请填 1"
+        >
+          每批章数
+          <input
+            id="ap-batch"
+            className="nf-input"
+            type="number"
+            min={1}
+            max={30}
+            placeholder="自动"
+            value={apBatchSize}
+            onChange={(e) => setApBatchSize(e.target.value)}
+            disabled={apBusy || apActive}
+            style={{ width: '4.5rem' }}
+          />
+        </label>
         <button
           type="button"
           className="nf-btn"
           onClick={() => void startAutopilot()}
-          disabled={apBusy || apActive || busy}
+          disabled={apBusy || apActive || busy || batchBusy}
         >
           {apBusy ? (
             <>

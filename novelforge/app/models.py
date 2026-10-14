@@ -423,6 +423,90 @@ class SelectCandidateRequest(BaseModel):
     candidate_index: int = Field(ge=0, le=2)
 
 
+# ── v22/F6 多章连写（Batch drafting）─────────────────────────────────────────
+
+class BatchRunRequest(BaseModel):
+    """一次长输出调用起草连续多章，再逐章校验提交（非长输出模型退化为逐章顺序写）。"""
+    start_chapter: Optional[int] = Field(default=None, ge=1)   # 缺省 = 下一章
+    chapters: Optional[int] = Field(default=None, ge=1, le=30)  # 缺省 = cfg.batch.max_chapters
+    chapter_goals: dict[str, str] = Field(default_factory=dict)  # {章号: 目标}；缺省逐章自动拼装
+    interaction_mode: Optional[Literal["guided", "copilot", "autonomous"]] = None
+    # 与 PipelineRunRequest 同义的逐章设置（复用 _make_cfg）
+    mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
+    budget_max_tokens: Optional[int] = None    # 单章预算；连写调用按章数放大
+    budget_max_usd: Optional[float] = None
+    n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # 仅顺序模式生效
+    quality_check: Optional[bool] = None
+
+
+class BatchChapterResult(BaseModel):
+    chapter: int
+    ok: bool
+    run_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    issues: int = 0
+    blocks: int = 0               # 修订后仍残留的 hard block
+    quality_score: Optional[float] = None
+    tokens: int = 0               # 本章流水线 + 摊入的连写调用成本
+    usd: float = 0.0
+    state_degraded: bool = False
+    error: Optional[str] = None
+
+
+class BatchDiscardedChapter(BaseModel):
+    chapter: int
+    batch_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class BatchRunResponse(BaseModel):
+    batch_id: Optional[str] = None       # 首个 draft_batches 行；顺序模式为 None
+    batch_ids: list[str] = Field(default_factory=list)
+    mode: Literal["batch", "sequential"]
+    status: Literal["completed", "partial", "failed", "canceled"]
+    requested: list[int] = Field(default_factory=list)
+    chapters: list[BatchChapterResult] = Field(default_factory=list)
+    discarded: list[BatchDiscardedChapter] = Field(default_factory=list)
+    regenerations: int = 0
+    next_chapter: int
+    tokens: int = 0
+    usd: float = 0.0
+    batch_tokens: int = 0
+    batch_usd: float = 0.0
+    capacity: int = 1
+    error: Optional[str] = None
+
+
+class DraftBatchChapterInfo(BaseModel):
+    chapter: int
+    seq: int
+    status: str                          # pending | accepted | rejected | discarded
+    run_id: Optional[str] = None
+    reason: Optional[str] = None
+    length: int = 0                      # 正文字符数（len）
+    draft_text: Optional[str] = None     # 仅 include_text=true 时返回
+    updated_at: Optional[str] = None
+
+
+class DraftBatchInfo(BaseModel):
+    batch_id: str
+    start_chapter: int
+    end_chapter: int
+    status: str                          # running | completed | partial | failed | canceled
+    origin: str
+    model_id: Optional[str] = None
+    tokens_spent: int = 0
+    usd_spent: float = 0.0
+    created_at: str
+    updated_at: Optional[str] = None
+    detail: dict = Field(default_factory=dict)
+    counts: dict[str, int] = Field(default_factory=dict)   # 各状态章数
+
+
+class DraftBatchDetail(DraftBatchInfo):
+    chapters: list[DraftBatchChapterInfo] = Field(default_factory=list)
+
+
 # ── Pipeline stats（M6: 质量趋势看板）─────────────────────────────────────────
 
 class ChapterStat(BaseModel):
@@ -578,6 +662,9 @@ class AutopilotStartRequest(BaseModel):
     pause_on_degrade: bool = True
     quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
     n_candidates: int = Field(default=1, ge=1, le=3)  # M3-①: 每章候选稿数（择优）
+    # v22/F6 多章连写：每次长输出调用起草的章数。None = 自动（模型容量），
+    # 1 = 旧的逐章流程；仅 provider 声明 long_output 时生效
+    batch_size: Optional[int] = Field(default=None, ge=1, le=30)
 
 
 class AutopilotSessionInfo(BaseModel):
