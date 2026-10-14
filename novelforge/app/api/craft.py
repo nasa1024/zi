@@ -247,15 +247,26 @@ def pacing_overview(
     registry: ProjectRegistry = Depends(get_registry),
 ):
     """v22/F3 节奏游标 + 最近 20 章的实际转向与张力（只读，按章号升序）。"""
+    import logging
     import sqlite3
 
     from ...config import PolarityConfig
+    from ...control_plane.llm.runtime import build_project_config
     from ...craft.pacing import PacingController, PacingState
     from ..models import PacingChapterView, PacingCursorView, PacingOverview
 
-    limits = PolarityConfig()
     conn = registry.open_conn(project_id)
     try:
+        project = registry.get(project_id)
+        try:   # 项目实际生效的阈值（与流水线同源）；配置读取失败时退回默认值
+            limits = build_project_config(
+                project_id, project.db_path if project else "novel.db", conn,
+            ).polarity
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "pacing overview: project config unavailable, using defaults", exc_info=True,
+            )
+            limits = PolarityConfig()
         try:
             state = PacingController().get_state(conn, max_low_streak=limits.max_low_streak)
         except sqlite3.OperationalError:   # 极旧库没有 pacing_cursor

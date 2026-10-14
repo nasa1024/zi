@@ -103,6 +103,32 @@ class TestAxisPolarity:
     def test_axis(self, axis, expected):
         assert polarity.axis_polarity(axis) == expected
 
+    @pytest.mark.parametrize("axis,expected", [
+        # "<轴名>：A→B"：轴名（价值物）不能被算成起态的正面词（review r1：曾得 "-"）
+        ("实力：弱→强", "+"), ("地位：低→高", "+"), ("信任：破裂→修复", "+"),
+        ("生死：安全→濒死", "-"), ("实力：强→弱", "-"), ("实力：从弱到强", "+"),
+        ("希望：破灭→重燃", "+"), ("林凡：落魄→崛起", "+"), ("主角处境：安全→危机", "-"),
+        ("实力：弱→强（突破）", "+"),
+        # 没有冒号的同一写法
+        ("实力 弱→强", "+"), ("实力弱→强", "+"), ("实力弱→实力强", "+"), ("弱→实力强", "+"),
+        ("强→失败", "-"),                   # 不带量级词的情感词仍是状态，不当轴名
+        # 量级词的好坏由轴名决定
+        ("危险：低→高", "-"), ("压力：小→大", "-"), ("恐惧：强→弱", "+"),
+        ("伤势：轻→重", "-"), ("危机→更大的危机", "-"),
+        # 对手的价值物取反
+        ("敌人实力：弱→强", "-"), ("对手实力↓", "+"),
+        # English
+        ("status: low -> high", "+"), ("Status: from low to high", "+"),
+        ("power: lost -> regained", "+"), ("trust: broken -> restored", "+"),
+        ("power: weak -> strong", "+"), ("status low -> high", "+"),
+        ("danger: low -> high", "-"), ("rival status: low -> high", "-"),
+        ("enemy power ↑", "-"), ("Mara's standing: outcast -> accepted", "+"),
+        # 无轴名的纯量级变化 → 不猜
+        ("弱→强", None), ("low -> high", None),
+    ])
+    def test_axis_label_and_magnitude(self, axis, expected):
+        assert polarity.axis_polarity(axis) == expected
+
     def test_far_negator_does_not_flip(self):
         assert polarity.state_value("无敌的希望") == "+"
 
@@ -390,12 +416,30 @@ class TestCraftChecks:
                                           settings=off)) == []
 
     def test_english_project_gets_english_text(self, conn):
-        _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 4)])
+        _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 5)])
         beats = [_beat("tension_point", axis="calm -> danger"), _beat("hook")]
         issues = polarity.craft_checks(_ctx(conn, 4, beats=beats, language="en-US"))
         assert [i["check"] for i in issues] == ["polarity_turn", "aftermath"]
         for issue in issues:
             assert not _CJK.search(issue["detail"] + issue["fix"]), issue
+
+    def test_english_positive_streak_text(self, conn):
+        _seed(conn, [(1, "+", 2), (2, "+", 2), (3, "+", 2)])
+        issues = polarity.craft_checks(_ctx(conn, 4, contract={"polarity": "+"},
+                                            language="en-US"))
+        assert [i["check"] for i in issues] == ["polarity_streak"]
+        assert "4 in a row" in issues[0]["detail"]
+        assert "Turn the other way" in issues[0]["fix"]
+        assert not _CJK.search(issues[0]["detail"] + issues[0]["fix"])
+
+    def test_axis_label_shape_does_not_fake_a_low_streak(self, conn):
+        """"实力：弱→强" 一类的上扬章不能被算成低谷（review r1 的主要问题）。"""
+        _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 2)])
+        rising = [_beat("setup", axis="实力：弱→强"), _beat("turn", axis="地位：低→高"),
+                  _beat("hook", axis="悬念↑")]
+        assert polarity.craft_checks(_ctx(conn, 4, beats=rising)) == []
+        en = [_beat("turn", axis="status: low -> high"), _beat("hook")]
+        assert polarity.craft_checks(_ctx(conn, 4, beats=en, language="en-US")) == []
 
     def test_aftermath_after_big_payoff(self, conn):
         _seed(conn, [(3, "+", 5)])
@@ -408,13 +452,33 @@ class TestCraftChecks:
         for beats in (calm, cooled, []):
             assert polarity.craft_checks(_ctx(conn, 4, beats=beats)) == []
 
+    def test_lone_payoff_or_in_chapter_cooldown_needs_no_aftermath(self, conn):
+        """小爽点（单个 payoff_beat，档位 4）不要求余韵；上一章已在章内平复也不要求。"""
+        hot = [_beat("tension_point"), _beat("turn"), _beat("hook")]
+        _seed(conn, [(3, "+", 4)])
+        assert polarity.craft_checks(_ctx(conn, 4, beats=hot)) == []
+        conn.execute("UPDATE pacing_state SET tension_level=5, notes=? WHERE chapter=3",
+                     (json.dumps({"beat_types": ["tension_point", "payoff_beat",
+                                                 "aftermath", "hook"]}),))
+        assert polarity.craft_checks(_ctx(conn, 4, beats=hot)) == []
+        conn.execute("UPDATE pacing_state SET notes=? WHERE chapter=3",
+                     (json.dumps({"beat_types": ["tension_point", "payoff_beat", "hook"]}),))
+        assert [i["check"] for i in polarity.craft_checks(_ctx(conn, 4, beats=hot))] == [
+            "aftermath"]
+
     def test_aftermath_falls_back_to_planned_beats_of_previous_chapter(self, conn):
         conn.execute("INSERT INTO beats(id, chapter, seq, beat_type, summary)"
-                     " VALUES('b1', 6, 1, 'payoff_beat', '当众打脸')")
+                     " VALUES('b1', 6, 1, 'tension_point', '当众挑衅')")
+        conn.execute("INSERT INTO beats(id, chapter, seq, beat_type, summary)"
+                     " VALUES('b2', 6, 2, 'payoff_beat', '当众打脸')")
         hot = [_beat("tension_point"), _beat("hook")]
         assert [i["check"] for i in polarity.craft_checks(_ctx(conn, 7, beats=hot))] == [
             "aftermath"]
         assert polarity.craft_checks(_ctx(conn, 8, beats=hot)) == []
+        # 只有一个 payoff_beat 的计划章：小爽点，不提示
+        conn.execute("INSERT INTO beats(id, chapter, seq, beat_type, summary)"
+                     " VALUES('b3', 8, 1, 'payoff_beat', '小胜')")
+        assert polarity.craft_checks(_ctx(conn, 9, beats=hot)) == []
 
     def test_contract_polarity_is_read_from_db_without_plan_context(self, conn):
         """治理端点只给 draft/beats：从 chapter_plan_versions 读取计划转向。"""
@@ -496,14 +560,54 @@ class TestDraftBrief:
 
     def test_aftermath_length_scales_with_climax(self, conn):
         _seed(conn, [(3, "+", 4)])
+        # 单个 payoff_beat 是小爽点：不要求余韵（避免爽文几乎每章都被要求开场平复）
+        assert polarity.draft_brief(conn, 4, {}, language="zh-CN", cfg=None) == ""
+        conn.execute("UPDATE pacing_state SET tension_level=5, notes=? WHERE chapter=3",
+                     (json.dumps({"beat_types": ["setup", "tension_point", "payoff_beat",
+                                                 "hook"]}),))
         small = polarity.draft_brief(conn, 4, {}, language="zh-CN", cfg=None)
-        conn.execute("UPDATE pacing_state SET tension_level=5 WHERE chapter=3")
+        assert "余韵" in small and "一小段" in small and "大高潮" in small
+        conn.execute("UPDATE pacing_state SET notes=? WHERE chapter=3",
+                     (json.dumps({"beat_types": ["tension_point", "payoff_beat",
+                                                 "tension_point", "payoff_beat"]}),))
         big = polarity.draft_brief(conn, 4, {}, language="zh-CN", cfg=None)
-        assert "余韵" in small and "一小段" in small
         assert "约前三分之一" in big
         ws = {"plan_context": PlanContext(target_chapter=4, current_contract={
             "beats": [_beat("aftermath"), _beat("hook")]})}
         assert polarity.draft_brief(conn, 4, ws, language="zh-CN", cfg=None) == ""
+        # 上一章在最后一个 payoff_beat 之后已安排余韵：不再要求
+        conn.execute("UPDATE pacing_state SET notes=? WHERE chapter=3",
+                     (json.dumps({"beat_types": ["tension_point", "payoff_beat",
+                                                 "aftermath", "hook"]}),))
+        assert polarity.draft_brief(conn, 4, {}, language="zh-CN", cfg=None) == ""
+
+    def test_cursor_hint_with_other_threshold_does_not_silence_the_brief(self, conn):
+        _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 2)])
+        cfg = NovelForgeConfig()
+        cfg.polarity.max_low_streak = 5
+        # 游标按默认阈值 3 给出了"需要转机"，但本项目阈值是 5：两者口径不同，不能互相抵消
+        ws = {"pacing_state": PacingState(low_streak=3)}
+        brief = polarity.draft_brief(conn, 4, ws, language="zh-CN", cfg=cfg)
+        assert "已连续 3 章低谷" in brief          # 同向上限 3 仍要求转向
+        same = {"pacing_state": PacingState(low_streak=3, max_low_streak=3)}
+        assert polarity.draft_brief(conn, 4, same, language="zh-CN", cfg=None) == ""
+
+    def test_english_positive_streak_brief(self, conn):
+        _seed(conn, [(1, "+", 2), (2, "+", 2), (3, "+", 2)])
+
+        def brief_for(planned):
+            ws = {"plan_context": PlanContext(target_chapter=4,
+                                              current_contract={"polarity": planned})}
+            return polarity.draft_brief(conn, 4, ws, language="en-US", cfg=None)
+
+        free = brief_for(None)
+        assert free.startswith("## Pacing requirements\n")
+        assert "turn the other way this chapter" in free
+        planned_win = brief_for("+")
+        assert "the contract plans another win" in planned_win
+        assert brief_for("-") == ""
+        for text in (free, planned_win):
+            assert not _CJK.search(text)
 
     def test_english_brief(self, conn):
         _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 5)])
@@ -622,7 +726,7 @@ def _open(project_id):
     return get_registry().open_conn(project_id)
 
 
-def _orch(project_id, factory):
+def _orch(project_id, factory, *, max_low_streak=None):
     from novelforge.control_plane.budget import BudgetLedger
     from novelforge.control_plane.llm.fake_provider import FakeProvider
     from novelforge.control_plane.llm.gateway import LLMGateway
@@ -639,6 +743,8 @@ def _orch(project_id, factory):
     cfg.provider.provider = "fake"
     cfg.recall.enable_summaries = False
     cfg.settle.enabled = False
+    if max_low_streak is not None:
+        cfg.polarity.max_low_streak = max_low_streak
     return Orchestrator(gw, reg, cfg), fake
 
 
@@ -678,6 +784,27 @@ class TestApiAndPipeline:
         assert body["chapters"][0]["polarity"] == "-"
         assert body["chapters"][0]["detail"]["beat_types"] == ["payoff_beat", "hook"]
         assert body["cursor"]["low_streak"] == 3 and body["cursor"]["needs_turn"] is True
+
+    def test_pacing_endpoint_uses_project_threshold(self, client, project, monkeypatch):
+        import novelforge.control_plane.llm.runtime as runtime
+
+        real = runtime.build_project_config
+
+        def patched(*args, **kwargs):
+            cfg = real(*args, **kwargs)
+            cfg.polarity.max_low_streak = 5
+            return cfg
+
+        monkeypatch.setattr(runtime, "build_project_config", patched)
+        conn = _open(project)
+        try:
+            for ch in (1, 2, 3):
+                _settle(conn, ch, "-")
+        finally:
+            conn.close()
+        body = client.get(f"/v1/{project}/pacing").json()
+        assert body["max_low_streak"] == 5
+        assert body["cursor"]["low_streak"] == 3 and body["cursor"]["needs_turn"] is False
 
     def test_settle_runs_in_pipeline_and_is_idempotent(self, client, project):
         beats = [
@@ -740,5 +867,28 @@ class TestApiAndPipeline:
 
             turns = [i for i in outcome.issues if i.get("check") == "polarity_turn"]
             assert len(turns) == 1 and turns[0]["severity"] == "warn"
+        finally:
+            conn.close()
+
+    def test_configured_low_streak_threshold_reaches_the_cursor_hint(self, client, project):
+        """cfg.polarity.max_low_streak=5：3 章低谷时游标提示不触发，节奏要求块照常给出。"""
+        conn = _open(project)
+        try:
+            _seed(conn, [(1, "-", 2), (2, "-", 2), (3, "-", 2)])
+            PacingController().recompute_polarity_streaks(conn)
+            conn.commit()
+            beats = [
+                {"beat_type": "setup", "summary": "开场", "value_axis": "平静→波澜"},
+                {"beat_type": "hook", "summary": "章末悬念", "value_axis": "悬念↑"},
+            ]
+            orch, fake = _orch(project, _factory(beats, "平稳正文。" * 200),
+                               max_low_streak=5)
+            outcome = orch.generate_chapter(4, conn, chapter_goal="测试")
+            assert outcome.ok, outcome.error
+            text = _user(next(c for c in fake.calls if "本章任务" in _user(c)))
+            assert "节奏提示：已连续" not in text
+            brief = text[text.index("## 节奏要求"):text.index("## 本章任务")]
+            assert "已连续 3 章低谷" in brief and "必须安排转机" in brief
+            assert not [i for i in outcome.issues if i.get("check") == "polarity_turn"]
         finally:
             conn.close()

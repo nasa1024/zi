@@ -14,13 +14,13 @@
 |---|---|
 | `craft/polarity.py` | `enrich_actuals` / `settle` / `craft_checks` / `draft_brief`（扩展点见 `craft/extensions.py`） |
 | `craft/pacing.py` | `PacingState` 读新列 + `needs_turn`；`aftermath` 计为冷却；`recompute_polarity_streaks`；中文转机提示 |
-| `control_plane/orchestrator.py` | 仅 `_profile_pacing_hint`：英文转机提示 |
+| `control_plane/orchestrator.py` | `_profile_pacing_hint`：英文转机提示；recall 步骤 `get_state` 传入 `cfg.polarity.max_low_streak` |
 | `app/api/craft.py` + `app/models.py` | `GET /v1/{project_id}/pacing`（游标 + 最近 20 章） |
 
 ## 数据流
 
 ```
-recall 步骤 ── pacing.get_state ──► 节奏提示（chapter_goal，中/英）
+recall 步骤 ── pacing.get_state(max_low_streak=cfg) ──► 节奏提示（chapter_goal，中/英）
             └─ draft_brief ───────► workspace["craft_brief"]（契约之后，稳定前缀之外）
                                     + workspace["polarity_settings"]（cfg 通道）
 PLAN / DRAFT ── planner 与 drafter 都渲染 craft_brief
@@ -36,7 +36,15 @@ SETTLE ─────── pacing.update（旧计数，余韵清零高潮连�
    （`actuals.completed_beats`）→ 采用契约 polarity；turning_point 取契约值，缺省时由 beats 推断。
 2. **价值轴推断**：已完成 beats 的 `value_axis`：
    - `A→B` / `A->B` / `从A到B` / `from A to B`：比较终态与起态的情感值（终态得失参半 → `±`）；
-   - `X↑ / X↓ / X上升 / trust down`：情感值 × 方向（"权力↓" = `-`，"危机↑" = `-`）；
+   - `轴名：A→B` / `axis: A -> B`：先拆出轴名，轴名不参与起终态比较（否则"实力：弱→强"里的
+     价值物"实力"会让起态得 +、被误算成 `-`）；无冒号的"实力弱→强"/"status low -> high"
+     （一侧只有量级词）同样把价值词当轴名；
+   - 两态情感持平（或都无情感词）时比较量级词（高/低、强/弱、多/少、more/less…），好坏由
+     轴名或两态共享的价值词决定："地位：低→高" = `+`，"危险：低→高" = `-`，
+     "危机→更大的危机" = `-`；轴名是对手的价值物时取反（"敌人实力：弱→强" = `-`）；
+     没有轴名的纯量级变化（"弱→强"）不猜；
+   - `X↑ / X↓ / X上升 / trust down`：情感值 × 方向（"权力↓" = `-`，"危机↑" = `-`，
+     "对手实力↓" = `+`）；
    - 只有轴名（"power"、"生死"）或中性状态（"悬念↑"）→ 不猜。
    - 每个 beat 得 + / - / ±，hook 不计（章末悬念是下一章的起因）；最后一个有方向的 beat
      （本章高潮）权重 ×2：净值 >0 → `+`，<0 → `-`，持平或高潮本身为 ± → `±`。
@@ -81,7 +89,7 @@ defeats/chooses…）→ `action`，都没有 → `None`。
 |---|---|---|
 | `polarity_turn` | 连续低谷 ≥ `max_low_streak` 且计划仍为 `-` 或未定 | structural |
 | `polarity_streak` | 计划转向与末尾同向链相同，且链长 ≥ `max_same_polarity_streak`（`-` 已由上一条报过则不重复） | structural |
-| `aftermath` | 上一章张力 ≥ 4（无结算记录时看其计划 beats），本章有 beats、无 aftermath、首个 beat 也不是 setup/aftermath | local |
+| `aftermath` | 上一章是大高潮（张力 5；无结算记录时看其计划 beats）且其最后一个 payoff_beat 之后没有 setup/aftermath；本章有 beats、无 aftermath、首个 beat 也不是 setup/aftermath | local |
 
 新项目或无历史时零告警；旧库/缺表时静默。
 
@@ -94,11 +102,14 @@ FakeProvider 路由标记：
   契约仍为 `-` → "至少给出一线转机，让本章成为 ±"；契约已是 `+`/`±` → 不输出。
 - 连续顺境：契约未定 → "本章需反向转折（受挫/代价/新危机）"；契约仍为 `+` → "为胜利附上
   代价或新隐患"。
-- 上一章大爽点且契约 beats 无 aftermath → 开头安排余韵；张力 4 建议"一小段"，
-  张力 5 建议"约前三分之一"（高潮越大平复越长）。
+- 上一章大高潮（口径同 `aftermath` 检查）且契约 beats 无 aftermath → 开头安排余韵；
+  上一章 2 个高张力 beat 建议"一小段"，≥3 个建议"约前三分之一"（高潮越大平复越长）。
+  单个 payoff_beat（张力 4）是小爽点——"高潮越小，平复期越短"——不提示，避免爽文
+  几乎每章都被要求开场平复、开头同质化。
 
 游标提示（`recommend_beat_hint` 中文 / `_profile_pacing_hint` 英文）在 `needs_turn`
-（`low_streak ≥ max_low_streak`）时把转机要求放在最前，其余节拍建议照旧。
+（`low_streak ≥ max_low_streak`，阈值取项目配置）时把转机要求放在最前，其余节拍建议照旧。
+只有游标阈值与项目阈值一致时，提示块才省略重复的转机要求。
 
 ## 配置（`cfg.polarity`，PolarityConfig）
 
@@ -113,7 +124,8 @@ FakeProvider 路由标记：
 
 ## API
 
-`GET /v1/{project_id}/pacing` → `{cursor: {…旧计数, low_streak, polarity_streak,
+`GET /v1/{project_id}/pacing`（阈值经 `build_project_config` 取项目实际配置）→
+`{cursor: {…旧计数, low_streak, polarity_streak,
 last_polarity, needs_turn, needs_cooldown, …}, chapters: [最近 20 章，升序，
 {chapter, tension_level, pace, polarity, turning_point, detail}], max_same_polarity_streak,
 max_low_streak}`。
@@ -122,7 +134,9 @@ max_low_streak}`。
 
 - 词典推断是启发式：只认带方向的价值轴，复杂反讽、长句否定、后置否定（"hope lost"）
   会判成 `±` 或 `None`；不读正文情感。
-- 游标提示用默认阈值（orchestrator 调 `get_state` 未传 cfg）；自定义阈值以提示块与检查为准。
+- 手动换稿验证（`app/api/orchestrator.py` 的 select-candidate）不跑 recall，`craft_checks`
+  拿到的是默认阈值；该处 `get_state` 也未传阈值（非 F3 文件）。
+- 价值轴默认以主角视角书写；"敌人：嚣张→溃败"这类以对手为主语的状态描述仍按字面情感计。
 - 游标表示"截至最新已结算章"：重写较早章节时，下一章的游标提示可能滞后一章；
   提示块与检查按"本章之前的历史"计算，不受影响。
 - 手动换稿（select-candidate）会重算并持久化 actuals（含新转向），但不跑结算，

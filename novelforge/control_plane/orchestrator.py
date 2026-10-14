@@ -402,7 +402,10 @@ class Orchestrator:
             )
 
             # PacingController：读取节拍状态，附加建议到 chapter_goal
-            pacing_state = pacing.get_state(conn)
+            pacing_state = pacing.get_state(
+                conn, max_low_streak=getattr(getattr(cfg, "polarity", None),
+                                             "max_low_streak", None),
+            )
             workspace["pacing_state"] = pacing_state
             hint = _profile_pacing_hint(writing_profile, pacing, pacing_state)
             if hint:

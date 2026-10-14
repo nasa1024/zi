@@ -10,7 +10,10 @@ Story Grid 每场必须转、避免同向极性链；猫腻"小高潮、平复�
   2. 否则看已完成 beats 的 ``value_axis``（"A→B" 或 "X↑/X↓"），用中英小词典比较终态与起态，
      每个 beat 得 + / - / ±，再按"最后一个有价值变化的 beat（本章高潮）权重 ×2"求净值：
      净值 >0 → ``+``，<0 → ``-``，持平或高潮 beat 本身得失参半 → ``±``；hook beat 不计
-     （章末悬念属于下一章的起因）；
+     （章末悬念属于下一章的起因）。"<轴名>：A→B" / "status: low -> high" 先拆出轴名（轴名
+     不参与起终态比较——"实力：弱→强"里的"实力"不能算成起态的正面词）；两态情感持平时
+     再比较量级词（高/低、强/弱、more/less），好坏由轴名决定（"危险：低→高" 为 -），
+     对手的价值物取反（"敌人实力：弱→强" 为 -）；
   3. 仍无法判断 → 保持 None（宁缺毋滥：未知转向会打断连续计数，不会误报）。
 - ``settle``：把实际转向写入 ``pacing_state``（按章 upsert，幂等），再按逐章历史**重算**
   ``pacing_cursor.low_streak / polarity_streak / last_polarity``（重写/换稿安全）。
@@ -20,12 +23,13 @@ Story Grid 每场必须转、避免同向极性链；猫腻"小高潮、平复�
 - ``craft_checks``（均为 warn，中英双语，无历史时静默）：
   a) 本章计划转向会让同向链超过 ``max_same_polarity_streak`` → "本章需反向转折"；
   b) 连续低谷已达 ``max_low_streak`` 且本章计划仍为 - 或未定 → "需要转机"（与 a 不重复报）；
-  c) 上一章是大爽点，本章既无 aftermath beat 也不是低张力开场 → 提示安排余韵。
+  c) 上一章是大高潮（档位 5，且最后一个 payoff_beat 之后章内未平复），本章既无 aftermath
+     beat 也不是低张力开场 → 提示安排余韵。单个 payoff_beat（档位 4）是小爽点，不要求余韵。
   "计划转向"= 契约 polarity；契约未定时用本章 beats 的 value_axis 推断。
 - ``draft_brief``：仅在相关时输出 ``## 节奏要求`` / ``## Pacing requirements``——连续低谷/顺境
   后的转向要求（与契约计划转向调和；游标提示已写明"需要转机"时不重复）、大高潮后的余韵
-  （高潮越大建议越长）。同时把本项目的 ``cfg.polarity`` 存进 ``workspace["polarity_settings"]``，
-  供同一章的 ``craft_checks`` 读取（检查拿不到 cfg）。
+  （与检查 c 同一口径；上一章高张力 beat 越多建议越长）。同时把本项目的 ``cfg.polarity``
+  存进 ``workspace["polarity_settings"]``，供同一章的 ``craft_checks`` 读取（检查拿不到 cfg）。
 
 ``pacing_state.tension_level`` 刻度（由本章 beats 得出）：1 平缓（仅 setup/aftermath/hook）、
 2 有 turn、3 有 tension_point、4 有 payoff_beat（大爽点）、5 payoff_beat 叠加其他高张力 beat
@@ -49,7 +53,8 @@ logger = logging.getLogger(__name__)
 
 SETTINGS_KEY = "polarity_settings"   # draft_brief → craft_checks 的配置通道
 _HISTORY_LIMIT = 64
-_BIG_PAYOFF_LEVEL = 4                 # tension_level ≥ 4：上一章有 payoff_beat
+_BIG_CLIMAX_LEVEL = 5                 # tension_level 5：payoff_beat 叠加其他高张力 beat
+_LONG_COOLDOWN_WEIGHT = 3             # 上一章 ≥3 个高张力 beat：余韵约占前三分之一
 _HIGH_TENSION_TYPES = ("tension_point", "payoff_beat")
 _LOW_TENSION_OPENINGS = ("setup", "aftermath")
 # 未迁移库的典型报错（SELECT 缺列为 no such column；INSERT 缺列为 has no column named）
@@ -106,11 +111,16 @@ _ZH_POSITIVE = (
     "欢喜", "安心", "圆满", "生机", "光明", "平静", "安宁", "稳定", "认同", "接纳", "结盟",
     "机缘", "奇遇", "复仇", "报仇", "雪耻", "洗冤", "得手", "立威", "震慑", "扬名", "成名",
     "疗伤", "痊愈", "康复", "无敌", "不败", "无伤", "胜", "赢", "爽",
-    # 拥有越多越好的"价值物"：权力↓ = 受挫
+    "修复", "恢复", "重燃", "夺回", "找回", "释放",
+)
+# 拥有越多越好的"价值物"（也算正面词）：权力↓ = 受挫。它们常作轴名（"实力：弱→强"），
+# 见 _split_shift / _subject_sign。
+_ZH_GOODS = (
     "权力", "实力", "地位", "修为", "境界", "声望", "名望", "名誉", "财富", "力量", "尊严",
     "底气",
 )
 _ZH_NEGATIVE = (
+    "破裂", "压抑", "受损",
     "乐极生悲", "功亏一篑", "前功尽弃", "危机", "危险", "危局", "危急", "告急", "受辱",
     "屈辱", "羞辱", "侮辱", "失去", "失败", "败北", "惨败", "落败", "受挫", "挫折", "挫败",
     "绝境", "绝路", "绝望", "死亡", "身亡", "濒死", "受伤", "重伤", "背叛", "出卖", "困境",
@@ -134,7 +144,7 @@ _ZH_RESOLVERS = (
 )
 _ZH_FILLERS = "了的得地之也都又 "
 _ZH_LEXICON: tuple[tuple[str, int], ...] = tuple(sorted(
-    [(w, 1) for w in _ZH_POSITIVE] + [(w, -1) for w in _ZH_NEGATIVE]
+    [(w, 1) for w in _ZH_POSITIVE + _ZH_GOODS] + [(w, -1) for w in _ZH_NEGATIVE]
     + [(w, 0) for w in _ZH_MIXED],
     key=lambda item: -len(item[0]),
 ))
@@ -149,12 +159,17 @@ _EN_POSITIVE = frozenset((
     "gain", "gained", "love", "loved", "joy", "relief", "relieved", "peace", "calm",
     "escape", "escaped", "revenge", "vindicated", "vindication", "strength", "stronger",
     "empowered", "glory", "honor", "honour", "praise", "praised", "approval", "belonging",
-    "healed", "recovery", "recovered", "solved", "comeback", "upper",
-    # goods: more is better ("status down" = a setback)
+    "healed", "recovery", "recovered", "solved", "comeback", "upper", "regain", "regained",
+    "restored", "repaired", "mended", "rebuilt", "renewed",
+))
+# goods: more is better ("status down" = a setback); often the axis name ("status: low -> high")
+_EN_GOODS = frozenset((
     "power", "status", "wealth", "reputation", "standing", "dignity", "rank", "influence",
     "morale",
 ))
+_EN_POSITIVE = _EN_POSITIVE | _EN_GOODS
 _EN_NEGATIVE = frozenset((
+    "shattered", "damaged",
     "crisis", "danger", "dangerous", "threat", "threatened", "humiliation", "humiliated",
     "shame", "shamed", "loss", "lost", "lose", "loses", "defeat", "defeated", "failure",
     "failed", "fail", "despair", "desperate", "hopeless", "trapped", "trap", "cornered",
@@ -180,6 +195,8 @@ _EN_RESOLVERS = frozenset((
 _EN_TOKEN_RE = re.compile(r"[a-z]+")
 
 _ARROW_RE = re.compile(r"\s*(?:→|⟶|⇒|➔|➜|➝|->|=>|—>|－>)\s*")
+# "<轴名>：A→B" / "<axis>: A -> B"：轴名不含箭头与冒号，且冒号后必须仍是一个变化
+_AXIS_LABEL_RE = re.compile(r"^\s*([^：:→⟶⇒➔➜➝>]{1,20}?)\s*[：:]\s*(\S.*)$")
 _ZH_FROM_TO_RE = re.compile(r"^\s*从(.+?)(?:到|至)(.+)$")
 _EN_FROM_TO_RE = re.compile(r"^\s*from\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
 _UP_MARKERS = ("↑", "⬆", "↗", "上升", "提升", "增强", "升高", "高涨")
@@ -187,6 +204,34 @@ _DOWN_MARKERS = ("↓", "⬇", "↘", "下降", "降低", "减弱", "跌落", "�
 _EN_UP_WORDS = frozenset(("up", "rises", "rising", "increases", "grows", "growing"))
 _EN_DOWN_WORDS = frozenset((
     "down", "falls", "falling", "drops", "decreases", "declines", "shrinks", "fades",
+))
+
+# 量级词：只描述"多/少、高/低"，本身无好坏——好坏由轴名决定（"危险：低→高" 是 -，
+# "实力：弱→强" 是 +）。只在两态情感词持平时作后备比较。
+_ZH_MORE = ("高", "强", "多", "大", "满", "增", "涨", "升", "盛", "旺", "重", "有")
+_ZH_LESS = ("低", "弱", "少", "小", "空", "减", "降", "跌", "衰", "微", "轻", "无", "零")
+_ZH_DEGREE = ("越来越", "非常", "十分", "极其", "极", "更", "较", "很", "最", "太", "稍")
+_EN_MORE = frozenset((
+    "high", "higher", "highest", "strong", "stronger", "strongest", "more", "most", "many",
+    "much", "big", "bigger", "great", "greater", "huge", "full", "up", "rising", "peak",
+    "max", "maximum",
+))
+_EN_LESS = frozenset((
+    "low", "lower", "lowest", "weak", "weaker", "weakest", "less", "least", "few", "fewer",
+    "little", "small", "smaller", "tiny", "empty", "none", "zero", "down", "gone",
+    "minimal", "minimum",
+))
+_EN_DEGREE = frozenset((
+    "very", "too", "quite", "rather", "extremely", "so", "even", "slightly", "a", "the",
+    "is", "are", "at", "its", "it",
+))
+# 轴名指向对手时，对手的"价值物"越多对主角越不利（"敌人实力：弱→强" 是 -）
+_ZH_OPPONENTS = (
+    "敌人", "敌方", "敌军", "对手", "反派", "仇敌", "仇家", "仇人", "宿敌", "强敌", "对方",
+)
+_EN_OPPONENTS = frozenset((
+    "enemy", "enemies", "rival", "rivals", "opponent", "opponents", "villain", "villains",
+    "foe", "foes", "antagonist", "antagonists",
 ))
 
 _REVELATION_ZH = (
@@ -254,7 +299,7 @@ def state_value(text: str) -> Optional[str]:
     return None
 
 
-def _split_shift(axis: str) -> Optional[tuple[str, str]]:
+def _split_states(axis: str) -> Optional[tuple[str, str]]:
     parts = [p for p in _ARROW_RE.split(axis) if p.strip()]
     if len(parts) >= 2:
         return parts[0], parts[-1]
@@ -263,6 +308,76 @@ def _split_shift(axis: str) -> Optional[tuple[str, str]]:
         if match:
             return match.group(1), match.group(2)
     return None
+
+
+def _split_shift(axis: str) -> Optional[tuple[Optional[str], str, str]]:
+    """(轴名 or None, 起态, 终态)。
+
+    "实力：弱→强" / "status: low -> high" 的轴名必须单独拿出来：价值物名词（实力/地位/
+    status…）本身记为正面，若留在起态里会让起态得 +、终态无词，算成"变差"（符号反了）。
+    """
+    match = _AXIS_LABEL_RE.match(axis)
+    if match:
+        states = _split_states(match.group(2))
+        if states is not None:
+            return match.group(1).strip(), states[0], states[1]
+    states = _split_states(axis)
+    if states is None:
+        return None
+    return None, states[0], states[1]
+
+
+def _magnitude(text: str) -> tuple[int, int]:
+    """(净量级, 命中数)：多/高/强 记 +1，少/低/弱 记 -1。"""
+    text = str(text or "").lower()
+    more = sum(text.count(w) for w in _ZH_MORE)
+    less = sum(text.count(w) for w in _ZH_LESS)
+    for token in _EN_TOKEN_RE.findall(text):
+        more += token in _EN_MORE
+        less += token in _EN_LESS
+    return more - less, more + less
+
+
+def _magnitude_only(text: str) -> bool:
+    """状态只由量级词（及程度副词、虚词、标点）构成，如 "强"、"更弱"、"low"、"very high"。"""
+    text = str(text or "").lower()
+    if not _magnitude(text)[1]:
+        return False
+    if any(t not in _EN_MORE and t not in _EN_LESS and t not in _EN_DEGREE
+           for t in _EN_TOKEN_RE.findall(text)):
+        return False
+    rest = _EN_TOKEN_RE.sub("", text)
+    for word in _ZH_DEGREE + _ZH_MORE + _ZH_LESS:
+        rest = rest.replace(word, "")
+    return not any(ch.isalnum() and ch not in _ZH_FILLERS for ch in rest)
+
+
+def _names_opponent(text: str) -> bool:
+    text = str(text or "").lower()
+    return any(w in text for w in _ZH_OPPONENTS) or bool(
+        set(_EN_TOKEN_RE.findall(text)) & _EN_OPPONENTS
+    )
+
+
+def _has_goods(text: str) -> bool:
+    text = str(text or "").lower()
+    return any(w in text for w in _ZH_GOODS) or bool(
+        set(_EN_TOKEN_RE.findall(text)) & _EN_GOODS
+    )
+
+
+def _subject_sign(subject: str) -> int:
+    """轴名的"越多越好"方向：+1（希望/实力）、-1（危险/压力）、0（看不出）。
+
+    对手的价值物（"敌人实力"、"rival's status"）越多对主角越不利，取反。
+    """
+    value = state_value(subject)
+    if value not in _NUMERIC:
+        return 0
+    sign = _NUMERIC[value]
+    if _names_opponent(subject) and _has_goods(subject):
+        sign = -sign
+    return sign
 
 
 def _trend(axis: str) -> Optional[tuple[str, int]]:
@@ -295,18 +410,44 @@ def axis_polarity(axis: Any) -> Optional[str]:
         return None
     shift = _split_shift(axis)
     if shift is not None:
-        start, end = state_value(shift[0]), state_value(shift[1])
-        if end == "±":
-            return "±"
-        delta = _NUMERIC.get(end or "", 0) - _NUMERIC.get(start or "", 0)
-        return "+" if delta > 0 else ("-" if delta < 0 else None)
+        return _shift_polarity(*shift)
     trend = _trend(axis)
     if trend is not None:
-        value = state_value(trend[0])
-        if value in _NUMERIC:
-            sign = _NUMERIC[value] * trend[1]
+        sign = _subject_sign(trend[0]) * trend[1]
+        if sign:
             return "+" if sign > 0 else "-"
     return None
+
+
+def _shift_polarity(label: Optional[str], start: str, end: str) -> Optional[str]:
+    """One "A→B" shift; ``label`` is the axis name split off "<label>：A→B"."""
+    s, e = state_value(start), state_value(end)
+    if e == "±":
+        return "±"
+    s_num, e_num = _NUMERIC.get(s or "", 0), _NUMERIC.get(e or "", 0)
+    # "实力弱→强" / "status low -> high"（无冒号）：一侧是"价值词+量级词"、另一侧只有
+    # 量级词时，价值词是轴名而不是状态——不能拿它和量级词比情感。（"强→失败"里的
+    # "失败"不带量级词，仍是状态。）
+    if (label is None and e is None and s in _NUMERIC and _magnitude(start)[1]
+            and _magnitude_only(end)):
+        label, s_num = start, 0
+    elif (label is None and s is None and e in _NUMERIC and _magnitude(end)[1]
+            and _magnitude_only(start)):
+        label, e_num = end, 0
+    delta = e_num - s_num
+    if delta:
+        return "+" if delta > 0 else "-"
+    # 两态情感持平（或都没有情感词）：比较量级，好坏由轴名或两态共享的价值词决定。
+    if label is not None:
+        sign = _subject_sign(label)
+    elif s == e and s in _NUMERIC:
+        sign = _subject_sign(start)
+    else:
+        return None
+    step = _magnitude(end)[0] - _magnitude(start)[0]
+    if not sign or not step:
+        return None
+    return "+" if sign * step > 0 else "-"
 
 
 def aggregate_turns(signs: Iterable[Optional[str]]) -> Optional[str]:
@@ -525,6 +666,7 @@ class _History:
     chapter: int                       # 正在规划/检查的章
     trail: list[Optional[str]]         # 第 chapter-1 章起向前、章号连续的实际转向
     prev_level: Optional[int]          # 上一章的张力档位（无记录为 None）
+    prev_types: Optional[tuple[str, ...]] = None   # 上一章 beats 的类型序列（未知为 None）
 
     def streak(self) -> tuple[Optional[str], int]:
         """(末尾连续转向, 章数)；末章转向未知时为 (None, 0)。"""
@@ -534,26 +676,66 @@ class _History:
     def span(self, length: int) -> tuple[int, int]:
         return self.chapter - length, self.chapter - 1
 
+    def owed_cooldown(self) -> int:
+        """上一章留下、需要本章余韵来平复的高潮档位；0 = 不需要。
+
+        只有大高潮（档位 5：payoff_beat 叠加其他高张力 beat）才要求余韵——单个
+        payoff_beat 是小爽点，"高潮越小，平复期越短"，不必每章都开场就平复。上一章在
+        最后一个 payoff_beat 之后已经安排了 setup/aftermath（章内已平复）时也不需要。
+        """
+        level = self.prev_level or 0
+        if level < _BIG_CLIMAX_LEVEL:
+            return 0
+        types = self.prev_types
+        if types and "payoff_beat" in types:
+            last_payoff = max(i for i, t in enumerate(types) if t == "payoff_beat")
+            if any(t in _LOW_TENSION_OPENINGS for t in types[last_payoff + 1:]):
+                return 0
+        return level
+
+    def climax_weight(self) -> int:
+        """上一章高张力 beat 的个数（类型未知时按档位 5 的最低值 2 计）。"""
+        if self.prev_types:
+            return sum(1 for t in self.prev_types if t in _HIGH_TENSION_TYPES)
+        return 2
+
 
 def _load_history(conn: sqlite3.Connection, chapter: int) -> _History:
     rows = conn.execute(
-        "SELECT chapter, polarity, tension_level FROM pacing_state"
+        "SELECT chapter, polarity, tension_level, notes FROM pacing_state"
         " WHERE chapter<? ORDER BY chapter DESC LIMIT ?",
         (chapter, _HISTORY_LIMIT),
     ).fetchall()
     pairs = [(int(r["chapter"]), r["polarity"]) for r in rows]
     contiguous = bool(pairs) and pairs[0][0] == chapter - 1
     trail = trailing_polarities(pairs) if contiguous else []
-    prev_level = int(rows[0]["tension_level"]) if contiguous else None
-    if prev_level is None:
-        prev_level = _planned_level(conn, chapter - 1)
-    return _History(chapter=chapter, trail=trail, prev_level=prev_level)
+    if contiguous:
+        prev_level = int(rows[0]["tension_level"])
+        prev_types = _note_types(rows[0]["notes"])
+    else:
+        prev_level, prev_types = _planned_level(conn, chapter - 1)
+    return _History(chapter=chapter, trail=trail, prev_level=prev_level,
+                    prev_types=prev_types)
 
 
-def _planned_level(conn: sqlite3.Connection, chapter: int) -> Optional[int]:
+def _note_types(notes: Any) -> Optional[tuple[str, ...]]:
+    """``pacing_state.notes`` JSON written by :func:`settle` → its ordered beat types."""
+    try:
+        data = json.loads(notes) if notes else None
+    except (TypeError, ValueError):
+        return None
+    types = data.get("beat_types") if isinstance(data, Mapping) else None
+    if not isinstance(types, list):
+        return None
+    return tuple(str(t or "") for t in types)
+
+
+def _planned_level(
+    conn: sqlite3.Connection, chapter: int,
+) -> tuple[Optional[int], Optional[tuple[str, ...]]]:
     """No settled row for the previous chapter: fall back to its planned beats."""
     if chapter < 1:
-        return None
+        return None, None
     for sql in (
         "SELECT beat_type FROM beats WHERE chapter=? AND status<>'dropped' ORDER BY seq",
         "SELECT b.beat_type FROM chapter_cards c"
@@ -565,8 +747,8 @@ def _planned_level(conn: sqlite3.Connection, chapter: int) -> Optional[int]:
         except sqlite3.Error:
             continue
         if types:
-            return tension_level(types)
-    return None
+            return tension_level(types), tuple(types)
+    return None, None
 
 
 def _planned_contract(workspace: Mapping[str, Any], conn: Any, chapter: int) -> Mapping[str, Any]:
@@ -672,7 +854,7 @@ def _streak_issue(
 
 
 def _aftermath_issue(history: _History, beats: list[Mapping[str, Any]], english: bool) -> list[dict]:
-    if not beats or (history.prev_level or 0) < _BIG_PAYOFF_LEVEL:
+    if not beats or not history.owed_cooldown():
         return []
     types = [_beat_type(b) for b in beats]
     if "aftermath" in types or types[0] in _LOW_TENSION_OPENINGS:
@@ -680,7 +862,7 @@ def _aftermath_issue(history: _History, beats: list[Mapping[str, Any]], english:
     prev = history.chapter - 1
     if english:
         detail = (
-            f"Chapter {prev} was a major payoff, but this chapter has no aftermath beat and "
+            f"Chapter {prev} was a major climax, but this chapter has no aftermath beat and "
             f"opens straight on a high-tension {types[0] or 'unknown'} beat; without a "
             "cooldown the climax loses its weight."
         )
@@ -691,8 +873,8 @@ def _aftermath_issue(history: _History, beats: list[Mapping[str, Any]], english:
         )
     else:
         detail = (
-            f"上一章（第 {prev} 章）是大爽点，本章既没有余韵（aftermath）beat，开场又直接是"
-            f"高张力的 {types[0] or '未知'} beat；缺少平复期，高潮的分量会被冲淡。"
+            f"上一章（第 {prev} 章）是大高潮（爽点叠加高张力），本章既没有余韵（aftermath）"
+            f"beat，开场又直接是高张力的 {types[0] or '未知'} beat；缺少平复期，高潮的分量会被冲淡。"
         )
         fix = "在本章开头安排余韵：在场者的反应、收获的消化与人物喘息（高潮越大平复越长），再进入新冲突。"
     return [{
@@ -753,6 +935,7 @@ def draft_brief(conn: sqlite3.Connection, chapter: int, workspace: dict, *,
     hint_covers_turn = bool(
         getattr(pacing_state, "needs_turn", False)
         and getattr(pacing_state, "low_streak", None) == length
+        and getattr(pacing_state, "max_low_streak", None) == settings.max_low_streak
     )
     if head == "-" and length >= min(settings.max_low_streak, settings.max_same_polarity_streak):
         first, last = history.span(length)
@@ -794,8 +977,8 @@ def draft_brief(conn: sqlite3.Connection, chapter: int, workspace: dict, *,
             )
 
     planned_types = [_beat_type(b) for b in _contract_beats(contract)]
-    if (history.prev_level or 0) >= _BIG_PAYOFF_LEVEL and "aftermath" not in planned_types:
-        big = (history.prev_level or 0) > _BIG_PAYOFF_LEVEL
+    if history.owed_cooldown() and "aftermath" not in planned_types:
+        big = history.climax_weight() >= _LONG_COOLDOWN_WEIGHT
         prev = chapter - 1
         if english:
             length_hint = (
@@ -803,14 +986,14 @@ def draft_brief(conn: sqlite3.Connection, chapter: int, workspace: dict, *,
                 else "a short aftermath, a beat or two"
             )
             lines.append(
-                f"- Chapter {prev} was a major payoff: open with an aftermath beat (witnesses "
+                f"- Chapter {prev} was a major climax: open with an aftermath beat (witnesses "
                 "react, the win sinks in, the characters breathe). The bigger the climax, "
                 f"the longer the cooldown; here: {length_hint}."
             )
         else:
             length_hint = "较充分的篇幅（约前三分之一）" if big else "一小段（一两个节拍）"
             lines.append(
-                f"- 上一章（第 {prev} 章）是大爽点：本章开头安排余韵（aftermath beat）——在场者的"
+                f"- 上一章（第 {prev} 章）是大高潮：本章开头安排余韵（aftermath beat）——在场者的"
                 f"反应、收获的消化、人物喘息；高潮越大平复越长，本章建议用{length_hint}。"
             )
 
