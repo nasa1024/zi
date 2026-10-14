@@ -846,6 +846,8 @@ export interface AutopilotStartRequest {
   auto_degrade_after_consecutive_issues?: number;
   quality_check?: boolean;
   n_candidates?: number;
+  // v22/F6：每次长输出调用起草的章数；缺省 = 自动（模型容量），1 = 逐章
+  batch_size?: number | null;
 }
 
 export interface ChapterStat {
@@ -965,6 +967,163 @@ export type SSEPipelineEvent = SSEStageEvent | SSEDoneEvent | SSEErrorEvent;
 export interface PipelineStreamHandlers {
   onStage?: (e: SSEStageEvent) => void;
   onDone?: (e: SSEDoneEvent) => void;
+  onError?: (e: SSEErrorEvent) => void;
+}
+
+// ── v22/F6 多章连写（/pipeline/batch, /pipeline/batch/stream）────────────────
+
+export interface BatchRunRequest {
+  start_chapter?: number | null;          // 缺省 = 下一章
+  chapters?: number | null;               // 1..30；缺省 = 后端 cfg.batch.max_chapters
+  chapter_goals?: Record<string, string>; // {章号: 目标}；缺省逐章自动拼装
+  interaction_mode?: 'guided' | 'copilot' | 'autonomous' | null;
+  mode?: 'human_gate' | 'auto_promote' | 'hybrid' | null;
+  budget_max_tokens?: number | null;
+  budget_max_usd?: number | null;
+  n_candidates?: number | null;           // 仅顺序模式（非长输出模型）生效
+  quality_check?: boolean | null;
+}
+
+export interface BatchChapterResult {
+  chapter: number;
+  ok: boolean;
+  run_id?: string | null;
+  batch_id?: string | null;
+  issues: number;
+  blocks: number;
+  quality_score?: number | null;
+  tokens: number;
+  usd: number;
+  state_degraded: boolean;
+  error?: string | null;
+}
+
+export interface BatchDiscardedChapter {
+  chapter: number;
+  batch_id?: string | null;
+  reason?: string | null;
+}
+
+export type BatchMode = 'batch' | 'sequential';
+export type BatchStatus = 'completed' | 'partial' | 'failed' | 'canceled';
+
+export interface BatchRunResponse {
+  batch_id?: string | null;
+  batch_ids: string[];
+  mode: BatchMode;
+  status: BatchStatus;
+  requested: number[];
+  chapters: BatchChapterResult[];
+  discarded: BatchDiscardedChapter[];
+  regenerations: number;
+  next_chapter: number;
+  tokens: number;
+  usd: number;
+  batch_tokens: number;
+  batch_usd: number;
+  capacity: number;
+  error?: string | null;
+}
+
+export interface DraftBatchChapterInfo {
+  chapter: number;
+  seq: number;
+  status: 'pending' | 'accepted' | 'rejected' | 'discarded' | string;
+  run_id?: string | null;
+  reason?: string | null;
+  length: number;
+  draft_text?: string | null;
+  updated_at?: string | null;
+}
+
+export interface DraftBatchInfo {
+  batch_id: string;
+  start_chapter: number;
+  end_chapter: number;
+  status: 'running' | 'completed' | 'partial' | 'failed' | 'canceled' | string;
+  origin: string;
+  model_id?: string | null;
+  tokens_spent: number;
+  usd_spent: number;
+  created_at: string;
+  updated_at?: string | null;
+  detail: Record<string, unknown>;
+  counts: Record<string, number>;
+}
+
+export interface DraftBatchDetail extends DraftBatchInfo {
+  chapters: DraftBatchChapterInfo[];
+}
+
+export interface SSEBatchStartEvent {
+  event: 'batch_start';
+  batch_id?: string | null;
+  mode: BatchMode;
+  chapters: number[];
+  capacity: number;
+}
+
+export interface SSEBatchDraftEvent {
+  event: 'batch_draft';
+  batch_id: string;
+  from_chapter: number;
+  to_chapter: number;
+  parsed: number[];
+  rejected: Record<string, string>;
+  tokens: number;
+  usd: number;
+  error?: string | null;      // 连写调用本身失败（成本照常通报）
+}
+
+export interface SSEBatchStageEvent {
+  event: 'stage';
+  chapter: number;
+  stage: string;
+  status: string;
+  detail: Record<string, unknown>;
+}
+
+export interface SSEChapterDoneEvent extends BatchChapterResult {
+  event: 'chapter_done';
+}
+
+export interface SSEBatchDiscardedEvent {
+  event: 'batch_discarded';
+  batch_id: string;
+  from_chapter: number;
+  chapters: number[];
+  reason?: string | null;
+}
+
+export interface SSEBatchRegenerateEvent {
+  event: 'batch_regenerate';
+  batch_id: string;
+  from_chapter: number;
+  attempt: number;
+}
+
+export interface SSEBatchDoneEvent extends BatchRunResponse {
+  event: 'batch_done';
+}
+
+export type SSEBatchEvent =
+  | SSEBatchStartEvent
+  | SSEBatchDraftEvent
+  | SSEBatchStageEvent
+  | SSEChapterDoneEvent
+  | SSEBatchDiscardedEvent
+  | SSEBatchRegenerateEvent
+  | SSEBatchDoneEvent
+  | SSEErrorEvent;
+
+export interface BatchStreamHandlers {
+  onStart?: (e: SSEBatchStartEvent) => void;
+  onDraft?: (e: SSEBatchDraftEvent) => void;
+  onStage?: (e: SSEBatchStageEvent) => void;
+  onChapterDone?: (e: SSEChapterDoneEvent) => void;
+  onDiscarded?: (e: SSEBatchDiscardedEvent) => void;
+  onRegenerate?: (e: SSEBatchRegenerateEvent) => void;
+  onDone?: (e: SSEBatchDoneEvent) => void;
   onError?: (e: SSEErrorEvent) => void;
 }
 

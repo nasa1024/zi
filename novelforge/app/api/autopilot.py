@@ -69,6 +69,7 @@ class _StartReq:
     pause_on_degrade: bool = True
     quality_check: bool = False
     n_candidates: int = 1
+    batch_size: Optional[int] = None   # v22/F6：None=自动（模型连写容量），1=逐章
 
 
 @router.post("/{project_id}/autopilot/start", response_model=AutopilotSessionInfo, status_code=202)
@@ -99,6 +100,7 @@ def autopilot_start(
         pause_on_degrade=req.pause_on_degrade,
         quality_check=req.quality_check,
         n_candidates=req.n_candidates,
+        batch_size=req.batch_size,
     )
     session = mgr.start(internal_req, registry, api_key=api_key)
     return _session_to_info(session)
@@ -292,6 +294,7 @@ def autopilot_resume(
         pause_on_degrade=req.get("pause_on_degrade", True),
         quality_check=req.get("quality_check", False),
         n_candidates=req.get("n_candidates", 1),
+        batch_size=req.get("batch_size"),
     )
     _, api_key = resolve_provider_env()
     session = mgr.start(internal_req, registry, api_key=api_key, resumed_from=session_id)

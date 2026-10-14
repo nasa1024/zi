@@ -9,8 +9,10 @@ from fastapi.responses import StreamingResponse
 
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
+    BatchRunRequest, BatchRunResponse,
     BudgetSpent,
-    ChapterStat, NextChapterSuggestion,
+    ChapterStat, DraftBatchChapterInfo, DraftBatchDetail, DraftBatchInfo,
+    NextChapterSuggestion,
     PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
     PipelineStats, SelectCandidateRequest,
@@ -241,6 +243,251 @@ async def pipeline_run_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── v22/F6 多章连写 ────────────────────────────────────────────────────────────
+
+def _batch_orchestrator_factory(cfg: NovelForgeConfig):
+    """make_orchestrator(budget_scale=1)：每次返回带全新 gateway/ledger 的编排器。
+
+    连写调用一次起草 N 章，熔断器按 max_tokens//2 预留，故单章预算 ×N。
+    ``_build_orch`` 在调用时解析（测试可 monkeypatch）。
+    """
+    import copy
+
+    def make(budget_scale: int = 1) -> Orchestrator:
+        local = copy.deepcopy(cfg)
+        scale = max(1, int(budget_scale or 1))
+        if scale > 1:
+            local.budget.max_tokens_per_chapter = int(local.budget.max_tokens_per_chapter * scale)
+            local.budget.max_usd_per_chapter = float(local.budget.max_usd_per_chapter * scale)
+        return _build_orch(local)
+
+    return make
+
+
+def _batch_params(conn, project_id: str, req: BatchRunRequest,
+                  cfg: NovelForgeConfig) -> tuple[int, int, dict[str, str]]:
+    from ..chapter_suggest import next_chapter_no
+    from ..security import sanitize_user_text
+
+    start = req.start_chapter or next_chapter_no(conn, project_id)[0]
+    count = req.chapters or max(1, int(cfg.batch.max_chapters))
+    goals = {
+        str(int(k)): sanitize_user_text(v)
+        for k, v in (req.chapter_goals or {}).items()
+        if str(k).strip().isdigit() and (v or "").strip()
+    }
+    return start, count, goals
+
+
+def _batch_error_response(start: int, error: str) -> BatchRunResponse:
+    return BatchRunResponse(mode="sequential", status="failed", next_chapter=start, error=error)
+
+
+@router.post("/{project_id}/pipeline/batch", response_model=BatchRunResponse)
+def pipeline_batch(
+    project_id: str,
+    req: BatchRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """多章连写（同步）：长输出模型一次起草 N 章再逐章校验提交；否则逐章顺序写。"""
+    from ...control_plane.batch import run_batch
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    cfg = _make_cfg(project_id, req, registry)
+    conn = registry.open_conn(project_id)
+    start = req.start_chapter or 1
+    try:
+        start, count, goals = _batch_params(conn, project_id, req, cfg)
+        outcome = run_batch(
+            conn,
+            start_chapter=start,
+            count=count,
+            make_orchestrator=_batch_orchestrator_factory(cfg),
+            chapter_goals=goals,
+            origin="api",
+            interaction_mode=req.interaction_mode,
+        )
+        return BatchRunResponse(**outcome.to_summary())
+    except Exception as e:
+        return _batch_error_response(start, str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/{project_id}/pipeline/batch/stream")
+async def pipeline_batch_stream(
+    project_id: str,
+    req: BatchRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """多章连写 SSE：batch_start → [batch_draft] → stage(带 chapter)… → chapter_done …
+    → [batch_discarded → batch_regenerate …] → batch_done，随后关流。异常推 error。
+
+    客户端断开（停止/关页）→ 当前章完成后停止，剩余章作废（status=canceled）；
+    需要后台长跑请用 autopilot。
+    """
+    import asyncio
+    import threading
+
+    from ...control_plane.batch import run_batch
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    client_gone = threading.Event()
+
+    def _enqueue(item) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            pass    # 事件循环已关闭（服务停机）：丢弃进度，不影响连写收尾
+
+    def _push(data: dict) -> None:
+        _enqueue(f"data: {_json.dumps(data, ensure_ascii=False, default=str)}\n\n")
+
+    def run_sync() -> None:
+        conn = None
+        try:
+            cfg = _make_cfg(project_id, req, registry)
+            conn = registry.open_conn(project_id)
+            start, count, goals = _batch_params(conn, project_id, req, cfg)
+            run_batch(
+                conn,
+                start_chapter=start,
+                count=count,
+                make_orchestrator=_batch_orchestrator_factory(cfg),
+                chapter_goals=goals,
+                origin="api",
+                progress_cb=_push,
+                cancel_cb=client_gone.is_set,
+                interaction_mode=req.interaction_mode,
+            )
+        except CircuitTripped as e:
+            _push({"event": "error", "message": str(e), "type": "circuit_broken"})
+        except Exception as e:
+            _push({"event": "error", "message": str(e)})
+        finally:
+            if conn is not None:
+                conn.close()
+            _enqueue(None)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.run_in_executor(executor, run_sync)
+    executor.shutdown(wait=False)
+
+    async def event_gen():
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            client_gone.set()   # 正常结束时 run_batch 已返回，置位无副作用
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _draft_batch_info(conn, row) -> dict:
+    counts: dict[str, int] = {}
+    try:
+        for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM draft_batch_chapters WHERE batch_id=?"
+            " GROUP BY status", (row["id"],),
+        ).fetchall():
+            counts[r["status"]] = r["n"]
+    except Exception:
+        pass
+    try:
+        detail = _json.loads(row["detail_json"] or "{}")
+    except Exception:
+        detail = {}
+    return {
+        "batch_id": row["id"],
+        "start_chapter": row["start_chapter"],
+        "end_chapter": row["end_chapter"],
+        "status": row["status"],
+        "origin": row["origin"],
+        "model_id": row["model_id"],
+        "tokens_spent": row["tokens_spent"] or 0,
+        "usd_spent": row["usd_spent"] or 0.0,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "detail": detail if isinstance(detail, dict) else {},
+        "counts": counts,
+    }
+
+
+@router.get("/{project_id}/pipeline/batches", response_model=list[DraftBatchInfo])
+def list_draft_batches(
+    project_id: str,
+    limit: int = 20,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """最近的多章连写批次（每次长输出调用一行，含重写批次）。"""
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM draft_batches ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (max(1, min(200, limit)),),
+            ).fetchall()
+        except Exception:
+            return []
+        return [DraftBatchInfo(**_draft_batch_info(conn, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pipeline/batches/{batch_id}", response_model=DraftBatchDetail)
+def get_draft_batch(
+    project_id: str,
+    batch_id: str,
+    include_text: bool = False,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """单个连写批次：逐章状态（pending/accepted/rejected/discarded）、对应 run 与原因。"""
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT * FROM draft_batches WHERE id=?", (batch_id,),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is None:
+            raise HTTPException(404, f"批次不存在: {batch_id}")
+        chapters = [
+            DraftBatchChapterInfo(
+                chapter=r["chapter"],
+                seq=r["seq"],
+                status=r["status"],
+                run_id=r["run_id"],
+                reason=r["reason"],
+                length=len(r["draft_text"] or ""),
+                draft_text=r["draft_text"] if include_text else None,
+                updated_at=r["updated_at"],
+            )
+            for r in conn.execute(
+                "SELECT * FROM draft_batch_chapters WHERE batch_id=? ORDER BY seq",
+                (batch_id,),
+            ).fetchall()
+        ]
+        return DraftBatchDetail(**_draft_batch_info(conn, row), chapters=chapters)
+    finally:
+        conn.close()
 
 
 @router.get("/{project_id}/pipeline/next", response_model=NextChapterSuggestion)
