@@ -4,9 +4,9 @@ payoff beat 必须对应可验证的 World State 写回：
   power_up  → character_power_log 有新记录
   item_gain → item_log 有 acquire/craft 记录
   reveal    → knowledge_edges 有新知情记录
-  face_slap → 不校验状态写回；但打脸的快感来自"看对方怎么输"，beat 必须点名在场者
-              witnesses（缺失 → warn，不阻断）。正文里在场者是否真有反应由 v22/F5
-              扩展（craft/payoff_reactions.py）按 warn 校验。
+  face_slap → 不校验状态写回；但打脸的快感来自"看对方怎么输"，打脸/羞辱/comeuppance
+              类 beat 必须点名在场者 witnesses（缺失 → warn，不阻断；单纯"反击"不要求）。
+              正文里在场者是否真有反应由 v22/F5 扩展（craft/payoff_reactions.py）按 warn 校验。
 
 返回 list[PayoffIssue]，severity=block 时视为假爽点。
 """
@@ -45,8 +45,11 @@ def check_payoff_binding(
             continue
         if ptype == "face_slap":
             # v22/F5：没有在场者就没有"看对方怎么输"。只提示，不新增 block。
+            # 只对"打脸/羞辱/comeuppance…"要求在场者；单纯"反击"是交锋，不必有观众。
             from ..planning.contract_fields import normalize_witnesses
-            if not normalize_witnesses(beat.get("witnesses")):
+            text = f"{value_axis} {beat.get('summary', '')}".lower()
+            if (any(k in text for k in _WITNESS_KEYWORDS)
+                    and not normalize_witnesses(beat.get("witnesses"))):
                 issues.append(PayoffIssue(
                     beat_index=i,
                     beat_type="payoff_beat",
@@ -77,6 +80,11 @@ _PAYOFF_KEYWORDS: dict[str, list[str]] = {
                   "face-slap", "face slap", "humiliat", "comeuppance", "turn the tables",
                   "turns the tables"],
 }
+
+# face_slap 中需要"有人看着"的子集（不含"反击"）。
+_WITNESS_KEYWORDS: tuple[str, ...] = tuple(
+    k for k in _PAYOFF_KEYWORDS["face_slap"] if k != "反击"
+)
 
 _PROPOSAL_FACETS: dict[str, list[str]] = {
     "power_up":  ["power", "power_system", "power_rank"],

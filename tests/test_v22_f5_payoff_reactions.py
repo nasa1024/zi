@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from novelforge.config import NovelForgeConfig
+from novelforge.config import NovelForgeConfig, PayoffConfig
 from novelforge.control_plane.skill_base import SkillContext
 from novelforge.craft import payoff_reactions as pr
 from novelforge.craft.payoff_binding import check_payoff_binding
@@ -123,6 +123,27 @@ def _store_actuals(conn, chapter: int, reactions: list[dict]) -> None:
     conn.commit()
 
 
+def _commit_chapter(db, db_path, chapter: int, text: str, beats: list[dict]) -> None:
+    """真实管线函数：L0 落盘（_persist_draft）+ actuals/对账落库（evaluate_and_persist_alignment）。"""
+    from novelforge.control_plane.orchestrator import _persist_draft
+    from novelforge.planning.alignment import evaluate_and_persist_alignment
+
+    draft_id = _persist_draft(db, text, chapter, "f5", str(db_path))
+    assert draft_id
+    evaluate_and_persist_alignment(
+        db, _plan_context(chapter, beats=beats), text, chapter, draft_id=draft_id,
+        seed_proposals=[],
+    )
+    db.commit()
+
+
+def _current_reactions(db, chapter: int) -> list[dict]:
+    row = db.execute(
+        "SELECT payload_json FROM chapter_actuals WHERE chapter=? AND status='current'", (chapter,),
+    ).fetchone()
+    return json.loads(row[0])["reactions"]
+
+
 # ── 1. 纯函数检测器 ───────────────────────────────────────────────────────────
 
 class TestDetector:
@@ -161,6 +182,8 @@ class TestDetector:
         ("林凡盯着碎玉。他脸色大变。", []),                    # 代词指向主角
         ("赵师兄终于被林凡制服了。", []),                      # "制服了"不是"服了"
         ("赵师兄低声道：“我服了。”", []),                      # 引号内的话不算反应
+        ("林凡向王长老道歉。", []),                            # 主角朝向宾语的动作不归宾语
+        ("林凡朝赵师兄咬牙道：“再来！”", []),
     ])
     def test_zh_attribution(self, draft, expected):
         found = pr.detect_reactions(draft, ["王长老", "赵师兄"], language="zh-CN",
@@ -201,6 +224,48 @@ class TestDetector:
         found = pr.detect_reactions(draft, ["王长老"], language="zh-CN",
                                     aliases={"王长老": ["王老怪"]})
         assert [r.reactor for r in found] == ["王长老"] * 3
+
+    @pytest.mark.parametrize("draft", [
+        "赵师兄抱拳道：“林师弟，请。”",          # 礼节不是服软
+        "王长老跪坐在蒲团上讲道。",              # 姿态不是下跪
+        "赵师兄后退一步，摆出架势。",            # 身法不是受惊后退
+        "王长老躬身行礼，转身离去。",
+    ])
+    def test_zh_courtesy_and_stage_directions_are_not_reactions(self, draft):
+        assert pr.detect_reactions(draft, ["王长老", "赵师兄"], language="zh-CN",
+                                   protagonist_names=["林凡"]) == []
+
+    @pytest.mark.parametrize("draft,expected", [
+        ("赵师兄抱拳认输。", ("赵师兄", "抱拳认输")),
+        ("王长老扑通一声跪了下去。", ("王长老", "跪了")),
+        ("赵师兄被震得连退三步。", ("赵师兄", "连退")),
+    ])
+    def test_zh_qualified_submission_and_fear_cues(self, draft, expected):
+        found = pr.detect_reactions(draft, ["王长老", "赵师兄"], language="zh-CN",
+                                    protagonist_names=["林凡"])
+        assert [(r.reactor, r.reaction) for r in found] == [expected]
+
+    @pytest.mark.parametrize("draft", [
+        "Elder Wang stared at the scroll for a long time.",
+        "Zhao bowed politely and left.",
+        "Everyone erupted in laughter at the joke.",
+        "Elder Wang stepped back to make room.",
+        "They spoke in hushed voices; Elder Wang nodded.",
+    ])
+    def test_en_courtesy_and_stage_directions_are_not_reactions(self, draft):
+        assert pr.detect_reactions(draft, ["Elder Wang", "Brother Zhao"], language="en-US",
+                                   protagonist_names=["Lin Fan"]) == []
+
+    @pytest.mark.parametrize("draft,expected", [
+        ("Brother Zhao bowed his head.", ("Brother Zhao", "bowed his head")),
+        ("The hall erupted in cheers.", ("the hall", "erupted in cheers")),
+        ("Elder Wang stared in disbelief.", ("Elder Wang", "stared in disbelief")),
+        ("Elder Wang stumbled backward.", ("Elder Wang", "stumbled backward")),
+    ])
+    def test_en_qualified_cues(self, draft, expected):
+        found = pr.detect_reactions(draft, ["Elder Wang", "Brother Zhao"], language="en-US",
+                                    protagonist_names=["Lin Fan"])
+        assert [(r.reactor, r.reaction) for r in found] == [expected]
 
 
 # ── 2. enrich_actuals → chapter_actuals 持久化 ────────────────────────────────
@@ -342,6 +407,26 @@ class TestCraftChecks:
         assert ctx.workspace["payoff_reactions_cfg"]["enabled"] is False
         assert pr.craft_checks(ctx) == []
 
+    def test_runtime_cfg_in_extra_wins_and_defaults_apply_without_any(self, conn):
+        _cast(conn)
+        ctx = _ctx(conn, 3, "演武场比试开始。林凡一招击败赵师兄。林凡转身离开。")
+        # 没有任何配置来源（API 手动换稿 / governance 路径）：PayoffConfig() 默认值
+        assert "payoff_reactions_cfg" not in ctx.workspace
+        assert [i["category"] for i in pr.craft_checks(ctx)] == ["craft.payoff_no_reaction"]
+        cfg = NovelForgeConfig()
+        cfg.payoff.enabled = False
+        ctx.extra["cfg"] = cfg
+        assert pr.craft_checks(ctx) == []
+        ctx.workspace["payoff_reactions_cfg"] = {"enabled": True}   # 显式 cfg 优先于黑板副本
+        assert pr.craft_checks(ctx) == []
+
+    def test_api_paths_without_cfg_match_their_own_project_config(self, conn):
+        # 手动换稿用 build_project_config 构造 cfg；cfg.payoff 没有项目级设置，
+        # 所以那条路径用默认值与它自己的 cfg 一致（若以后加项目级设置，此处会提醒）。
+        from novelforge.control_plane.llm.runtime import build_project_config
+
+        assert build_project_config("p", ":memory:", conn).payoff == PayoffConfig()
+
     def test_contract_beats_used_when_no_beat_sheet(self, conn):
         _cast(conn)
         ctx = _ctx(conn, 3, "林凡一招击败赵师兄。", beats=[], plan_context=_plan_context(3))
@@ -372,21 +457,135 @@ class TestDeferredReaction:
         _store_actuals(conn, 4, reactions=[{"reactor": "王长老", "reaction": "愣住"}])
         assert pr.craft_checks(_ctx(conn, 5, "林凡闭门修炼。", plain)) == []
 
-    def test_window_bounds_and_settlement_in_between(self, conn):
+    def test_protagonist_listed_as_witness_does_not_settle(self, conn):
         _cast(conn)
-        _store_contract(conn, 3, _PAYOFF_BEATS)
-        _store_actuals(conn, 3, reactions=[])
-        plain = [{"seq": 1, "beat_type": "setup", "summary": "日常", "value_axis": "静"}]
-        ws = {"payoff_reactions_cfg": {"enabled": True, "reaction_window_chapters": 2}}
-        # 窗口 1（默认）：第 5 章已超出第 3 章的窗口
-        assert pr.craft_checks(_ctx(conn, 5, "林凡闭门修炼。", plain)) == []
-        # 窗口 2：第 4 章无反应记录 → 第 5 章仍须补
+        beats = [dict(_PAYOFF_BEATS[1], witnesses=["林凡", "赵师兄"])]
+        _store_contract(conn, 4, beats)
+        draft = "林凡击败赵师兄。林凡愣了一下。"
+        actuals = extract_chapter_actuals(4, draft, _plan_context(4, beats=beats)).actuals
+        assert [r.reactor for r in actuals.reactions] == ["林凡"]   # enrich 无 DB，不知谁是主角
+        _store_actuals(conn, 4, [r.model_dump(mode="json") for r in actuals.reactions])
+        plain = [{"seq": 1, "beat_type": "setup", "summary": "收拾残局", "value_axis": "动→静"}]
+        issues = pr.craft_checks(_ctx(conn, 5, "林凡闭门修炼。", plain))
+        assert [i["category"] for i in issues] == ["craft.payoff_reaction_deferred"]
+        assert "在场者 赵师兄至今没有可见反应" in issues[0]["detail"]
+        report = pr.settle(conn, 4, {"draft_text": draft, "plan_context": _plan_context(4, beats=beats),
+                                     "chapter_actuals": actuals}, cfg=NovelForgeConfig())
+        assert report["reactions"] == 0 and report["reactors"] == []
+        assert report["witnesses"] == ["赵师兄"] and report["witnesses_missing"] == ["赵师兄"]
+
+
+class TestDeferredAcrossCommittedChapters:
+    """窗口 ≥2：中间的非爽点章由真实管线落库（actuals 不含反应），靠重读其 L0 正文了结义务。"""
+
+    PLAIN = [{"seq": 1, "beat_type": "setup", "summary": "消息传开", "value_axis": "静→动"}]
+    WINDOW_2 = {"payoff_reactions_cfg": {"enabled": True, "reaction_window_chapters": 2}}
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        value = init_db(tmp_path / "novel.db")
+        self.ids = _cast(value)
+        self.path = tmp_path / "novel.db"
+        yield value
+        value.close()
+
+    def test_plain_intermediate_chapter_settles_and_window_bounds(self, db):
+        cfg = NovelForgeConfig()
+        cfg.payoff.reaction_window_chapters = 2
+        _store_contract(db, 3, _PAYOFF_BEATS)
+        _store_contract(db, 4, self.PLAIN)
+        _commit_chapter(db, self.path, 3, "演武场比试开始。林凡一招击败赵师兄。林凡转身离开。",
+                        _PAYOFF_BEATS)
+        assert _current_reactions(db, 3) == []
+        _commit_chapter(db, self.path, 4, "消息传开，王长老后悔不已，赵师兄面如死灰。", self.PLAIN)
+        assert _current_reactions(db, 4) == []          # 非爽点章：actuals 本身不记录反应
+        assert pr.craft_checks(_ctx(db, 5, "林凡闭门修炼。", self.PLAIN, **self.WINDOW_2)) == []
+        assert "第3章的爽点" not in pr.draft_brief(db, 5, {}, language="zh-CN", cfg=cfg)
+
+        # 第 4 章换成没有余波的新修订 → 第 5 章仍须补
+        _commit_chapter(db, self.path, 4, "林凡闭关修炼，心无旁骛。", self.PLAIN)
+        issues = pr.craft_checks(_ctx(db, 5, "林凡闭门修炼。", self.PLAIN, **self.WINDOW_2))
+        assert [i["category"] for i in issues] == ["craft.payoff_reaction_deferred"]
+        assert issues[0]["detail"].startswith("第3章爽点缺少反应")
+        brief = pr.draft_brief(db, 5, {}, language="zh-CN", cfg=cfg)
+        assert "第3章的爽点（在场者 王长老、赵师兄）还没有写出可见反应" in brief
+        # 本章补上 → 静默；窗口 1（默认）：第 5 章已超出第 3 章的窗口
+        assert pr.craft_checks(_ctx(db, 5, "王长老面色铁青，悔不当初。", self.PLAIN,
+                                    **self.WINDOW_2)) == []
+        assert pr.craft_checks(_ctx(db, 5, "林凡闭门修炼。", self.PLAIN)) == []
+
+    def test_alias_reaction_in_payoff_chapter_is_not_an_obligation(self, db):
+        db.execute("INSERT INTO entity_aliases(id, entity_id, alias) VALUES('a1', ?, '王老怪')",
+                   (self.ids["王长老"],))
+        _store_contract(db, 4, _PAYOFF_BEATS)
+        draft = "林凡一招击败赵师兄。王老怪愣住了。"
+        _commit_chapter(db, self.path, 4, draft, _PAYOFF_BEATS)
+        assert _current_reactions(db, 4) == []          # enrich 无 DB：不认识别名
+        assert pr.craft_checks(_ctx(db, 4, draft)) == []  # 第 4 章的检查认识别名
+        # 下一章与第 4 章的检查同口径：重读第 4 章正文（带别名）→ 不欠余波
+        assert pr.craft_checks(_ctx(db, 5, "林凡闭门修炼。", self.PLAIN)) == []
+
+
+class TestEnglishProject:
+    BEATS = [{"seq": 1, "beat_type": "payoff_beat", "summary": "Lin Fan defeats Brother Zhao",
+              "value_axis": "scorn→awe", "witnesses": ["Elder Wang"]},
+             {"seq": 2, "beat_type": "hook", "summary": "A shadow moves"}]
+    PLAIN = [{"seq": 1, "beat_type": "setup", "summary": "Lin Fan returns home"}]
+
+    @pytest.fixture(autouse=True)
+    def _english_cast(self, conn):
+        for name in ("Lin Fan", "Elder Wang"):
+            _entity(conn, name)
+        set_meta(conn, "protagonist", "Lin Fan")
+        set_meta(conn, "content_language", "en-US")
+        conn.commit()
+
+    @staticmethod
+    def _no_cjk(*texts: str) -> bool:
+        return not any(pr._CJK_RE.search(t) for t in texts)
+
+    def test_crowd_only_warning_is_english(self, conn):
+        draft = "Lin Fan defeats Brother Zhao. The crowd gasped."
+        issues = pr.craft_checks(_ctx(conn, 3, draft, self.BEATS))
+        assert [i["category"] for i in issues] == ["craft.payoff_crowd_only"]
+        issue = issues[0]
+        assert issue["detail"].startswith("Only the crowd reacts to the payoff (the crowd)")
+        assert "Elder Wang" in issue["detail"] and "Give Elder Wang" in issue["fix"]
+        assert issue["span"] == "The crowd gasped."
+        assert self._no_cjk(issue["detail"], issue["fix"], issue["span"])
+
+    def test_deferred_warning_and_brief_are_english(self, conn):
+        _store_contract(conn, 4, self.BEATS)
         _store_actuals(conn, 4, reactions=[])
-        issues = pr.craft_checks(_ctx(conn, 5, "林凡闭门修炼。", plain, **ws))
-        assert len(issues) == 1 and issues[0]["detail"].startswith("第3章爽点缺少反应")
-        # 第 4 章（新修订）已有在场者反应 → 义务已了结
-        _store_actuals(conn, 4, reactions=[{"reactor": "赵师兄", "reaction": "咬牙"}])
-        assert pr.craft_checks(_ctx(conn, 5, "林凡闭门修炼。", plain, **ws)) == []
+        issues = pr.craft_checks(_ctx(conn, 5, "Lin Fan meditated alone.", self.PLAIN))
+        assert [i["category"] for i in issues] == ["craft.payoff_reaction_deferred"]
+        issue = issues[0]
+        assert issue["detail"].startswith("The previous chapter's payoff got no reaction")
+        assert "witnesses Elder Wang" in issue["detail"] and "Elder Wang" in issue["fix"]
+        assert self._no_cjk(issue["detail"], issue["fix"])
+        brief = pr.draft_brief(conn, 5, {}, language="en-US", cfg=NovelForgeConfig())
+        assert "- Chapter 4's payoff (witnesses: Elder Wang) never showed a visible reaction" in brief
+        assert self._no_cjk(brief)
+        # the aftermath is written in this chapter → silent
+        assert pr.craft_checks(_ctx(conn, 5, "Hearing the news, Elder Wang went pale.",
+                                    self.PLAIN)) == []
+
+    def test_settle_report_on_english_draft(self, conn):
+        draft = "Lin Fan defeats Brother Zhao. Elder Wang went pale."
+        context = _plan_context(5, beats=self.BEATS)
+        actuals = extract_chapter_actuals(5, draft, context).actuals
+        ws = {"draft_text": draft, "plan_context": context, "chapter_actuals": actuals}
+        report = pr.settle(conn, 5, ws, cfg=NovelForgeConfig())
+        assert report == {
+            "payoff_beats": 1, "reactions": 1, "witnesses": ["Elder Wang"],
+            "reactors": ["Elder Wang"], "witnesses_missing": [], "source": "actuals",
+        }
+        ws = {"draft_text": "Lin Fan defeats Brother Zhao. The crowd fell silent.",
+              "beats": self.BEATS, "plan_context": PlanContext(target_chapter=5)}
+        report = pr.settle(conn, 5, ws, cfg=NovelForgeConfig())
+        assert report["source"] == "draft" and report["reactors"] == ["the crowd"]
+        assert report["witnesses_missing"] == ["Elder Wang"]
+        assert self._no_cjk(json.dumps(report, ensure_ascii=False))
 
 
 class TestCraftSkillIntegration:
@@ -419,6 +618,11 @@ class TestPayoffBinding:
         )
         assert [(i.payoff_type, i.severity) for i in en] == [("face_slap", "warn")]
         assert "witnesses" in en[0].detail and not pr._CJK_RE.search(en[0].detail)
+
+    def test_counterattack_does_not_demand_witnesses(self):
+        beats = [{"beat_type": "payoff_beat", "summary": "林凡反击成功，一招制敌",
+                  "value_axis": "守→攻"}]
+        assert check_payoff_binding(beats, [], 3, None) == []
 
     def test_face_slap_with_witnesses_passes_and_others_unchanged(self):
         beats = [
@@ -478,6 +682,20 @@ class TestDraftBrief:
         _knowledge(conn, wang, "玉佩来历", "knows", 4)
         conn.commit()
         assert pr.draft_brief(conn, 5, ws, language="zh-CN", cfg=NovelForgeConfig()) == ""
+
+    def test_info_gap_falls_back_to_recall_when_contract_names_do_not_resolve(self, conn):
+        ids = _cast(conn)
+        _knowledge(conn, ids["林凡"], "魔尊的真实身份", "knows", 1)
+        _knowledge(conn, ids["王长老"], "魔尊的真实身份", "unaware", 1)
+        conn.commit()
+
+        class Recall:
+            entities = [{"id": ids["王长老"], "canonical_name": "王长老", "entity_type": "character"}]
+
+        ws = self._workspace(beats=[], must_include_entities=["王老头"])   # 写法对不上实体/别名
+        ws["recall_pack"] = Recall()
+        brief = pr.draft_brief(conn, 5, ws, language="zh-CN", cfg=NovelForgeConfig())
+        assert "- 信息差机会：王长老 还不知道「魔尊的真实身份」（主角已知）" in brief
 
     def test_english_brief_and_recall_fallback(self, conn):
         lin = _entity(conn, "Lin Fan")
@@ -556,7 +774,7 @@ class TestSettleReport:
 
 # ── 7. 端到端：提示块位置、craft 告警、actuals 与结算报告 ─────────────────────
 
-def _orchestrator(factory):
+def _orchestrator(factory, *, window: int = 1):
     from novelforge.control_plane.budget import BudgetLedger
     from novelforge.control_plane.llm.fake_provider import FakeProvider
     from novelforge.control_plane.llm.gateway import LLMGateway
@@ -573,6 +791,7 @@ def _orchestrator(factory):
     cfg.provider.provider = "fake"
     cfg.recall.enable_summaries = False
     cfg.settle.enabled = False
+    cfg.payoff.reaction_window_chapters = window
     return Orchestrator(gateway, registry, cfg), fake
 
 
@@ -668,3 +887,65 @@ class TestPipeline:
         assert prefix < user.index(line) < user.index("## 规划任务")
         assert "爽点三段式" not in user        # 无契约爽点：只给信息差
         assert not [i for i in outcome.issues if i.get("check") == "payoff_reaction"]
+
+
+class TestDeferredPipelineWindow:
+    """reaction_window_chapters=2，经编排器连写第 3（爽点无反应）→4（普通章）→5 章。"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        value = init_db(tmp_path / "novel.db")
+        _cast(value)
+        value.execute(
+            "INSERT INTO chapter_cards(id, chapter, goal, status, locked)"
+            " VALUES('card-3', 3, '演武场比试', 'planned', 1)"
+        )
+        for beat in _PAYOFF_BEATS:
+            value.execute(
+                "INSERT INTO beats(id, chapter, seq, beat_type, summary, value_axis, witnesses_json)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (new_id("beat"), 3, beat["seq"], beat["beat_type"], beat["summary"],
+                 beat["value_axis"], json.dumps(beat.get("witnesses") or [], ensure_ascii=False)),
+            )
+        value.commit()
+        yield value
+        value.close()
+
+    @pytest.mark.parametrize("aftermath,expected", [
+        ("消息传开，王长老后悔不已，赵师兄面如死灰。林凡闭关修炼。", []),
+        ("林凡闭关修炼，心无旁骛。", ["craft.payoff_reaction_deferred"]),
+    ])
+    def test_plain_chapter_aftermath_settles_payoff(self, db, aftermath, expected):
+        holder = {"body": ""}
+        planned = json.dumps([
+            {"beat_type": "setup", "summary": "开场", "value_axis": "平静→波澜"},
+            {"beat_type": "hook", "summary": "章末悬念", "value_axis": "悬念↑"},
+        ], ensure_ascii=False)
+
+        def factory(messages, model="", temperature=1.0):
+            user = str(messages[-1].content) if messages else ""
+            if "规划任务" in user:
+                return planned
+            if "本章任务" in user:
+                return f"```draft\n{holder['body']}\n```\n```proposals\n[]\n```"
+            return "[]"
+
+        orch, fake = _orchestrator(factory, window=2)
+        for chapter, body in ((3, "演武场比试开始。林凡一招击败赵师兄。林凡转身离开，黑影一闪。"),
+                              (4, aftermath)):
+            holder["body"] = ((body + "\n") * 20).strip()
+            outcome = orch.generate_chapter(chapter, db, chapter_goal="")
+            assert outcome.ok, outcome.error
+        assert json.loads(db.execute(
+            "SELECT payload_json FROM chapter_actuals WHERE chapter=4 AND status='current'"
+        ).fetchone()["payload_json"])["reactions"] == []
+
+        seen = len(fake.calls)
+        holder["body"] = ("林凡出关，走向山门。\n" * 20).strip()
+        outcome = orch.generate_chapter(5, db, chapter_goal="")
+        assert outcome.ok, outcome.error
+        ours = [i for i in outcome.issues if i.get("check") == "payoff_reaction"]
+        assert [i["category"] for i in ours] == expected
+        draft_prompt = next(str(c["messages"][-1].content) for c in fake.calls[seen:]
+                            if "本章任务" in str(c["messages"][-1].content))
+        assert ("第3章的爽点" in draft_prompt) == bool(expected)

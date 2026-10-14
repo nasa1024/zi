@@ -11,8 +11,11 @@
 - ``settle``：只读汇总本章反应覆盖率（payoff_beats / reactions / witnesses_missing）。
 
 确定性：反应检测是纯函数（词表 + 句/分句结构归属），不调 LLM，同一输入同一输出。
-``craft_checks`` 拿不到运行配置，``draft_brief`` 会把 ``cfg.payoff`` 的开关与窗口
-抄进 ``workspace["payoff_reactions_cfg"]``（同章黑板）；缺省按 ``PayoffConfig()`` 默认值。
+``craft_checks`` 的 ctx 不带运行配置：优先读 ``ctx.extra["cfg"]``，否则读
+``draft_brief`` 抄进同章黑板的 ``workspace["payoff_reactions_cfg"]``，再否则用
+``PayoffConfig()`` 默认值（见 ``_ctx_settings``）。
+"欠余波"判定会重读窗口内前几章已提交的 L0 正文再跑检测器（只读）：非爽点章的
+actuals 不记录反应，单看 actuals 永远无法了结上一爽点章的义务。
 """
 from __future__ import annotations
 
@@ -40,13 +43,17 @@ _ZH_CUES: tuple[tuple[str, str], ...] = (
     (r"惊呼|惊叫|失声|哗然|心头一震|心中一震|浑身一震", "shock"),
     # 惧 / 色变
     (r"(?:脸色|面色|神色)(?:大变|骤变|剧变|一变|狂变|煞白|惨白|发白|苍白|铁青|难看)", "fear"),
-    (r"变了脸色|面如死灰|面无人色|冷汗|头皮发麻|双腿发软|腿一软", "fear"),
-    (r"后退|连退|倒退|退了(?:一|两|几|半)步", "fear"),
+    (r"变了脸色|面如死灰|面无人色|冷汗|头皮发麻|双腿发软|腿一软|双膝一软", "fear"),
+    # 后退须带"受惊"限定：单纯的"后退一步"多是招式身法，不算反应。
+    (r"连退|连连后退|踉跄(?:着)?(?:后退|倒退)|(?:吓|惊)得(?:连连)?(?:后退|倒退)"
+     r"|(?:后|倒)?退了(?:一|两|三|几|半|数)步|倒退(?:一|两|三|几|半|数)步", "fear"),
     (r"浑身(?:发抖|颤抖|一颤|发颤)|惊恐|恐惧|畏惧", "fear"),
     (r"(?:咽|吞)了(?:一)?口唾沫", "fear"),
-    # 服 / 跪 / 改口
-    (r"跪(?:下|倒|地|伏|拜|了)?", "submission"),
-    (r"(?:低|垂)下(?:了)?头|拱手|抱拳|躬身|行礼|赔笑|赔罪|道歉|认输|心服口服|(?<![说制征降克])服了|改口",
+    # 服 / 跪 / 改口。"跪"须带结果（排除"跪坐"等姿态描写）；拱手/抱拳/躬身/行礼是
+    # 日常礼节，只有接认输/赔罪/求饶等才算服软。
+    (r"跪(?:下|倒|地|伏|拜|了|在地)", "submission"),
+    (r"(?:拱手|抱拳|躬身|行礼)(?:认输|赔罪|告罪|求饶|致歉|认错|请罪)", "submission"),
+    (r"(?:低|垂)下(?:了)?头|赔笑|赔罪|道歉|认输|心服口服|(?<![说制征降克])服了|改口",
      "submission"),
     # 敬畏 / 叫好
     (r"敬畏|肃然起敬|刮目相看|佩服|叹服|折服|崇拜|欢呼|喝彩|叫好|沸腾", "awe"),
@@ -65,17 +72,28 @@ _EN_CUES: tuple[tuple[str, str], ...] = (
     (r"speechless|disbelief|(?:could|can)(?:\s*not|n['’]t)\s+believe", "shock"),
     (r"(?:jaws?|mouths?)\s+(?:dropped|fell open|hung open|fell slack)", "shock"),
     (r"eyes\s+(?:widened|went wide|bulged)", "shock"),
-    (r"froze|frozen in place|stared|staring|gaped|gawked|did a double take", "shock"),
+    # A bare "stared" is a stage direction; only a dumbstruck stare counts.
+    (r"froze|frozen in place|gaped|gawked|did a double take"
+     r"|star(?:ed|ing)\s+(?:dumbly|blankly|wide-eyed|open-mouthed"
+     r"|in (?:disbelief|shock|horror|astonishment))", "shock"),
+    (r"erupted (?:in(?:to)? )?(?:an )?(?:uproar|gasps|exclamations)|(?:in|into) an uproar", "shock"),
     (r"(?:went|turned|grew)\s+(?:pale|white|ashen|gr[ae]y|bloodless)|paled|blanched|ashen", "fear"),
     (r"flinch(?:ed|es)?|trembl(?:ed|ing)|shudder(?:ed|ing)|recoiled", "fear"),
-    (r"backed away|stepped back|took a step back|stumbled back|swallowed hard|cold sweat", "fear"),
+    # Stepping back is often just footwork; it needs a scared qualifier.
+    (r"backed away|stumbled back(?:ward)?|staggered back(?:ward)?|swallowed hard|cold sweat"
+     r"|(?:stepped|took a step) back (?:involuntarily|in (?:fear|shock|alarm|horror))", "fear"),
     (r"broke (?:out )?in(?:to)? a (?:cold )?sweat", "fear"),
     (r"knelt|kneel(?:s|ing)?|(?:dropped|fell|sank) to (?:his|her|their|one) knees?", "submission"),
-    (r"bowed|bowing|lowered (?:his|her|their) (?:heads?|eyes|gaze)", "submission"),
+    # A polite bow is etiquette: only a bowed head or a bow of defeat counts.
+    (r"bowed (?:his|her|their) heads?"
+     r"|bow(?:ed|ing) (?:low|deeply|apologetically|in (?:defeat|submission|apology))"
+     r"|lowered (?:his|her|their) (?:heads?|eyes|gaze)", "submission"),
     (r"apologi[sz](?:ed|es|ing)|conceded|yielded", "submission"),
     (r"in awe|awed|awestruck|reverence", "awe"),
-    (r"cheered|cheers (?:erupted|rang out|went up)|erupted|applaud(?:ed)?|applause", "awe"),
-    (r"fell silent|went silent|(?:fell|went) quiet|hushed|silence fell", "silence"),
+    (r"cheered|cheers (?:erupted|rang out|went up)|erupted (?:in(?:to)? )?(?:cheers|applause)"
+     r"|applaud(?:ed)?|applause", "awe"),
+    (r"fell silent|went silent|(?:fell|went) quiet|(?:fell|went|grew) hushed|a hush fell"
+     r"|silence fell", "silence"),
     (r"a murmur (?:ran|spread|rippled)", "silence"),
     (r"regret(?:ted|ting|s)?|took back (?:his|her|their) words|changed (?:his|her|their) tune"
      r"|retracted", "regret"),
@@ -104,6 +122,9 @@ _EN_OPPONENT_RE = re.compile(
     r"|\bthe other (?:man|woman|youth|boy|girl)\b",
     re.IGNORECASE,
 )
+# 主角作主语时宾语前的介词（"林凡向王长老道歉"）：其后的 cue 仍是主角的动作。
+_ZH_DIRECTION_RE = re.compile(r"(?:向|朝|对|冲|给|替)着?$")
+_EN_DIRECTION_RE = re.compile(r"\b(?:to|toward|towards|at)$", re.IGNORECASE)
 _ZH_COORD_RE = re.compile(r"\s*(?:、|和|与|及|以及|跟|同)\s*")
 _EN_COORD_RE = re.compile(r"\s*(?:and|&|as well as)\s*", re.IGNORECASE)
 _ZH_CLAUSE_SEP_RE = re.compile(r"[，,；;：:]|——")
@@ -339,7 +360,9 @@ def _attribute(
     in_clause = [m for m in sentence_mentions if clause[0] <= m.start and m.end <= clause[1]]
     before = [m for m in in_clause if m.end <= cue.start]
 
-    # A. 同分句、在 cue 之前：主语（首个提及 + 并列）；主角作主语时取最近的非主角提及。
+    # A. 同分句、在 cue 之前：主语（首个提及 + 并列）；主角作主语时取最近的非主角提及
+    #    （"林凡看着王长老脸色大变"）——但宾语前是"向/朝/对…"时动作仍属主角
+    #    （"林凡向王长老道歉""林凡朝赵师兄咬牙道"），不归给宾语。
     if before:
         if before[0].kind != "protagonist":
             group = _non_protagonist(_group_around(text, before, 0, en, forward=True))
@@ -347,8 +370,12 @@ def _attribute(
         others = [i for i, m in enumerate(before) if m.kind != "protagonist"]
         if not others:
             return [], 0.0, clause
-        group = _non_protagonist(_group_around(text, before, others[-1], en, forward=False))
-        return group, 0.7, clause
+        group = _group_around(text, before, others[-1], en, forward=False)
+        lead_start = max((m.end for m in before if m.end <= group[0].start), default=clause[0])
+        lead = text[lead_start:group[0].start].strip()
+        if (_EN_DIRECTION_RE if en else _ZH_DIRECTION_RE).search(lead):
+            return [], 0.0, clause
+        return _non_protagonist(group), 0.7, clause
 
     # B. 定语式："脸色大变的王长老" / "a stunned Elder Wang"。
     after = [m for m in in_clause if m.start >= cue.end]
@@ -649,6 +676,25 @@ def _settings(source: Any) -> _Settings:
     )
 
 
+def _ctx_settings(workspace: Mapping[str, Any], extra: Any) -> _Settings:
+    """Settings for ``craft_checks`` (whose ``ctx`` carries no config object).
+
+    Order: a runtime config passed explicitly as ``ctx.extra["cfg"]`` /
+    ``workspace["cfg"]`` → the copy ``draft_brief`` put on the same chapter's
+    workspace (orchestrator pipeline and its ``validate_final_candidate`` copy)
+    → ``PayoffConfig()`` defaults.  The API manual candidate swap and the
+    governance ``/check/craft`` endpoint carry neither and use the defaults —
+    the same values their own ``build_project_config`` would yield, because
+    ``cfg.payoff`` has no project-level setting.
+    """
+    for holder in (extra, workspace):
+        if isinstance(holder, Mapping):
+            cfg = holder.get("cfg")
+            if cfg is not None and getattr(cfg, "payoff", None) is not None:
+                return _settings(cfg)
+    return _settings(workspace)
+
+
 # ── 数据库读取（全部只读、容忍老库）────────────────────────────────────────────
 
 def _query(conn: Any, sql: str, params: Sequence[Any] = ()) -> list[Any]:
@@ -702,13 +748,13 @@ class Protagonist:
     names: tuple[str, ...] = ()
 
 
-def _protagonist_once(conn: Any, chapter: int) -> Callable[[], Protagonist]:
-    """Resolve the protagonist on first use only (most chapters never need it)."""
-    cache: list[Protagonist] = []
+def _once(fn: Callable[[], Any]) -> Callable[[], Any]:
+    """Compute on first use only (most chapters never need the protagonist/language)."""
+    cache: list[Any] = []
 
-    def get() -> Protagonist:
+    def get() -> Any:
         if not cache:
-            cache.append(resolve_protagonist(conn, chapter))
+            cache.append(fn())
         return cache[0]
     return get
 
@@ -759,6 +805,31 @@ def _drop_protagonist(
         if extra:
             aliases[name] = extra
     return kept, aliases
+
+
+def _is_protagonist(conn: Any, name: str, protagonist: Protagonist) -> bool:
+    if not name or name in protagonist.names:
+        return True
+    if not protagonist.entity_id:
+        return False
+    return _resolve_entity_id(conn, name) == protagonist.entity_id
+
+
+def _visible_reactors(
+    conn: Any, reactions: Iterable[Any], protagonist: Protagonist,
+) -> list[str]:
+    """Reactors of stored/detected reactions minus the protagonist.
+
+    ``enrich_actuals`` has no DB, so persisted actuals may credit the protagonist
+    when the planner listed them as a witness; every reader filters here.
+    """
+    out: list[str] = []
+    for item in reactions:
+        raw = item.get("reactor") if isinstance(item, Mapping) else getattr(item, "reactor", "")
+        name = _clean_name(raw)
+        if name and not _is_protagonist(conn, name, protagonist):
+            out.append(name)
+    return out
 
 
 def _restrict(beats: Sequence[PayoffBeat], kept: Sequence[str]) -> list[PayoffBeat]:
@@ -819,41 +890,97 @@ def _reacted(reactors: Iterable[str], witnesses: Sequence[str]) -> bool:
     return bool(names)
 
 
+def _committed_text(conn: Any, chapter: int) -> Optional[str]:
+    """Committed prose of an earlier chapter (latest L0 revision); None when unreadable.
+
+    In-memory databases have no project ``l0/`` directory, so they never read files.
+    """
+    from ..db.l0 import database_file, resolve_draft_path
+
+    if conn is None or database_file(conn) is None:
+        return None
+    rows = _query(
+        conn,
+        "SELECT file_path FROM draft_index WHERE chapter=?"
+        " ORDER BY revision_round DESC, created_at DESC LIMIT 1",
+        (chapter,),
+    )
+    if not rows or not rows[0][0]:
+        return None
+    try:
+        return resolve_draft_path(conn, str(rows[0][0])).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class _Obligation:
     chapter: int
     summary: str
     witnesses: tuple[str, ...]
+    aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def alias_map(self) -> dict[str, list[str]]:
+        return {name: list(extra) for name, extra in self.aliases}
 
 
 def _pending_payoffs(
-    conn: Any, chapter: int, window: int, protagonist: Callable[[], Protagonist],
+    conn: Any,
+    chapter: int,
+    window: int,
+    protagonist: Callable[[], Protagonist],
+    language: Callable[[], Optional[str]] = lambda: None,
 ) -> list[_Obligation]:
     """Earlier payoff chapters (within the window) whose reactions are still missing.
 
-    A chapter counts only when its contract has a payoff beat and its stored
-    current actuals record zero reactions; a reaction from its (non-protagonist)
-    witnesses in any later chapter before ``chapter`` settles the obligation.
-    ``protagonist`` is only called when such a chapter exists.
+    Chapter p owes an aftermath when its contract has a payoff beat, its stored
+    current actuals exist (v22) and neither they nor a re-detection on p's
+    committed prose show any non-protagonist reaction.  A reaction by p's
+    witnesses in any chapter q with p < q < ``chapter`` settles it; evidence for q
+    is its stored actuals **plus the detector re-run on q's committed L0 text with
+    p's witnesses** — a plain (non-payoff) chapter stores no reactions of its own,
+    so its actuals alone could never settle the obligation.
+    ``protagonist``/``language`` are only called when such a chapter p exists.
     """
     if conn is None or window <= 0 or chapter <= 1:
         return []
     first = max(1, chapter - window)
     stored = {q: _stored_reactions(conn, q) for q in range(first, chapter)}
+    texts: dict[int, Optional[str]] = {}
+
+    def seen(q: int, witnesses: Sequence[str], aliases: Mapping[str, Sequence[str]],
+             hero: Protagonist, accept: Callable[[list[str]], bool]) -> bool:
+        """Stored actuals first; the committed text is read only when they don't suffice."""
+        if accept(_visible_reactors(conn, stored.get(q) or [], hero)):
+            return True
+        if q not in texts:
+            texts[q] = _committed_text(conn, q)
+        text = texts[q]
+        if not text or not text.strip():
+            return False
+        return accept([r.reactor for r in detect_reactions(
+            text, witnesses, language=language() or None,
+            protagonist_names=hero.names, aliases=aliases,
+        )])
+
     out: list[_Obligation] = []
     for p in range(first, chapter):
-        if stored[p] is None or stored[p]:
+        if stored[p] is None:          # 无 v22 actuals：未知，不追究
             continue
         beats = payoff_beats(_stored_contract_beats(conn, p))
         if not beats:
             continue
-        witnesses = tuple(_drop_protagonist(conn, _union_witnesses(beats), protagonist())[0])
-        settled = any(
-            _reacted((str(r.get("reactor") or "") for r in (stored.get(q) or [])), witnesses)
-            for q in range(p + 1, chapter)
-        )
-        if not settled:
-            out.append(_Obligation(p, beats[0].summary, witnesses))
+        hero = protagonist()
+        witnesses, aliases = _drop_protagonist(conn, _union_witnesses(beats), hero)
+        if seen(p, witnesses, aliases, hero, bool):
+            continue
+        if any(seen(q, witnesses, aliases, hero, lambda rs: _reacted(rs, witnesses))
+               for q in range(p + 1, chapter)):
+            continue
+        out.append(_Obligation(
+            p, beats[0].summary, tuple(witnesses),
+            tuple((name, tuple(extra)) for name, extra in aliases.items()),
+        ))
     return out
 
 
@@ -992,7 +1119,8 @@ def craft_checks(ctx: Any) -> list[dict]:
     workspace = getattr(ctx, "workspace", None)
     if not isinstance(workspace, dict):
         return []
-    settings = _settings(workspace)
+    extra = getattr(ctx, "extra", None)
+    settings = _ctx_settings(workspace, extra)
     draft_text = str(workspace.get("draft_text") or "")
     if not settings.enabled or not draft_text.strip():
         return []
@@ -1002,12 +1130,13 @@ def craft_checks(ctx: Any) -> list[dict]:
     except (TypeError, ValueError):
         chapter = 0
     beats = payoff_beats(_workspace_beats(workspace))
-    get_protagonist = _protagonist_once(conn, chapter)
-    pending = _pending_payoffs(conn, chapter, settings.window, get_protagonist)
+    get_protagonist = _once(lambda: resolve_protagonist(conn, chapter))
+    get_language = _once(lambda: _resolve_language(workspace, extra, conn, draft_text))
+    pending = _pending_payoffs(conn, chapter, settings.window, get_protagonist, get_language)
     if not beats and not pending:
         return []
 
-    language = _resolve_language(workspace, getattr(ctx, "extra", None), conn, draft_text)
+    language = get_language()
     en = is_english(language)
     protagonist = get_protagonist()
     issues: list[dict] = []
@@ -1026,10 +1155,9 @@ def craft_checks(ctx: Any) -> list[dict]:
             issues.append(_crowd_only_issue(witnesses, crowd, en=en))
 
     for item in pending:
-        _, aliases = _drop_protagonist(conn, item.witnesses, protagonist)
         found = detect_reactions(
             draft_text, item.witnesses, language=language,
-            protagonist_names=protagonist.names, aliases=aliases,
+            protagonist_names=protagonist.names, aliases=item.alias_map(),
         )
         if not _reacted((r.reactor for r in found), item.witnesses):
             issues.append(_deferred_issue(item, chapter, en=en))
@@ -1049,7 +1177,12 @@ def _context_language(context: Mapping[str, Any]) -> Optional[str]:
 
 
 def enrich_actuals(actuals: Any, draft_text: str, plan_context: Any) -> None:
-    """契约 payoff beat 的在场者反应 → ``actuals.reactions``（按 reactor+区间去重）。"""
+    """契约 payoff beat 的在场者反应 → ``actuals.reactions``（按 reactor+区间去重）。
+
+    无 DB：不知道主角名与别名。规划误把主角列为 witness 时，主角自己的反应也会
+    被记下——所有读取方（``_pending_payoffs``、``settle``）统一用 ``_visible_reactors``
+    / ``_is_protagonist`` 剔除主角后再判定。
+    """
     if actuals is None or not (draft_text or "").strip():
         return
     context = _context_dict(plan_context)
@@ -1077,16 +1210,17 @@ _SECRECY_RANK = {"top_secret": 3, "secret": 2, "open_secret": 0, "public": -1}
 
 
 def _info_gap_targets(conn: Any, workspace: Mapping[str, Any], protagonist_id: str) -> list[str]:
-    """Entity ids of this chapter's cast: contract ``must_include_entities``, else recall."""
+    """Entity ids of this chapter's cast: contract ``must_include_entities``, else recall
+    (also when none of the contract's names resolves to an entity or alias)."""
     contract = _context_dict(workspace.get("plan_context")).get("current_contract") or {}
     names = contract.get("must_include_entities") if isinstance(contract, Mapping) else None
     ids: list[str] = []
-    if isinstance(names, (list, tuple)) and names:
+    if isinstance(names, (list, tuple)):
         for name in names:
             entity_id = _resolve_entity_id(conn, str(name))
             if entity_id and entity_id not in ids:
                 ids.append(entity_id)
-    else:
+    if not ids:   # 无契约名单，或名单里的写法一个都对不上实体/别名 → 用召回的活跃角色
         recall = workspace.get("recall_pack")
         for row in (getattr(recall, "entities", None) or [])[:20]:
             if not isinstance(row, Mapping):
@@ -1261,7 +1395,8 @@ def draft_brief(conn: Any, chapter: int, workspace: Any, *, language: str, cfg: 
     if beats:
         kept, _ = _drop_protagonist(conn, _union_witnesses(beats), protagonist)
         beats = _restrict(beats, kept)
-    pending = _pending_payoffs(conn, chapter, settings.window, lambda: protagonist)
+    pending = _pending_payoffs(conn, chapter, settings.window, lambda: protagonist,
+                               lambda: language)
     gaps = info_gap_opportunities(
         conn, chapter, workspace, protagonist=protagonist, limit=settings.info_gaps,
     )
@@ -1301,8 +1436,8 @@ def settle(conn: Any, chapter: int, workspace: Any, *, gateway: Any = None, cfg:
     """只读汇总本章爽点反应覆盖率（写入 pipeline_run.detail_json["extensions"]）。
 
     口径与 actuals 一致（契约 payoff beat）：读取已持久化的 ``chapter_actuals``
-    反应；契约里没有爽点、而本章 beat sheet（planner 生成）有爽点时，直接对正文
-    跑同一个确定性检测器（``source="draft"``）。不写库、不调 LLM。
+    反应（剔除主角）；契约里没有爽点、而本章 beat sheet（planner 生成）有爽点时，
+    直接对正文跑同一个确定性检测器（``source="draft"``）。不写库、不调 LLM。
     """
     settings = _settings(cfg)
     if not settings.enabled:
@@ -1316,8 +1451,9 @@ def settle(conn: Any, chapter: int, workspace: Any, *, gateway: Any = None, cfg:
         beats = payoff_beats(workspace.get("beats"))
         source = "draft" if beats else source
     witnesses: list[str] = []
+    get_protagonist = _once(lambda: resolve_protagonist(conn, chapter))
     if beats:
-        protagonist = resolve_protagonist(conn, chapter)
+        protagonist = get_protagonist()
         witnesses, aliases = _drop_protagonist(conn, _union_witnesses(beats), protagonist)
         if source == "draft":
             language = _resolve_language(workspace, None, conn, draft_text)
@@ -1325,6 +1461,12 @@ def settle(conn: Any, chapter: int, workspace: Any, *, gateway: Any = None, cfg:
                 draft_text, _restrict(beats, witnesses), language=language,
                 protagonist_names=protagonist.names, aliases=aliases,
             )]
+    if reactions and source == "actuals":
+        # actuals 由无 DB 的 enrich_actuals 写入：规划把主角列为在场者时会记下主角
+        # 自己的反应，这里与 craft_checks 同口径剔除。
+        protagonist = get_protagonist()
+        reactions = [r for r in reactions
+                     if not _is_protagonist(conn, _clean_name(r.get("reactor")), protagonist)]
     reactors = list(dict.fromkeys(str(r.get("reactor") or "") for r in reactions
                                   if r.get("reactor")))
     return {
