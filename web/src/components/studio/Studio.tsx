@@ -26,6 +26,7 @@ import type {
   WorldStateSnapshot,
 } from '../../api/types';
 import VolumesPanel from './VolumesPanel';
+import BatchDraftPanel from './BatchDraftPanel';
 import SummariesPanel from './SummariesPanel';
 import AgentPanel from './AgentPanel';
 import MemoryPanel from './MemoryPanel';
@@ -1050,6 +1051,10 @@ function PipelinePanel({
   const [apMaxTokens, setApMaxTokens] = useState<string>('');
   const [apMaxUsd, setApMaxUsd] = useState<string>('');
   const [apGoals, setApGoals] = useState<string>('');
+  // v22/F6：挂机每批章数（空 = 自动按模型容量；1 = 逐章）
+  const [apBatchSize, setApBatchSize] = useState<string>('');
+  // v22/F6：多章连写进行中（与单章生成/挂机互斥）
+  const [batchBusy, setBatchBusy] = useState<boolean>(false);
 
   // 卷规划（M4-④：批量生成章节卡，供「下一章」最优建议消费）
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
@@ -1309,10 +1314,12 @@ function PipelinePanel({
         const m = line.match(/^\s*(\d+)\s*[:：]\s*(.+)$/);
         if (m) goals[m[1]] = m[2].trim();
       }
+      const batchSize = Number.parseInt(apBatchSize, 10);
       const session = await api.autopilotStart(projectId, {
         from_chapter: from,
         to_chapter: from + count - 1,
         mode: apMode,
+        batch_size: Number.isFinite(batchSize) && batchSize > 0 ? Math.min(30, batchSize) : undefined,
         quality_check: qualityCheck || undefined,
         n_candidates: nCandidates > 1 ? nCandidates : undefined,
         budget_session_max_tokens: Number.isFinite(sessTok) && sessTok > 0 ? sessTok : undefined,
@@ -1467,7 +1474,7 @@ function PipelinePanel({
 
       <div className="nf-notice">
         ⚠ <b>需要 LLM provider key</b>：后端配置{' '}
-        <code>DEEPSEEK_API_KEY</code>{' '}
+        <code>GEMINI_API_KEY</code>（或 <code>DEEPSEEK_API_KEY</code> 等）{' '}
         后方能真正生成正文；确定性核心（seed / bible / state / search / reviews）不受影响。
       </div>
 
@@ -1531,7 +1538,7 @@ function PipelinePanel({
           />
         </div>
         <div className="nf-actions" style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy || apActive}>
+          <button type="button" className="nf-btn" onClick={() => void run()} disabled={busy || apActive || batchBusy}>
             {busy && !chainProgress ? (
               <>
                 <span className="nf-spin" /> 生成中…
@@ -1545,7 +1552,7 @@ function PipelinePanel({
             type="button"
             className="nf-btn"
             onClick={() => void runAuto()}
-            disabled={busy || apActive}
+            disabled={busy || apActive || batchBusy}
             title="自动取「已完成最大章 +1」为章号，并按卷大纲 / 章节卡 / 待回收伏笔自动拼装本章目标"
           >
             {chainProgress ? (
@@ -1612,6 +1619,22 @@ function PipelinePanel({
           </div>
         )}
       </div>
+
+      {/* ── v22/F6 多章连写 ─────────────────────────────── */}
+      <BatchDraftPanel
+        projectId={projectId}
+        mode={mode}
+        nCandidates={nCandidates}
+        qualityCheck={qualityCheck}
+        disabled={busy || apActive}
+        onBusyChange={setBatchBusy}
+        onChanged={() => {
+          onChanged();
+          void loadHistory();
+          chapterNoTouched.current = false;
+          void loadSuggestion();
+        }}
+      />
 
       {/* ── Autopilot 挂机连写 ───────────────────────────── */}
       <div className="panel-section-head" style={{ marginTop: '1.5rem' }}>
@@ -1686,11 +1709,30 @@ function PipelinePanel({
             style={{ width: '5rem' }}
           />
         </label>
+        <label
+          htmlFor="ap-batch"
+          style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', opacity: 0.85 }}
+          title="每次长输出调用连续起草的章数（多章连写）；空 = 按模型容量自动，1 = 逐章生成。非长输出模型始终逐章；连写时每章只有一稿（候选稿数不生效），需要多候选择优请填 1"
+        >
+          每批章数
+          <input
+            id="ap-batch"
+            className="nf-input"
+            type="number"
+            min={1}
+            max={30}
+            placeholder="自动"
+            value={apBatchSize}
+            onChange={(e) => setApBatchSize(e.target.value)}
+            disabled={apBusy || apActive}
+            style={{ width: '4.5rem' }}
+          />
+        </label>
         <button
           type="button"
           className="nf-btn"
           onClick={() => void startAutopilot()}
-          disabled={apBusy || apActive || busy}
+          disabled={apBusy || apActive || busy || batchBusy}
         >
           {apBusy ? (
             <>
@@ -1789,7 +1831,7 @@ function PipelinePanel({
         <span className="cn" style={{ fontSize: '0.9rem', opacity: 0.8 }}>📋 卷规划</span>
       </div>
       <div className="ph-hint">
-        按卷大纲一次生成 ≤10 章细纲（目标/钩子/节拍，含爽点与伏笔回收安排），
+        按卷大纲一次生成 ≤10 章细纲（Gemini 4 等长输出模型 ≤30 章；目标/钩子/节拍，含爽点与伏笔回收安排），
         入库后「下一章 · 自动连写」与挂机连写按细纲驱动；已写过的章不会被覆盖。
       </div>
 
@@ -1994,9 +2036,23 @@ function PipelinePanel({
                   　⚡ 爽点闭环 {Math.round(stats.payoff_loop_rate * 100)}%
                 </span>
               )}
+              {stats.judge_disagreement_rate != null && (
+                <span
+                  title={`评委正反两序各判一次，胜者不一致即不采信、按确定性规则选稿（${stats.judge_disagreements ?? 0}/${stats.judge_runs ?? 0} 章）。持续偏高说明评委位置偏差大，择优结果更多来自确定性漏斗`}
+                  style={{
+                    color: stats.judge_disagreement_rate <= 0.2 ? '#4ade80'
+                      : stats.judge_disagreement_rate <= 0.4 ? '#fbbf24' : '#f87171',
+                  }}
+                >
+                  　⚖ 评委不一致 {Math.round(stats.judge_disagreement_rate * 100)}%
+                </span>
+              )}
               {stats.low_quality_count > 0 && (
-                <span style={{ color: 'var(--nf-warn, #fa0)' }}>
-                  　⚠ {stats.low_quality_count} 章低于 {stats.min_score_threshold} 分
+                <span
+                  style={{ color: 'var(--nf-warn, #fa0)' }}
+                  title={`任一维度（钩子/节奏/人物/文笔）低于下限即未过；无维度分时按总分 ${stats.min_score_threshold} 分判定`}
+                >
+                  　⚠ {stats.low_quality_count} 章未过质量门
                 </span>
               )}
             </span>
@@ -2004,16 +2060,17 @@ function PipelinePanel({
           {stats.series.some((s) => s.quality_score != null) && (
             <div
               style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 56, marginTop: '0.4rem' }}
-              title="逐章质量分（0-10）；红色 = 低于阈值——崩坏实证高发于卷中段，趋势下行时及时介入"
+              title="逐章质量分（0-10）；红色 = 未过质量门——崩坏实证高发于卷中段，趋势下行时及时介入"
             >
               {stats.series.map((s) => {
                 const score = s.quality_score;
                 const h = score == null ? 4 : Math.max(4, (score / 10) * 56);
-                const low = score != null && score < stats.min_score_threshold;
+                const low = s.quality_low ?? (score != null && score < stats.min_score_threshold);
+                const gateNote = s.quality_gate_reasons?.length ? ` · 未过线 ${s.quality_gate_reasons.join(', ')}` : '';
                 return (
                   <div
                     key={s.chapter}
-                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}${s.payoff_closed ? ' · ⚡爽点闭环' : ''}`}
+                    title={`第 ${s.chapter} 章：${score == null ? '未评分' : `★${score}`}${gateNote}${s.word_count ? ` · ${s.word_count}字` : ''}${s.usd_spent != null ? ` · $${s.usd_spent.toFixed(3)}` : ''}${s.payoff_closed ? ' · ⚡爽点闭环' : ''}${s.judge_disagreement ? ' · ⚖评委两序不一致' : ''}`}
                     style={{
                       width: 'clamp(4px, 100%, 18px)',
                       flex: '1 1 0',

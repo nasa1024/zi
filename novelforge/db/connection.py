@@ -42,9 +42,10 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
         from .migrations import check_and_migrate
         check_and_migrate(conn)
         # 启动期 sweep：清理崩溃写入残留（F6/F7）
-        from .l0 import sweep_orphans, sweep_crashed_runs
+        from .l0 import sweep_orphans, sweep_crashed_runs, sweep_stale_batches
         sweep_orphans(conn, db_path.parent / "l0")
         sweep_crashed_runs(conn)
+        sweep_stale_batches(conn)   # v22/F6：崩溃残留的连写批次
     return conn
 
 

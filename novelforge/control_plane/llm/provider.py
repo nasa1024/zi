@@ -1,6 +1,7 @@
 """LLMProvider Protocol 及共享类型（§14.2）。
 
-具体实现（AnthropicProvider / FakeProvider）见同包其他模块。
+具体实现（AnthropicProvider / OpenAICompatProvider / GeminiProvider / FakeProvider）
+见同包其他模块。
 Gateway 仅依赖本文件，不直接依赖 SDK。
 """
 from __future__ import annotations
@@ -71,6 +72,7 @@ class CapabilitySet:
     supports_cache: bool = False
     max_tokens_out: int = 8192
     context_window: int = 128_000   # 上下文窗口大小（tokens）
+    long_output: bool = False       # 单次调用可稳定产出超长输出（如 Gemini 4 long decode 续接）
 
 
 @runtime_checkable

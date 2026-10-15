@@ -8,6 +8,8 @@ from novelforge.control_plane.llm.runtime import build_project_config
 
 _ENV_KEYS = (
     "NOVELFORGE_PROVIDER",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
     "DEEPSEEK_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -24,6 +26,7 @@ def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("requested", "key_name", "expected_provider"),
     [
+        ("gemini", "GEMINI_API_KEY", "gemini"),
         ("deepseek", "DEEPSEEK_API_KEY", "deepseek"),
         ("deepseek_anthropic", "DEEPSEEK_API_KEY", "deepseek_anthropic"),
         ("anthropic", "ANTHROPIC_API_KEY", "anthropic"),
@@ -41,6 +44,7 @@ def test_explicit_provider_uses_only_its_matching_key(
     monkeypatch.setenv("NOVELFORGE_PROVIDER", requested)
     monkeypatch.setenv(key_name, "matching-key")
     # A higher-precedence unrelated key must not be paired with the request.
+    monkeypatch.setenv("GEMINI_API_KEY", "matching-key" if key_name == "GEMINI_API_KEY" else "wrong-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "matching-key" if key_name == "DEEPSEEK_API_KEY" else "wrong-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "matching-key" if key_name == "ANTHROPIC_API_KEY" else "wrong-key")
     monkeypatch.setenv("OPENAI_API_KEY", "matching-key" if key_name == "OPENAI_API_KEY" else "wrong-key")

@@ -15,6 +15,7 @@ from ..control_plane.skill_contract import (
     DoDCheck, IOSpec, SkillContract, SkillTrigger,
 )
 from ..control_plane.llm.tiers import ModelTier
+from ..planning.contract_fields import normalize_witnesses
 from ..writing_profiles import compile_system_prompt, get_project_writing_profile
 
 
@@ -117,10 +118,13 @@ class ChapterDraftSkill:
             ctx.workspace.get("chapter_contract_context")
             or ctx.workspace.get("future_guardrails", "")
         )
+        # v22：特性扩展动态提示（承诺提醒/转机要求/信息差机会），紧跟契约之后。
+        craft_brief = ctx.workspace.get("craft_brief", "")
         if is_english:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + (f"{anchor_block}\n\n" if anchor_block else "")
                 + "## Chapter Task\n"
                 + f"Chapter {ctx.target_chapter}\n"
@@ -133,6 +137,7 @@ class ChapterDraftSkill:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{contract_block}\n\n" if contract_block else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + (f"{anchor_block}\n\n" if anchor_block else "")
                 + f"## 本章任务\n"
                 f"第 {ctx.target_chapter} 章\n"
@@ -234,7 +239,14 @@ def _fmt_beats(beats: list[dict]) -> str:
         bt = b.get("beat_type", "?")
         sm = b.get("summary", "")
         va = b.get("value_axis", "")
-        lines.append(f"  {i}. [{bt}] {sm} (value_axis: {va})")
+        line = f"  {i}. [{bt}] {sm} (value_axis: {va})"
+        # LLM 常把 witnesses 回成 "王长老、赵师兄" 这类分隔字符串；统一走
+        # normalize_witnesses，避免逐字符展开
+        witnesses = normalize_witnesses(b.get("witnesses"))
+        if witnesses:
+            # v22/F5：必须对本 beat 作出可见反应的在场角色
+            line += f" (witnesses: {', '.join(witnesses)})"
+        lines.append(line)
     return "\n".join(lines)
 
 

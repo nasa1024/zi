@@ -52,6 +52,20 @@ npm run dev
 
 打开 <http://127.0.0.1:5173>。无需模型 key 即可体验项目、世界圣经、状态投影、检索、审核、记忆健康和规划界面。
 
+## 接入模型（默认 Gemini 4）
+
+```bash
+export NOVELFORGE_PROVIDER=gemini
+export GEMINI_API_KEY=你的key   # Google AI Studio 付费层
+```
+
+- 底层模型为 `gemini-4-argon`：输入输出共享 1,048,576 token，单次请求超过 64K 输出时自动续接（long decode）。
+- 三档（fast/mid/strong）同为 Gemini 4，以思考强度 low/medium/high 区分；可用 `NOVELFORGE_STRONG_MODEL=gemini-4-argon@medium` 等覆盖。
+- 长输出能力用于卷规划：单次由 ≤10 章放宽到 ≤30 章。
+- 仍支持 DeepSeek / Anthropic / OpenAI 兼容端点，详见 [.env.example](.env.example) 与 [Gemini 4 接入说明](docs/NovelForge/22-Gemini4接入与长输出改造.md)。
+
+**多章连写**：长输出模型一次调用连续起草多章（默认每次 ≤10 章），每章在提示中各自携带完整契约与节拍；输出按章节标记切分后，逐章照常走校验 → 修订 → 质量门控 → 落库 → 结算，某章未通过即丢弃其后依赖章、从该章重写（次数有上限），未提交的正文不会推进章节进度。入口为 Studio「生成章节」中的「📚 多章连写」、`POST /v1/{project_id}/pipeline/batch`（及 `/stream`）和挂机连写的「每批章数」；非长输出模型自动退化为逐章顺序写。详见 [F6 设计说明](docs/NovelForge/v22/F6-batch-drafting.md)。
+
 ## 验证
 
 ```bash

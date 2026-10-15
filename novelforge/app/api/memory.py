@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -50,22 +49,12 @@ def _optional_memory_gateway(cfg):
 
     REST 鉴权密钥 NOVELFORGE_API_KEY 绝不作为外部模型凭据使用。
     """
-    provider = (os.environ.get("NOVELFORGE_PROVIDER") or "deepseek").strip().lower()
-    if provider in {"anthropic", "deepseek_anthropic"}:
-        key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
-    elif provider in {"openai_compat", "openai"}:
-        key = os.environ.get("OPENAI_API_KEY")
-        provider = "openai_compat"
-    else:
-        key = os.environ.get("DEEPSEEK_API_KEY")
-        provider = "deepseek"
-    if not key:
+    from ...control_plane.llm.runtime import apply_provider_env, build_configured_gateway
+
+    apply_provider_env(cfg)
+    if cfg.provider.provider == "fake" or not cfg.provider.api_key:
         return None
     try:
-        from ...control_plane.llm.runtime import build_configured_gateway
-
-        cfg.provider.provider = provider
-        cfg.provider.api_key = key
         return build_configured_gateway(cfg)
     except Exception:
         return None

@@ -28,13 +28,14 @@ class BudgetConfig:
 
 @dataclass
 class ProviderConfig:
-    provider: str = "anthropic"  # "anthropic" | "openai_compat" | "fake"
+    provider: str = "anthropic"  # "gemini" | "anthropic" | "deepseek" | "openai_compat" | "fake"
     api_key: Optional[str] = None
-    base_url: Optional[str] = None        # openai_compat 专用
+    base_url: Optional[str] = None        # openai_compat / gemini 代理端点
     fast_model: str = "claude-haiku-4-5-20251001"
     mid_model: str = "claude-sonnet-4-6"
     strong_model: str = "claude-opus-4-8"
     max_retries: int = 3
+    safety_threshold: Optional[str] = None   # gemini 专用：安全过滤阈值（None=服务端默认）
 
 
 @dataclass
@@ -85,6 +86,8 @@ class CandidateConfig:
     n_candidates: int = 1                # 候选稿数量（1=关闭；建议生产 2-3，上限 3）
     judge_tier: str = "mid"              # LLM 评委档位 fast|mid|strong
     temperature_spread: float = 0.15     # 候选间温度差（多样性）
+    # v22/F4: LLM 评委正反两序各判一次，一致才采纳（LongJudgeBench：换序改判率最高 78.7%）
+    judge_both_orders: bool = True
 
 
 @dataclass
@@ -93,6 +96,11 @@ class QualityConfig:
     enabled: bool = False
     min_score: float = 6.0               # 低于此分触发润色 / 计入 autopilot 降级（autonovel 同款阈值）
     polish_enabled: bool = True          # 低分或 craft warn≥3 时做一轮润色（取分高版本，防润色变差）
+    # v22/F4: 门控口径。"dimensions"=任一维度低于下限即低分（总分仅展示）；"total"=旧口径
+    gate_mode: str = "dimensions"
+    dimension_min: dict = field(default_factory=lambda: {
+        "hook": 5.0, "pacing": 5.0, "character": 5.0, "prose": 5.0,
+    })
 
 
 @dataclass
@@ -101,6 +109,56 @@ class SettleConfig:
     enabled: bool = True                 # 默认开；FAST 档单章成本可忽略
     tier: str = "fast"                   # 结算 LLM 档位
     max_new_hooks: int = 2               # 每章自动新建伏笔上限（防账本灌水）
+
+
+@dataclass
+class PromiseConfig:
+    """v22/F1: 读者承诺账本（伏笔"埋—提醒—兑现"）。"""
+    enabled: bool = True
+    default_remind_every: int = 5        # 长线默认提醒周期（章）
+    dormant_factor: int = 2              # 超过 remind_every × factor 章未触及 → 休眠告警
+    short_line_max_chars: int = 30_000   # 短线超过此字数未推进 → 超时告警（千幻冰云：3 万字内揭开）
+    short_line_max_words: int = 20_000   # 英文 profile 的短线上限（词；≈10 章 × 2000 词）
+    opening_window_chapters: int = 3     # 开篇窗口：结束时需至少 1 长线 + 1 短线读者可见承诺
+    max_payoffs_per_chapter: int = 2     # 同章兑现超过此数 → 张力断崖提示
+    big_payoff_min_touches: int = 2      # 大爽点兑现前至少被提醒/推进的次数
+    inject_dormant_limit: int = 2        # 每章强制注入的休眠承诺条数
+
+
+@dataclass
+class PlausibilityConfig:
+    """v22/F2: "天降外挂"拦截（Sanderson 三定律 × 乌贼"不随意加新外挂"）。"""
+    enabled: bool = True
+    late_newcomer_progress: float = 0.75  # 卷进度超过此值后首次出现的新实体 → 告警
+    new_ability_ratio_warn: float = 1.0   # 卷内 新增能力数 / 旧能力新用法数 超过此值 → 提示
+    soft_magic: bool = False              # 软魔法体系：未展示能力解决冲突降为提示
+    resolving_tail_ratio: float = 0.4     # 无 payoff beat 的解决章：高潮段 = 正文末尾此比例（扣除章末钩子段）
+
+
+@dataclass
+class PolarityConfig:
+    """v22/F3: 章级转向序列与抑扬上限（"最惨/最爽不能超过三章"）。"""
+    enabled: bool = True
+    max_same_polarity_streak: int = 3    # 同向转向连续超过此章数 → 告警
+    max_low_streak: int = 3              # 连续低谷达到此章数 → 下一章必须安排转机
+
+
+@dataclass
+class PayoffConfig:
+    """v22/F5: 爽点三段式（动作 → 在场者反应 → 收获重要性展示）。"""
+    enabled: bool = True
+    reaction_window_chapters: int = 1    # 爽点章或其后 N 章内须出现非主角反应
+    info_gap_suggestions: int = 2        # 每章向规划/起草推荐的信息差打脸机会数
+
+
+@dataclass
+class BatchConfig:
+    """v22/F6: 多章连写——一次长输出调用起草连续多章，再逐章校验提交。"""
+    enabled: bool = True                 # 仅在 provider 声明 long_output 时生效
+    max_chapters: int = 10               # 单次调用最多起草章数
+    min_chapters: int = 2                # 少于此数时退回单章流程
+    require_long_output: bool = True
+    max_regenerations: int = 2           # "丢弃后续章并重写"连续无进展的最大次数（窗口接受≥1章即清零）
 
 
 @dataclass
@@ -116,6 +174,11 @@ class NovelForgeConfig:
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     settle: SettleConfig = field(default_factory=SettleConfig)
+    promises: PromiseConfig = field(default_factory=PromiseConfig)
+    plausibility: PlausibilityConfig = field(default_factory=PlausibilityConfig)
+    polarity: PolarityConfig = field(default_factory=PolarityConfig)
+    payoff: PayoffConfig = field(default_factory=PayoffConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
     max_revise_loops: int = 2            # REVISE 阶段最大迭代次数
     patch_revise: bool = True            # M7: revise/润色先尝试锚点补丁（局部修改），失败回退全文重写
     midpoint_boost: bool = True          # M2-⑤: 卷中段(40-60%)章节 revise 上限 +1（ConStory 实证错误高发区）

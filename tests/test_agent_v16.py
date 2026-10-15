@@ -11,6 +11,7 @@ def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setenv("NOVELFORGE_PROVIDER", "fake")
     monkeypatch.delenv("NOVELFORGE_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     import novelforge.app.autopilot_manager as ap_mod
     import novelforge.app.deps as deps_mod
@@ -268,8 +269,10 @@ class TestAgentDecisions:
         import novelforge.planning.generation as generation
 
         monkeypatch.delenv("NOVELFORGE_PROVIDER", raising=False)
+        # v22/F4：评委正序、逆序各判一次；逆序 [2,1,0] 中原 #2 位于下标 0。
         gateway = LLMGateway(
-            FakeProvider(responses=['{"option_index":2,"reason":"终局铺垫更完整"}']),
+            FakeProvider(responses=['{"option_index":2,"reason":"终局铺垫更完整"}',
+                                    '{"option_index":0,"reason":"终局铺垫更完整"}']),
             BudgetLedger(max_tokens=10_000, max_usd=1.0),
         )
         monkeypatch.setattr(generation, "_gateway", lambda *args, **kwargs: gateway)
@@ -291,6 +294,7 @@ class TestAgentDecisions:
         assert option_id == "opt2"
         assert meta["source"] == "llm_judge"
         assert meta["option_index"] == 2
+        assert meta["judge_disagreement"] is False
 
     def test_reroll_supersedes_old_decision(self, client, project):
         session = _start(client, project)
@@ -729,7 +733,7 @@ class TestMigrationV17:
 
         conn = init_db(tmp_path / "agent-v16.db")
         try:
-            assert SCHEMA_VERSION == "21"
+            assert SCHEMA_VERSION == "22"
             for table in (
                 "story_plans",
                 "story_arcs",

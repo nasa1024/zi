@@ -447,8 +447,8 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
     if row is None:
         return None
     beats = conn.execute(
-        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level FROM beats"
-        " WHERE chapter=? AND status='planned' ORDER BY seq",
+        "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level,"
+        " witnesses_json FROM beats WHERE chapter=? AND status='planned' ORDER BY seq",
         (chapter,),
     ).fetchall()
     return ChapterCardModel(
@@ -476,7 +476,9 @@ def _load_chapter_card(conn, chapter: int) -> ChapterCardModel | None:
         beats=[PlannedBeat(seq=b["seq"], beat_type=b["beat_type"],
                            summary=b["summary"], value_axis=b["value_axis"],
                            arc_id=b["arc_id"],
-                           constraint_level=b["constraint_level"]) for b in beats],
+                           constraint_level=b["constraint_level"],
+                           witnesses=_parse_json(b["witnesses_json"], []))
+               for b in beats],
     )
 
 
@@ -488,6 +490,7 @@ def plan_volume(
     registry: ProjectRegistry = Depends(get_registry),
 ):
     """兼容卷规划入口；生成与落库均转交统一 PlanningService。"""
+    from ...control_plane.llm.runtime import build_project_config, max_planning_horizon
     from ...planning.service import PlanningService
     from ..chapter_suggest import next_chapter_no
 
@@ -508,7 +511,11 @@ def plan_volume(
         next_ch, _ = next_chapter_no(conn, project_id)
         plan_from = req.from_chapter or max(vol["start_chapter"], next_ch)
         default_to = vol["end_chapter"] if vol["end_chapter"] is not None else plan_from + 9
-        plan_to = min(req.to_chapter or default_to, plan_from + 9)   # 单次 ≤10 章防截断
+        # 单次窗口防输出截断：普通模型 ≤10 章；长输出模型（Gemini 4）≤30 章
+        max_window = max_planning_horizon(build_project_config(
+            project_id, project.db_path if project else "novel.db", conn,
+        ))
+        plan_to = min(req.to_chapter or default_to, plan_from + max_window - 1)
         if vol["end_chapter"] is not None:
             plan_to = min(plan_to, vol["end_chapter"])
         if plan_from > plan_to:

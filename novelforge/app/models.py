@@ -384,6 +384,7 @@ class PipelineRunRecord(BaseModel):
     quality_score: Optional[float] = None  # M5-⑦
     tokens_spent: Optional[int] = None     # 逐章成本（v11）
     usd_spent: Optional[float] = None
+    batch_id: Optional[str] = None         # v22/F6: 多章连写批次；单章流程为 None
 
 
 class PipelineRunDetail(PipelineRunRecord):
@@ -401,6 +402,9 @@ class PipelineRunDetail(PipelineRunRecord):
     recommended_plan_action: Optional[
         Literal["keep", "patch", "replan", "pause"]
     ] = None
+    # v22/F4: 质量门结论 {low, reasons, mode, gate_mode, min_score, dimension_min}
+    quality_gate: Optional[dict] = None
+    judge_disagreement: Optional[bool] = None  # 评委正反两序胜者不一致（None=未做两序校验）
 
 
 class CandidateInfo(BaseModel):
@@ -423,6 +427,90 @@ class SelectCandidateRequest(BaseModel):
     candidate_index: int = Field(ge=0, le=2)
 
 
+# ── v22/F6 多章连写（Batch drafting）─────────────────────────────────────────
+
+class BatchRunRequest(BaseModel):
+    """一次长输出调用起草连续多章，再逐章校验提交（非长输出模型退化为逐章顺序写）。"""
+    start_chapter: Optional[int] = Field(default=None, ge=1)   # 缺省 = 下一章
+    chapters: Optional[int] = Field(default=None, ge=1, le=30)  # 缺省 = cfg.batch.max_chapters
+    chapter_goals: dict[str, str] = Field(default_factory=dict)  # {章号: 目标}；缺省逐章自动拼装
+    interaction_mode: Optional[Literal["guided", "copilot", "autonomous"]] = None
+    # 与 PipelineRunRequest 同义的逐章设置（复用 _make_cfg）
+    mode: Optional[Literal["human_gate", "auto_promote", "hybrid"]] = None
+    budget_max_tokens: Optional[int] = None    # 单章预算；连写调用按章数放大
+    budget_max_usd: Optional[float] = None
+    n_candidates: Optional[int] = Field(default=None, ge=1, le=3)  # 仅顺序模式生效
+    quality_check: Optional[bool] = None
+
+
+class BatchChapterResult(BaseModel):
+    chapter: int
+    ok: bool
+    run_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    issues: int = 0
+    blocks: int = 0               # 修订后仍残留的 hard block
+    quality_score: Optional[float] = None
+    tokens: int = 0               # 本章流水线 + 摊入的连写调用成本
+    usd: float = 0.0
+    state_degraded: bool = False
+    error: Optional[str] = None
+
+
+class BatchDiscardedChapter(BaseModel):
+    chapter: int
+    batch_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class BatchRunResponse(BaseModel):
+    batch_id: Optional[str] = None       # 首个 draft_batches 行；顺序模式为 None
+    batch_ids: list[str] = Field(default_factory=list)
+    mode: Literal["batch", "sequential"]
+    status: Literal["completed", "partial", "failed", "canceled"]
+    requested: list[int] = Field(default_factory=list)
+    chapters: list[BatchChapterResult] = Field(default_factory=list)
+    discarded: list[BatchDiscardedChapter] = Field(default_factory=list)
+    regenerations: int = 0
+    next_chapter: int
+    tokens: int = 0
+    usd: float = 0.0
+    batch_tokens: int = 0
+    batch_usd: float = 0.0
+    capacity: int = 1
+    error: Optional[str] = None
+
+
+class DraftBatchChapterInfo(BaseModel):
+    chapter: int
+    seq: int
+    status: str                          # pending | accepted | rejected | discarded
+    run_id: Optional[str] = None
+    reason: Optional[str] = None
+    length: int = 0                      # 正文字符数（len）
+    draft_text: Optional[str] = None     # 仅 include_text=true 时返回
+    updated_at: Optional[str] = None
+
+
+class DraftBatchInfo(BaseModel):
+    batch_id: str
+    start_chapter: int
+    end_chapter: int
+    status: str                          # running | completed | partial | failed | canceled
+    origin: str
+    model_id: Optional[str] = None
+    tokens_spent: int = 0
+    usd_spent: float = 0.0
+    created_at: str
+    updated_at: Optional[str] = None
+    detail: dict = Field(default_factory=dict)
+    counts: dict[str, int] = Field(default_factory=dict)   # 各状态章数
+
+
+class DraftBatchDetail(DraftBatchInfo):
+    chapters: list[DraftBatchChapterInfo] = Field(default_factory=list)
+
+
 # ── Pipeline stats（M6: 质量趋势看板）─────────────────────────────────────────
 
 class ChapterStat(BaseModel):
@@ -433,6 +521,10 @@ class ChapterStat(BaseModel):
     tokens_spent: Optional[int] = None   # 逐章成本（v11）
     usd_spent: Optional[float] = None
     payoff_closed: bool = False          # P1#10: 本章有确定性爽点闭环证据
+    # v22/F4：分维度质量门结论（None=未评分）+ 未过线项（如 "hook 4<5"）
+    quality_low: Optional[bool] = None
+    quality_gate_reasons: list[str] = Field(default_factory=list)
+    judge_disagreement: Optional[bool] = None   # v22/F4：评委正反两序胜者不一致（None=未做两序校验）
 
 
 class PipelineStats(BaseModel):
@@ -445,11 +537,15 @@ class PipelineStats(BaseModel):
     chapters_completed: int = 0
     total_words: int = 0
     avg_quality_score: Optional[float] = None
-    low_quality_count: int = 0      # 低于 min_score 阈值的章数
+    low_quality_count: int = 0      # 未过质量门的章数（v22/F4：分维度下限；无维度分时 < min_score）
     min_score_threshold: float = 6.0
     total_tokens_spent: int = 0     # 成本曲线汇总（v11；旧数据无成本列时为 0）
     total_usd_spent: float = 0.0
     payoff_loop_rate: Optional[float] = None   # P1#10: 闭环章/完成章（≥0.7 高 0.5-0.7 中 <0.5 低）
+    # v22/F4：评委去偏看板（LongJudgeBench：换序改判率 10.6%–78.7%）
+    judge_runs: int = 0                        # 做过正反两序校验的章数
+    judge_disagreements: int = 0               # 两序胜者不一致 → 确定性回落的章数
+    judge_disagreement_rate: Optional[float] = None
 
 
 # ── Foreshadow health（M5-⑧ 伏笔回收健康度，inkos hookAgenda 思路）────────────
@@ -460,13 +556,46 @@ class ForeshadowHealth(BaseModel):
     oldest_overdue_chapter: Optional[int] = None   # 最早到期且仍未回收的章号
     due_soon: list[dict] = Field(default_factory=list)  # 3 章内到期 [{label, due_chapter}]
     status: str = "green"        # green(无逾期) / yellow(≤2) / red(>2)
+    dormant_count: int = 0       # v22/F1: 下一章时已休眠的读者可见长/短线承诺数
+
+
+# ── Pacing（v22/F3 极性序列与抑扬上限）──────────────────────────────────────────
+
+class PacingCursorView(BaseModel):
+    chapters_since_big_payoff: int = 0
+    kchars_since_small_payoff: float = 0.0
+    buildup: int = 0
+    recent_high_streak: int = 0
+    low_streak: int = 0                    # 连续低谷（转向 -）章数
+    polarity_streak: int = 0               # 与 last_polarity 同向的连续章数
+    last_polarity: Optional[Literal["+", "-", "±"]] = None
+    needs_turn: bool = False               # 连续低谷已达上限：下一章必须安排转机
+    needs_cooldown: bool = False
+    needs_small_payoff: bool = False
+    needs_big_payoff: bool = False
+
+
+class PacingChapterView(BaseModel):
+    chapter: int
+    tension_level: int                     # 1 平缓 … 4 大爽点 / 5 大高潮
+    pace: Optional[str] = None             # slow / steady / fast / climax
+    polarity: Optional[Literal["+", "-", "±"]] = None
+    turning_point: Optional[Literal["action", "revelation"]] = None
+    detail: dict = Field(default_factory=dict)   # notes JSON（来源 / beat 类型 / 是否余韵）
+
+
+class PacingOverview(BaseModel):
+    cursor: PacingCursorView
+    chapters: list[PacingChapterView] = Field(default_factory=list)   # 最近 20 章，按章号升序
+    max_same_polarity_streak: int = 3
+    max_low_streak: int = 3
 
 
 # ── Volume plan（M4-④ 卷级批量预规划）─────────────────────────────────────────
 
 class VolumePlanRequest(BaseModel):
     from_chapter: Optional[int] = None   # 缺省 = max(卷起始章, 已完成最大章+1)
-    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章
+    to_chapter: Optional[int] = None     # 缺省 = min(卷末章, from+9)；单次 ≤10 章（长输出模型 ≤30 章）
 
 
 class PlannedBeat(BaseModel):
@@ -476,6 +605,7 @@ class PlannedBeat(BaseModel):
     value_axis: Optional[str] = None
     arc_id: Optional[str] = None
     constraint_level: Literal["soft", "hard"] = "soft"
+    witnesses: list[str] = Field(default_factory=list)   # v22/F5
 
 
 class ChapterCardModel(BaseModel):
@@ -577,6 +707,9 @@ class AutopilotStartRequest(BaseModel):
     pause_on_degrade: bool = True
     quality_check: bool = False  # M5-⑦: 逐章质量评分；连续低分计入降级计数
     n_candidates: int = Field(default=1, ge=1, le=3)  # M3-①: 每章候选稿数（择优）
+    # v22/F6 多章连写：每次长输出调用起草的章数。None = 自动（模型容量），
+    # 1 = 旧的逐章流程；仅 provider 声明 long_output 时生效
+    batch_size: Optional[int] = Field(default=None, ge=1, le=30)
 
 
 class AutopilotSessionInfo(BaseModel):
@@ -837,6 +970,12 @@ class ForeshadowCreateRequest(BaseModel):
     due_chapter: Optional[int] = Field(None, ge=1)
     related_entity_id: Optional[str] = None
     importance: int = Field(3, ge=1, le=5)
+    # v22/F1 读者承诺账本
+    promise_kind: Optional[str] = Field(None, max_length=40)   # 推荐词表见 craft.promise_ledger
+    line_type: Literal["long", "short", "micro"] = "long"
+    visibility: Literal["reader", "hidden"] = "reader"
+    parent_id: Optional[str] = None          # 嵌套的外层承诺（后开先关）
+    remind_every: Optional[int] = Field(None, ge=1, le=1000)   # 提醒周期（章）；空=按线型默认
 
 
 class ForeshadowUpdateRequest(BaseModel):
@@ -845,6 +984,12 @@ class ForeshadowUpdateRequest(BaseModel):
     paid_off_chapter: Optional[int] = Field(None, ge=1)
     importance: Optional[int] = Field(None, ge=1, le=5)
     description: Optional[str] = None
+    # v22/F1：promise_kind / parent_id / remind_every 显式传 null 表示清空
+    promise_kind: Optional[str] = Field(None, max_length=40)
+    line_type: Optional[Literal["long", "short", "micro"]] = None
+    visibility: Optional[Literal["reader", "hidden"]] = None
+    parent_id: Optional[str] = None
+    remind_every: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class ForeshadowResponse(BaseModel):
@@ -863,6 +1008,20 @@ class ForeshadowResponse(BaseModel):
     advance_count: int = 0
     last_advanced_chapter: Optional[int] = None
     origin: str = "manual"
+    # v22/F1 读者承诺账本
+    promise_kind: Optional[str] = None
+    line_type: str = "long"
+    visibility: str = "reader"
+    parent_id: Optional[str] = None
+    remind_every: Optional[int] = None
+
+
+class ForeshadowDormantResponse(ForeshadowResponse):
+    """v22/F1: a dormant reader promise (``GET /foreshadow/dormant``)."""
+    last_touch_chapter: int              # max(埋设, 最近提及, 最近推进)
+    chapters_since_touch: int
+    effective_remind_every: int          # 显式 remind_every 或按线型的默认值
+    dormant_after: int                   # 超过此章数未触及即休眠
 
 
 # ── Style anchors（P1#9 文风锚点 few-shot）────────────────────────────────────

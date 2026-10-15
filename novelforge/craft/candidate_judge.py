@@ -5,15 +5,19 @@
   2. 世界状态硬校验（零 LLM 成本）
   3. 未来计划硬冲突（零 LLM 成本）
   4. 章节契约与情节弧推进度（零 LLM 成本）
-  5. LLM 文学质量评委（≤1 次调用）
-     （EvolvR 实证 pairwise 优于 pointwise）
+  5. LLM 文学质量评委（EvolvR 实证 pairwise 优于 pointwise）
+     v22/F4 去偏：正序、逆序各判一次（≤2 次调用），两次胜者一致才采纳，分数取两次均值；
+     不一致或逆序结论无法解析 → 确定性回落并记录 judge_disagreement
+     （LongJudgeBench：创意写作两两判优准确率仅 0.508–0.639，换序改判率 10.6%–78.7%）。
 
 select_best() 保留旧报告字段，并增加每个候选的 continuity_blocks、
-plan_blocks、contract_score、arc_progress_score、plan_fidelity、quality_score。
+plan_blocks、contract_score、arc_progress_score、plan_fidelity、quality_score，
+以及评委去偏字段 judge_disagreement（None=未做两序校验）/ judge_verdicts。
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Mapping, Optional
 
@@ -57,8 +61,12 @@ def select_best(
     gateway=None,
     judge_tier: str = "mid",
     writing_profile: Optional[dict] = None,
+    judge_both_orders: bool = True,
 ) -> dict:
-    """从候选列表选出最优。candidates 元素：{draft_text, proposals}。"""
+    """从候选列表选出最优。candidates 元素：{draft_text, proposals}。
+
+    judge_both_orders=True（默认）时第 5 级评委正序、逆序各判一次，见 _judge_finalists。
+    """
     n = len(candidates)
     contract_scores = [1.0] * n
     arc_progress_scores = [1.0] * n
@@ -84,6 +92,9 @@ def select_best(
         "eligible": [],
         "judge_used": False,
         "reason": "",
+        # v22/F4：None=未做正反两序校验；True/False=两序胜者是否不一致
+        "judge_disagreement": None,
+        "judge_verdicts": [],
     }
     if english:
         profile = writing_profile or {}
@@ -224,39 +235,162 @@ def select_best(
             report["reason"] = "profile_adherence_veto"
             return report
 
-    # ── 5. LLM 文学质量评委（单次调用）─────────────────────────────────────
+    # ── 5. LLM 文学质量评委（v22/F4：正反两序各判一次，一致才采纳）──────────
     if gateway is not None:
-        verdict = _llm_judge(
+        judged = _judge_finalists(
             gateway,
             judge_tier,
             chapter_goal,
-            [(i, candidates[i]["draft_text"]) for i in finalists],
+            candidates,
+            finalists,
             chapter_contract=chapter_contract,
             plan_context=plan_context,
             writing_profile=writing_profile,
+            both_orders=judge_both_orders,
         )
-        if verdict is not None:
-            winner_pos, scores, reason = verdict
-            if 0 <= winner_pos < len(finalists):
-                report["winner"] = finalists[winner_pos]
-                for pos, i in enumerate(finalists):
-                    if pos < len(scores):
-                        report["scores"][i] = scores[pos]
-                        report["quality_scores"][i] = scores[pos]
-                report["judge_used"] = True
-                report["reason"] = reason or "llm_judge"
-                return report
+        report["judge_verdicts"] = judged["verdicts"]
+        report["judge_disagreement"] = judged["disagreement"]
+        if judged["winner"] is not None:
+            report["winner"] = judged["winner"]
+            for i in finalists:
+                report["scores"][i] = judged["scores"][i]
+                report["quality_scores"][i] = judged["scores"][i]
+            report["judge_used"] = True
+            # 评委理由是自由文本（展示用）；机器口径见 judge_disagreement
+            report["reason"] = judged["reason"] or "llm_judge"
+            return report
 
+    # 评委不可用 / 两序结论不一致 → 确定性回落（不一致时评委分数不采信，scores 留空）
+    disagreement = report["judge_disagreement"] is True
     if english:
         # All deterministic criteria are tied.  Stable source order is
         # reproducible and does not reintroduce "longest draft wins".
         report["winner"] = min(finalists)
-        report["reason"] = "judge_unavailable_profile_fit"
+        report["reason"] = (
+            "judge_order_disagreement" if disagreement else "judge_unavailable_profile_fit"
+        )
     else:
-        # 中文默认行为保持不变。
-        report["winner"] = max(finalists, key=lambda i: len(candidates[i].get("draft_text", "")))
-        report["reason"] = "judge_unavailable_pick_longest"
+        # 中文：计划契合度优先（漏斗已按 plan_fidelity 收敛，这里只破残余平局），再取最长稿。
+        report["winner"] = max(
+            finalists, key=lambda i: _zh_fallback_rank(report, candidates, i),
+        )
+        report["reason"] = (
+            "judge_order_disagreement" if disagreement else "judge_unavailable_pick_longest"
+        )
     return report
+
+
+def _zh_fallback_rank(report: Mapping[str, Any], candidates: list[dict], index: int) -> tuple:
+    """中文确定性兜底排序键：plan_fidelity → contract_score → 正文长度（max 取首个，稳定）。"""
+    return (
+        float(report["plan_fidelity_scores"][index] or 0.0),
+        float(report["contract_scores"][index] or 0.0),
+        len(candidates[index].get("draft_text", "")),
+    )
+
+
+def _coerce_score(value: Any) -> Optional[float]:
+    """评委分数归一：非数值/非有限值 → None，其余夹到 0-10。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score):
+        return None
+    return max(0.0, min(10.0, score))
+
+
+def _map_verdict(
+    verdict: Optional[tuple[int, list, str]], order: list[int], n: int,
+    *, error: Optional[str] = None,
+) -> dict:
+    """把评委按"展示位置"给出的结论映射回候选原始下标（scores 与 report["scores"] 同形）。"""
+    entry: dict[str, Any] = {
+        "order": list(order),
+        "winner": None,
+        "scores": [None] * n,
+        "reason": "",
+        "valid": False,
+    }
+    if error:
+        entry["error"] = error
+    if verdict is None:
+        return entry
+    winner_pos, scores, reason = verdict
+    entry["reason"] = reason
+    for pos, index in enumerate(order):
+        if pos < len(scores):
+            entry["scores"][index] = _coerce_score(scores[pos])
+    if 0 <= winner_pos < len(order):
+        entry["winner"] = order[winner_pos]
+        entry["valid"] = True
+    return entry
+
+
+def _judge_finalists(
+    gateway, judge_tier: str, chapter_goal: str,
+    candidates: list[dict], finalists: list[int],
+    *,
+    chapter_contract: Optional[dict] = None,
+    plan_context=None,
+    writing_profile: Optional[dict] = None,
+    both_orders: bool = True,
+) -> dict:
+    """第 5 级评委（v22/F4 去偏）。
+
+    正序判一次；both_orders 且终选 ≥2 时再按逆序判一次，把逆序结论映射回原下标：
+    - 两次胜者一致 → 采纳，分数取两次均值（单侧缺分取另一侧），disagreement=False；
+    - 胜者不一致或逆序结论无法解析 → 不采纳，disagreement=True（调用方确定性回落）；
+    - 正序结论无效 → 不再发逆序调用（单侧结论无法校验，多花一次也不会被采纳），
+      disagreement=None；任一侧调用异常（网络/预算熔断）同样按"评委不可用"处理，
+      不计入不一致率。
+    both_orders=False → 旧行为：单次调用，有效即采纳，disagreement=None。
+    """
+    n = len(candidates)
+    orders = [list(finalists)]
+    if both_orders and len(finalists) > 1:
+        orders.append(list(reversed(finalists)))
+    verdicts: list[dict] = []
+    for order in orders:
+        errors: list[str] = []
+        raw = _llm_judge(
+            gateway, judge_tier, chapter_goal,
+            [(i, candidates[i]["draft_text"]) for i in order],
+            chapter_contract=chapter_contract,
+            plan_context=plan_context,
+            writing_profile=writing_profile,
+            errors=errors,
+        )
+        verdicts.append(_map_verdict(raw, order, n, error=errors[0] if errors else None))
+        if not verdicts[-1]["valid"]:
+            break
+    out: dict[str, Any] = {
+        "winner": None, "scores": [None] * n, "reason": "",
+        "disagreement": None, "verdicts": verdicts,
+    }
+    first = verdicts[0]
+    if not first["valid"]:
+        return out
+    if len(orders) == 1:
+        out.update(winner=first["winner"], scores=list(first["scores"]),
+                   reason=first["reason"])
+        return out
+    second = verdicts[1]
+    if second.get("error"):
+        return out   # 逆序调用异常：无法校验 → 评委不可用（不计入不一致）
+    if second["winner"] != first["winner"]:
+        out["disagreement"] = True
+        return out
+    averaged: list[Optional[float]] = [None] * n
+    for i in finalists:
+        values = [v for v in (first["scores"][i], second["scores"][i]) if v is not None]
+        if values:
+            averaged[i] = round(sum(values) / len(values), 2)
+    out.update(winner=first["winner"], scores=averaged, reason=first["reason"],
+               disagreement=False)
+    return out
 
 
 def _count_hard_blocks(draft_text: str, world) -> int:
@@ -306,8 +440,13 @@ def _llm_judge(
     chapter_contract: Optional[dict] = None,
     plan_context=None,
     writing_profile: Optional[dict] = None,
+    errors: Optional[list] = None,
 ) -> Optional[tuple[int, list, str]]:
-    """单次 LLM 调用对终选候选打分选优。返回 (finalists内序号, scores, reason)。"""
+    """单次 LLM 调用对终选候选打分选优。返回 (finalists内序号, scores, reason)。
+
+    失败返回 None；传入 errors 时把调用异常的类型名追加进去，供调用方区分
+    "评委不可用"（网络/预算熔断）与"评委输出无法解析"。
+    """
     try:
         from ..control_plane.llm.provider import Message
 
@@ -346,7 +485,9 @@ def _llm_judge(
             max_tokens=2048,   # 思考型模型推理计入 max_tokens，过小会截断 JSON
         )
         return _parse_verdict(resp.text)
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(type(exc).__name__)
         return None
 
 

@@ -237,14 +237,55 @@ def _fallback_recommendation(
     }
 
 
+def _judge_decision_once(
+    gateway,
+    system: str,
+    envelope: dict[str, Any],
+    compact_options: list[dict[str, Any]],
+    order: list[int],
+) -> tuple[int | None, DecisionRecommendation | None, str | None]:
+    """Ask the option judge once with options presented in ``order``.
+
+    Options are relabelled with their presented position so ``option_index``
+    always means "index into the array shown"; the answer is mapped back to
+    the original option position.  Returns (original index | None, raw, tier).
+    """
+    presented = [
+        {**compact_options[source], "option_index": position}
+        for position, source in enumerate(order)
+    ]
+    user = json.dumps(
+        {**envelope, "options": presented}, ensure_ascii=False, indent=2,
+    )
+    result = gateway.generate_validated(
+        ModelTier.FAST,
+        [Message(role="user", content=user)],
+        parse=_parse_decision_recommendation,
+        system=system,
+        max_tokens=500,
+        max_tier=ModelTier.MID,
+    )
+    recommendation = result.value
+    if recommendation is None or recommendation.option_index >= len(order):
+        return None, recommendation, result.tier_used
+    return order[recommendation.option_index], recommendation, result.tier_used
+
+
 def recommend_decision_option(
     decision: dict[str, Any],
     *,
     project_id: str,
     db_path: str,
     state_context: dict[str, Any] | None = None,
+    judge_both_orders: bool = True,
 ) -> tuple[str, dict[str, Any]]:
-    """Run a compact FAST-tier judge for the user-facing "AI decide" action."""
+    """Run a compact FAST-tier judge for the user-facing "AI decide" action.
+
+    v22/F4: with ``judge_both_orders`` the judge runs once with the options in
+    their stored order and once reversed; the choice is accepted only when both
+    runs pick the same option.  Otherwise the deterministic score/recommendation
+    fallback is used and ``judge_disagreement`` is recorded in the metadata.
+    """
     options = list(decision.get("options") or [])
     if not options:
         raise ValueError("decision has no options")
@@ -293,7 +334,7 @@ def recommend_decision_option(
 
     compact_options = [
         {
-            "option_index": int(option.get("option_index") or index),
+            "option_index": index,
             "title": option.get("title"),
             "summary": option.get("summary"),
             "rationale": option.get("rationale"),
@@ -303,13 +344,12 @@ def recommend_decision_option(
         }
         for index, option in enumerate(options)
     ]
-    user = json.dumps({
+    envelope = {
         "stage": decision.get("stage"),
         "question": decision.get("question"),
         "decision_context": decision.get("context") or {},
         "agent_state": state_context or {},
-        "options": compact_options,
-    }, ensure_ascii=False, indent=2)
+    }
     system = (
         compile_system_prompt(
             _DECISION_JUDGE_SYSTEM,
@@ -319,16 +359,11 @@ def recommend_decision_option(
         if english else _DECISION_JUDGE_SYSTEM
     )
     try:
-        result = gateway.generate_validated(
-            ModelTier.FAST,
-            [Message(role="user", content=user)],
-            parse=_parse_decision_recommendation,
-            system=system,
-            max_tokens=500,
-            max_tier=ModelTier.MID,
+        forward = list(range(len(options)))
+        chosen, recommendation, tier_used = _judge_decision_once(
+            gateway, system, envelope, compact_options, forward,
         )
-        recommendation = result.value
-        if recommendation is None or recommendation.option_index >= len(options):
+        if chosen is None or recommendation is None:
             return _fallback_recommendation(
                 decision,
                 (
@@ -336,12 +371,42 @@ def recommend_decision_option(
                     if english else "模型裁决格式无效：按候选评分回退"
                 ),
             )
-        selected = options[recommendation.option_index]
+        verdicts = [{
+            "order": forward,
+            "option_index": chosen,
+            "reason": recommendation.reason[:300],
+        }]
+        disagreement = None
+        if judge_both_orders and len(options) > 1:
+            reverse = forward[::-1]
+            second, second_rec, _ = _judge_decision_once(
+                gateway, system, envelope, compact_options, reverse,
+            )
+            verdicts.append({
+                "order": reverse,
+                "option_index": second,
+                "reason": second_rec.reason[:300] if second_rec is not None else "",
+            })
+            disagreement = second != chosen
+            if disagreement:
+                option_id, meta = _fallback_recommendation(
+                    decision,
+                    (
+                        "The judge picked a different option when the order was "
+                        "reversed; selected deterministically"
+                        if english else "评委正反两序结论不一致：按候选评分回退"
+                    ),
+                )
+                meta.update(judge_disagreement=True, judge_verdicts=verdicts)
+                return option_id, meta
+        selected = options[chosen]
         return selected["id"], {
             "source": "llm_judge",
-            "option_index": recommendation.option_index,
+            "option_index": chosen,
             "reason": recommendation.reason[:300],
-            "tier_used": result.tier_used,
+            "tier_used": tier_used,
+            "judge_disagreement": disagreement,
+            "judge_verdicts": verdicts,
         }
     except Exception as exc:
         return _fallback_recommendation(
@@ -677,9 +742,14 @@ _ROUTE_SYSTEM = """\
 chapters 每项字段 chapter,title,goal,arc_targets,volume_kr_targets,milestone_targets,
 must_advance,must_resolve,must_include_entities,must_not_reveal,must_not_resolve,
 forbidden_state_changes,target_state,success_criteria,hook_text,target_emotion,
-opening_hook_type,hook_type,expectation_score,beats。每章 3-6 个 beats，最后一项必须是 hook，
-并且至少一个 beat 的 constraint_level 为 hard。
-beats 字段：seq,beat_type,summary,value_axis,arc_id,constraint_level。
+opening_hook_type,hook_type,expectation_score,polarity,turning_point,promise_actions,beats。
+每章 3-6 个 beats，最后一项必须是 hook，并且至少一个 beat 的 constraint_level 为 hard。
+beats 字段：seq,beat_type,summary,value_axis,arc_id,constraint_level,witnesses；
+beat_type 取 setup/turn/payoff_beat/tension_point/aftermath/hook（aftermath=大爽点后的余韵）；
+payoff_beat 的 witnesses 列出必须作出可见反应的在场角色。
+polarity 为本章转向（+ 趋近目标 / - 远离目标 / ± 得失参半），同向不得连续超过 3 章；
+turning_point 为 action 或 revelation；promise_actions 为
+[{"promise_id"或"label","action":"plant|remind|advance|payoff"}]，长线承诺须定期提醒。
 opening_hook_type 只能来自：__OPENING_HOOK_MENU__；
 hook_type 只能来自：__ENDING_HOOK_MENU__。
 success_criteria 必须能验证 target_state；禁止项要明确到可从正文举证。
@@ -693,7 +763,12 @@ canon, plus the selected volume, active arcs, and future milestones as intent,
 generate three alternative routes for the requested future window. Return only
 a JSON array with route_title, route_summary, and chapters. Chapter items keep
 the supplied stable contract keys and contain 3-6 beats, ending in a hook with
-at least one hard beat. Write all visible values in natural American English.
+at least one hard beat. Beat types are setup, turn, payoff_beat, tension_point,
+aftermath (the cooldown after a big payoff), and hook; payoff beats list the
+witnesses who must visibly react. Each chapter also sets polarity ("+", "-" or
+"±"; never more than 3 chapters in one direction), turning_point ("action" or
+"revelation"), and promise_actions ([{"promise_id" or "label", "action":
+"plant|remind|advance|payoff"}]). Write all visible values in natural American English.
 Respect not_before boundaries, vary hook types, and make each chapter deliver a
 profile-appropriate change instead of imposing the same payoff pattern on every genre.
 """

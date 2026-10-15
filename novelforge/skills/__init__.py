@@ -2,6 +2,7 @@
 
 使用前用 register_default_skills(registry) 注册到 SkillRegistry。
 """
+from .chapter_batch_draft_skill import ChapterBatchDraftSkill
 from .chapter_draft_skill import ChapterDraftSkill
 from .cold_extract_skill import ColdExtractSkill
 from .continuity_check_skill import ContinuityCheckSkill
@@ -17,6 +18,7 @@ def register_default_skills(registry=None):
     reg = registry or get_registry()
     reg.register(PlannerSkill())
     reg.register(ChapterDraftSkill())
+    reg.register(ChapterBatchDraftSkill())   # v22/F6 多章连写
     reg.register(ContinuityCheckSkill())
     reg.register(CraftCheckSkill())
     reg.register(ColdExtractSkill())
@@ -28,6 +30,7 @@ def register_default_skills(registry=None):
 __all__ = [
     "PlannerSkill",
     "ChapterDraftSkill",
+    "ChapterBatchDraftSkill",
     "ColdExtractSkill",
     "ContinuityCheckSkill",
     "CraftCheckSkill",

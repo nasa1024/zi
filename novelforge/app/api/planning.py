@@ -306,11 +306,16 @@ def get_plan_versions(
         ).fetchall():
             item = dict(row)
             item["payload"] = _load_json(item.pop("payload_json"), {})
-            item["beats"] = [dict(beat) for beat in conn.execute(
-                "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level"
-                " FROM chapter_plan_version_beats WHERE plan_version_id=? ORDER BY seq",
+            item["beats"] = []
+            for beat in conn.execute(
+                "SELECT seq, beat_type, summary, value_axis, arc_id, constraint_level,"
+                " witnesses_json FROM chapter_plan_version_beats"
+                " WHERE plan_version_id=? ORDER BY seq",
                 (item["id"],),
-            ).fetchall()]
+            ).fetchall():
+                beat_item = dict(beat)
+                beat_item["witnesses"] = _load_json(beat_item.pop("witnesses_json"), [])
+                item["beats"].append(beat_item)
             out.append(item)
         return out
     finally:

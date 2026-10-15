@@ -11,6 +11,7 @@ from typing import Optional
 
 from ..config import NovelForgeConfig
 from ..contracts import FactCandidate, RunContext, normalize_proposal_fact_type
+from ..craft.extensions import build_draft_briefs, settle_steps
 from ..craft.pacing import PacingController
 from ..dedup.dedup_engine import DeduplicationEngine
 from ..governance.conflict import ConflictSet, classify_risk, detect_conflict
@@ -263,6 +264,19 @@ class Orchestrator:
         self._reg = registry or get_registry()
         self._cfg = cfg or NovelForgeConfig()
 
+    # 只读访问器（v22/F6 连写编排器复用同一 gateway/registry/cfg 构造批量调用）
+    @property
+    def gateway(self) -> LLMGateway:
+        return self._gw
+
+    @property
+    def registry(self) -> SkillRegistry:
+        return self._reg
+
+    @property
+    def config(self) -> NovelForgeConfig:
+        return self._cfg
+
     def generate_chapter(
         self,
         chapter: int,
@@ -273,7 +287,17 @@ class Orchestrator:
         keyword_query: Optional[str] = None,
         interaction_mode: Optional[str] = None,
         progress_cb=None,  # Optional[Callable[[str, str, dict], None]]
+        predrafted_text: Optional[str] = None,
+        predrafted_beats: Optional[list[dict]] = None,
+        batch_id: Optional[str] = None,
     ) -> ChapterOutcome:
+        """生成并提交一章。
+
+        v22/F6 多章连写：``predrafted_text`` 给出时跳过 DRAFT（正文来自一次长输出
+        连写调用），PLAN 优先采用 ``predrafted_beats``（起草该正文所依据的节拍），
+        其后的 check → revise → quality → persist → actuals → settle 与单章完全一致；
+        ``batch_id`` 记入 ``pipeline_run.batch_id``。三者缺省时行为与旧版逐字节一致。
+        """
         cfg = self._cfg
         ledger = self._gw.ledger
         writing_profile = get_project_writing_profile(conn, chapter=chapter)
@@ -294,6 +318,7 @@ class Orchestrator:
         _begin_pipeline_run(
             conn, chapter, cfg.project_id, run_id,
             writing_profile=writing_profile, model_id=generation_model,
+            batch_id=batch_id,
         )
         workspace: dict = {
             "chapter_goal": chapter_goal,
@@ -323,27 +348,11 @@ class Orchestrator:
 
         try:
             # ── 1. RECALL + PACING ────────────────────────────────────────────
-            entity_ids = entity_ids or _infer_entity_ids(conn, chapter)
-            mcfg = getattr(cfg, "memory", None)
-            _vec_on = getattr(cfg.recall, "enable_vector", False) and mcfg is not None
-            _embedder = None
-            if _vec_on:
-                from ..memory.embedding import build_embedder
-                _embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
-            recall_pack = gather_hard_context(
-                entity_ids,
-                chapter - 1,
-                conn,
+            recall_pack = gather_recall_pack(
+                cfg, conn, chapter,
+                entity_ids=entity_ids,
                 keyword_query=keyword_query,
-                max_keywords=cfg.recall.max_keywords,
-                context_window=cfg.recall.context_window_chapters,
-                summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
-                enable_summaries=getattr(cfg.recall, "enable_summaries", True),
-                embedder=_embedder,
-                enable_vector=_vec_on,
-                scene_query=keyword_query or chapter_goal,
-                vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
-                rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
+                chapter_goal=chapter_goal,
             )
             world_state = get_world_state(chapter - 1, conn)
             workspace["recall_pack"] = recall_pack
@@ -351,16 +360,7 @@ class Orchestrator:
             # M1-⑥：稳定前缀一次构建（含标题头，保证各 skill 的 user 消息从第 0 字节
             # 起完全一致），draft/check/revise 共享，吃 provider 前缀缓存
             content_language = writing_profile["content_language"]
-            _stable = recall_pack.to_stable_context_str(content_language)
-            _world_stable = (
-                (f"## Stable world context\n{_stable}" if content_language.startswith("en")
-                 else f"## 世界设定（稳定）\n{_stable}")
-                if _stable else ""
-            )
-            workspace["stable_context"] = "\n\n".join(
-                part for part in (profile_prompt_block(writing_profile), _world_stable)
-                if part
-            )
+            workspace["stable_context"] = compose_stable_context(writing_profile, recall_pack)
             workspace["dynamic_context"] = recall_pack.to_dynamic_context_str(
                 content_language,
             )
@@ -401,11 +401,21 @@ class Orchestrator:
             )
 
             # PacingController：读取节拍状态，附加建议到 chapter_goal
-            pacing_state = pacing.get_state(conn)
+            pacing_state = pacing.get_state(
+                conn, max_low_streak=getattr(getattr(cfg, "polarity", None),
+                                             "max_low_streak", None),
+            )
             workspace["pacing_state"] = pacing_state
             hint = _profile_pacing_hint(writing_profile, pacing, pacing_state)
             if hint:
                 workspace["chapter_goal"] = (chapter_goal + "\n" + hint).strip()
+
+            # v22：特性扩展的动态提示块（承诺提醒/转机要求/信息差机会…）。
+            # 只进动态段（planner 与 draft 均在契约之后渲染），绝不进入稳定前缀。
+            workspace["cfg"] = cfg   # 供 craft 扩展检查读取各特性配置（F2 plausibility）
+            workspace["craft_brief"] = build_draft_briefs(
+                conn, chapter, workspace, language=content_language, cfg=cfg,
+            )
 
             if progress_cb:
                 progress_cb("recall", "ok", {
@@ -416,7 +426,16 @@ class Orchestrator:
                 })
 
             # ── 2. PLAN ───────────────────────────────────────────────────────
-            if plan_context.has_locked_contract:
+            if predrafted_text is not None and predrafted_beats is not None:
+                # v22/F6：连写正文按这些节拍起草，校验必须对照同一份节拍。
+                workspace["beats"] = [dict(b) for b in predrafted_beats if isinstance(b, dict)]
+                workspace["planner_source"] = "batch"
+                if progress_cb:
+                    progress_cb("plan", "ok", {
+                        "source": "batch",
+                        "beats": len(workspace["beats"]),
+                    })
+            elif plan_context.has_locked_contract:
                 # 用户/Agent 已选细纲就是本章契约。Planner 不得静默重写。
                 workspace["beats"] = plan_context.selected_beats
                 workspace["planner_source"] = "selected_contract"
@@ -439,7 +458,12 @@ class Orchestrator:
             #             候选间无依赖 → 线程池并行，单章等待时间 ≈ 最慢一稿）──
             n_cands = max(1, min(3, getattr(getattr(cfg, "candidates", None),
                                             "n_candidates", 1) or 1))
-            if n_cands <= 1:
+            if predrafted_text is not None:
+                # v22/F6：正文已由多章连写调用产出，跳过起草；其后流程逐字节不变。
+                workspace["draft_text"] = predrafted_text
+                workspace["candidate_report"] = {"selected_by": "batch", "batch_id": batch_id}
+                draft_ok = bool(predrafted_text.strip())
+            elif n_cands <= 1:
                 draft_result = self._reg.invoke("chapter_draft", skill_ctx)
                 draft_ok = draft_result.ok
             else:
@@ -489,6 +513,7 @@ class Orchestrator:
                     gateway=self._gw,
                     judge_tier=getattr(cfg.candidates, "judge_tier", "mid"),
                     writing_profile=writing_profile,
+                    judge_both_orders=getattr(cfg.candidates, "judge_both_orders", True),
                 )
                 winner = cand_list[report["winner"]]
                 workspace["draft_text"] = winner["draft_text"]
@@ -520,6 +545,7 @@ class Orchestrator:
                         "winner": report["winner"],
                         "scores": report["scores"],
                         "reason": report["reason"],
+                        "judge_disagreement": report.get("judge_disagreement"),
                     })
 
             _draft_length = _content_units(
@@ -771,12 +797,18 @@ class Orchestrator:
             if workspace.get("quality_dimensions"):
                 run_detail = {**(run_detail or {}),
                               "quality_dimensions": workspace["quality_dimensions"]}
+            if workspace.get("quality_gate"):
+                run_detail = {**(run_detail or {}),
+                              "quality_gate": workspace["quality_gate"]}
             if settle["foreshadow_settle"] is not None:
                 run_detail = {**(run_detail or {}),
                               "foreshadow_settle": settle["foreshadow_settle"]}
             if settle.get("plan_reconcile") is not None:
                 run_detail = {**(run_detail or {}),
                               "plan_reconcile": settle["plan_reconcile"]}
+            if settle.get("extensions"):
+                run_detail = {**(run_detail or {}),
+                              "extensions": settle["extensions"]}
             if final_alignment_report is not None:
                 run_detail = {
                     **(run_detail or {}),
@@ -832,8 +864,19 @@ class Orchestrator:
             )
 
         except Exception as e:
+            # 未预期异常（含熔断）：回滚半截事务并把本次 run 标为 crashed，
+            # 不再留下 status='running' 的僵尸行等启动期 sweep。
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _fail_pipeline_run(conn, run_id, "exception", {
+                "chapter": chapter,
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+            })
             return ChapterOutcome(
-                chapter=chapter, ok=False,
+                chapter=chapter, ok=False, run_id=run_id,
                 error=str(e),
                 usage_tokens=ledger.tokens_spent - _tokens0,
                 usage_usd=ledger.usd_spent - _usd0,
@@ -861,7 +904,8 @@ class Orchestrator:
         workspace = skill_ctx.workspace
         out: dict = {"degraded": False, "error": None, "failed_steps": [],
                      "gate_outcome": None, "committed_ids": [], "queued": [],
-                     "foreshadow_settle": None, "plan_reconcile": None}
+                     "foreshadow_settle": None, "plan_reconcile": None,
+                     "extensions": {}}
         successful_candidates: list[FactCandidate] = []
 
         # ── 步骤 A：canon 结算（失败清理后重试一次）──────────────────────────
@@ -956,6 +1000,8 @@ class Orchestrator:
                 str((workspace.get("writing_profile") or {}).get("content_language") or "zh-CN"),
             ),
             conn,
+            actuals=workspace.get("chapter_actuals"),
+            contract=getattr(workspace.get("plan_context"), "current_contract", None),
         ))
         if getattr(cfg.recall, "enable_summaries", True) and draft_text:
             _step("summary", lambda: _persist_chapter_summary(
@@ -1017,90 +1063,130 @@ class Orchestrator:
                             "degraded" if "foreshadow_settle" in out["failed_steps"]
                             else "ok",
                             out["foreshadow_settle"] or {})
+
+        # v22：特性扩展的结算步骤（承诺账本校验 / 实际转向入库 …），各自降级互不阻塞。
+        if draft_text:
+            for ext_name, ext_settle in settle_steps():
+                def _run_extension(ext_name=ext_name, ext_settle=ext_settle) -> None:
+                    out["extensions"][ext_name] = ext_settle(
+                        conn, chapter, workspace, gateway=self._gw, cfg=cfg,
+                    ) or {}
+                _step(f"ext_{ext_name}", _run_extension)
         return out
 
     def _quality_pass(
         self, ctx: SkillContext, cfg, hard_blocks: list[dict],
         all_issues: list[dict], progress_cb=None,
     ) -> Optional[float]:
-        """M5-⑦：质量评分；低分或 craft warn 堆积时做一轮润色，取分高版本。
+        """M5-⑦：质量评分；未过质量门或 craft warn 堆积时做一轮润色，取更优版本。
 
-        维度分（钩子/节奏/人物/文笔）写入 workspace["quality_dimensions"]，
-        随 detail_json 落库；多候选复用评委总分的路径无维度分（省一次调用）。
+        v22/F4：是否"低质量"统一由 craft.quality_gate.evaluate_quality 判定（默认
+        gate_mode="dimensions"：任一维度低于下限即低分，总分只作展示；无维度分时回落
+        min_score）。维度分写入 workspace["quality_dimensions"]，门控结论（含当时阈值）
+        写入 workspace["quality_gate"]，随 detail_json 落库。
+
+        多候选路径的评委只给总分：gate_mode="total" 时照旧复用评委（两序均值）分数省一次
+        调用；维度门控下对终稿（已 revise）调用一次 score_chapter_detailed 取总分+维度，
+        与润色复评同一量表；评分失败时回落评委分数。
 
         Returns 最终质量分（评分失败返回 None，等同未启用）。
         """
         from ..craft.candidate_judge import score_chapter_detailed
+        from ..craft.quality_gate import (
+            GATE_DIMENSIONS,
+            evaluate_quality,
+            gate_mode,
+            is_improvement,
+            verdict_detail,
+        )
 
         qcfg = cfg.quality
         judge_tier = getattr(cfg.candidates, "judge_tier", "mid")
         chapter_goal = ctx.workspace.get("chapter_goal", "")
 
-        # 多候选模式下评委已给胜者打过分 → 复用，避免重复调用
-        score: Optional[float] = None
-        report = ctx.workspace.get("candidate_report") or {}
-        w = report.get("winner")
-        scores = report.get("scores") or []
-        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
-            score = float(scores[w])
-        if score is None:
-            detail = score_chapter_detailed(
+        def _score(text: str) -> Optional[dict]:
+            return score_chapter_detailed(
                 self._gw,
                 judge_tier,
                 chapter_goal,
-                ctx.workspace.get("draft_text", ""),
+                text,
                 ctx.extra.get("writing_profile")
                 or get_project_writing_profile(
                     ctx.conn, chapter=ctx.target_chapter,
                 ),
             )
+
+        # 多候选模式下评委已给胜者打过分（总分、无维度）
+        score: Optional[float] = None
+        dims: dict = {}
+        report = ctx.workspace.get("candidate_report") or {}
+        w = report.get("winner")
+        scores = report.get("scores") or []
+        if isinstance(w, int) and w < len(scores) and scores[w] is not None:
+            score = float(scores[w])
+        if score is None or gate_mode(qcfg) == GATE_DIMENSIONS:
+            detail = _score(ctx.workspace.get("draft_text", ""))
             if detail is not None:
                 score = detail["score"]
-                if detail["dimensions"]:
-                    ctx.workspace["quality_dimensions"] = detail["dimensions"]
+                dims = dict(detail["dimensions"] or {})
+                if dims:
+                    ctx.workspace["quality_dimensions"] = dims
         if score is None:
             return None
 
+        verdict = evaluate_quality(score, dims, qcfg)
         craft_warns = [i for i in ctx.workspace.get("craft_issues", [])
                        if i.get("severity") == "warn"]
+        # v22：扩展检查（承诺账本/天降外挂/极性/爽点反应）的 warn 是情节层提示
+        # （advisory），稳态长篇几乎每章都有；它们照常进 outcome.issues，润色触发时
+        # 也一并交给润色，但不计入"≥3 warn 才润色"的阈值——否则每章都多一轮 MID
+        # 润色+复评，且平分时 STRONG 初稿被 MID 改写稿替换。
+        polish_trigger_warns = [i for i in craft_warns if not i.get("advisory")]
         need_polish = (qcfg.polish_enabled and not hard_blocks and
-                       (score < qcfg.min_score or len(craft_warns) >= 3))
+                       (verdict.low or len(polish_trigger_warns) >= 3))
         if need_polish:
+            old_draft = ctx.workspace.get("draft_text", "")
+            old_craft = list(ctx.workspace.get("craft_issues", []))
             try:
-                old_draft = ctx.workspace.get("draft_text", "")
-                old_craft = list(ctx.workspace.get("craft_issues", []))
                 if self._gw.ledger and hasattr(self._gw.ledger, "charge_revise_round"):
                     self._gw.ledger.charge_revise_round()
                 polished = self._polish(ctx, craft_warns)
                 if polished and polished != old_draft:
                     ctx.workspace["draft_text"] = polished
                     self._reg.invoke("craft_check", ctx)
-                    new_detail = score_chapter_detailed(
-                        self._gw,
-                        judge_tier,
-                        chapter_goal,
-                        polished,
-                        ctx.extra.get("writing_profile")
-                        or get_project_writing_profile(
-                            ctx.conn, chapter=ctx.target_chapter,
-                        ),
+                    new_detail = _score(polished)
+                    new_verdict = (
+                        evaluate_quality(new_detail["score"], new_detail["dimensions"], qcfg)
+                        if new_detail is not None else None
                     )
-                    if new_detail is not None and new_detail["score"] >= score:
+                    if new_verdict is not None and is_improvement(
+                        score, verdict, new_detail["score"], new_verdict,
+                    ):
                         score = new_detail["score"]
-                        if new_detail["dimensions"]:
-                            ctx.workspace["quality_dimensions"] = new_detail["dimensions"]
+                        dims = dict(new_detail["dimensions"] or {})
+                        verdict = new_verdict
+                        # 维度分必须与保留的正文同源：新评分无维度时清掉旧稿的维度
+                        if dims:
+                            ctx.workspace["quality_dimensions"] = dims
+                        else:
+                            ctx.workspace.pop("quality_dimensions", None)
                     else:
                         # 润色变差 → 回退（HoLLMwood 渐进精炼 + 保底）
                         ctx.workspace["draft_text"] = old_draft
                         ctx.workspace["craft_issues"] = old_craft
             except Exception:
-                pass  # 预算熔断等 → 保留原稿原分
+                # 预算熔断等 → 保留原稿原分
+                ctx.workspace["draft_text"] = old_draft
+                ctx.workspace["craft_issues"] = old_craft
 
+        gate = verdict_detail(verdict, qcfg)
+        ctx.workspace["quality_gate"] = gate
         if progress_cb:
             progress_cb("quality", "ok", {
                 "score": score, "polished": need_polish,
                 "min_score": qcfg.min_score,
                 "dimensions": ctx.workspace.get("quality_dimensions"),
+                "gate": gate,
             })
         return score
 
@@ -1240,6 +1326,56 @@ def _infer_entity_ids(conn: sqlite3.Connection, chapter: int, limit: int = 10) -
     return [r["id"] for r in rows]
 
 
+def gather_recall_pack(
+    cfg: NovelForgeConfig,
+    conn: sqlite3.Connection,
+    chapter: int,
+    *,
+    entity_ids: Optional[list[str]] = None,
+    keyword_query: Optional[str] = None,
+    chapter_goal: str = "",
+):
+    """as_of(chapter-1) 的召回包。单章流程与多章连写（v22/F6）共用，保证两者
+    的稳定前缀逐字节一致。"""
+    entity_ids = entity_ids or _infer_entity_ids(conn, chapter)
+    mcfg = getattr(cfg, "memory", None)
+    _vec_on = getattr(cfg.recall, "enable_vector", False) and mcfg is not None
+    _embedder = None
+    if _vec_on:
+        from ..memory.embedding import build_embedder
+        _embedder = build_embedder(mcfg, dim=mcfg.embedding_dim)
+    return gather_hard_context(
+        entity_ids,
+        chapter - 1,
+        conn,
+        keyword_query=keyword_query,
+        max_keywords=cfg.recall.max_keywords,
+        context_window=cfg.recall.context_window_chapters,
+        summary_window=getattr(cfg.recall, "summary_window_chapters", 5),
+        enable_summaries=getattr(cfg.recall, "enable_summaries", True),
+        embedder=_embedder,
+        enable_vector=_vec_on,
+        scene_query=keyword_query or chapter_goal,
+        vector_top_k=getattr(mcfg, "vector_top_k", 8) if mcfg else 8,
+        rrf_k=getattr(mcfg, "rrf_k", 60) if mcfg else 60,
+    )
+
+
+def compose_stable_context(writing_profile: dict, recall_pack) -> str:
+    """稳定前缀 = 锁定写作配置 + 稳定世界设定（含标题头）。只放慢变内容。"""
+    content_language = writing_profile["content_language"]
+    _stable = recall_pack.to_stable_context_str(content_language)
+    _world_stable = (
+        (f"## Stable world context\n{_stable}" if content_language.startswith("en")
+         else f"## 世界设定（稳定）\n{_stable}")
+        if _stable else ""
+    )
+    return "\n\n".join(
+        part for part in (profile_prompt_block(writing_profile), _world_stable)
+        if part
+    )
+
+
 def _content_units(text: str, language: str) -> int:
     from ..text_metrics import count_content_units
 
@@ -1247,28 +1383,40 @@ def _content_units(text: str, language: str) -> int:
 
 
 def _profile_pacing_hint(profile: dict, pacing: PacingController, state) -> str:
-    """Keep legacy cadence for Chinese; English rules follow the profile."""
+    """Keep legacy cadence for Chinese; English rules follow the profile.
+
+    v22/F3: once ``state.needs_turn`` (``max_low_streak`` chapters in a row turned
+    against the protagonist) the next chapter must turn, whatever the profile
+    (Story Grid: every chapter turns).  That note comes first; the profile's
+    cadence note may follow it.
+    """
     if not str(profile.get("content_language") or "").startswith("en"):
         return pacing.recommend_beat_hint(state)
+    notes: list[str] = []
+    if getattr(state, "needs_turn", False):
+        notes.append(
+            f"Pacing note: the last {state.low_streak} chapters all turned against the "
+            "protagonist (polarity -). This chapter must turn toward the goal "
+            "(polarity + or ±) so the pressure does not go numb."
+        )
+    quality = profile.get("quality_rules") or {}
     if state.needs_cooldown:
-        return (
+        notes.append(
             "Pacing note: recent chapters have stayed at high tension. Let this chapter "
             "breathe through character reaction, consequence, or relationship movement."
         )
-    quality = profile.get("quality_rules") or {}
-    if not quality.get("requires_progress_event"):
-        return ""
-    if state.needs_big_payoff and state.buildup >= 5:
-        return (
-            "Pacing note: deliver an earned major progress event that resolves prior setup "
-            "and creates a concrete new cost or objective."
-        )
-    if state.needs_small_payoff:
-        return (
-            "Pacing note: include at least one observable, earned progress event or useful "
-            "feedback loop in this chapter."
-        )
-    return ""
+    elif quality.get("requires_progress_event"):
+        if state.needs_big_payoff and state.buildup >= 5:
+            notes.append(
+                "Pacing note: deliver an earned major progress event that resolves prior "
+                "setup and creates a concrete new cost or objective."
+            )
+        elif state.needs_small_payoff:
+            notes.append(
+                "Pacing note: include at least one observable, earned progress event or "
+                "useful feedback loop in this chapter."
+            )
+    return "\n".join(notes)
 
 
 def _proposals_to_candidates(
@@ -1347,8 +1495,12 @@ def _begin_pipeline_run(
     *,
     writing_profile: Optional[dict] = None,
     model_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
 ) -> None:
-    """在 pipeline_run 表插入 'running' 行（F6 状态机开始）。"""
+    """在 pipeline_run 表插入 'running' 行（F6 状态机开始）。
+
+    ``batch_id``（v22 多章连写）记入 ``pipeline_run.batch_id``；老库无此列时静默跳过。
+    """
     try:
         profile = writing_profile or {}
         try:
@@ -1370,6 +1522,13 @@ def _begin_pipeline_run(
                 " VALUES(?, ?, ?, 'running')",
                 (run_id, chapter, project_id),
             )
+        if batch_id:
+            try:
+                conn.execute(
+                    "UPDATE pipeline_run SET batch_id=? WHERE run_id=?", (batch_id, run_id),
+                )
+            except sqlite3.OperationalError:
+                pass   # pre-v22 库
         conn.commit()
     except Exception:
         pass

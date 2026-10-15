@@ -10,7 +10,12 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ..control_plane.llm.runtime import build_project_config, build_project_gateway
+from ..control_plane.llm.runtime import (
+    DEFAULT_PLANNING_HORIZON,
+    build_project_config,
+    build_project_gateway,
+    max_planning_horizon,
+)
 from ..control_plane.skill_base import SkillContext
 from ..control_plane.skill_registry import SkillRegistry
 from ..db.connection import get_meta
@@ -78,7 +83,13 @@ class PlanningService:
         candidate_count: int = 3,
     ) -> GeneratedPlanWindow:
         """Generate validated candidates without mutating planning tables."""
-        horizon = max(1, min(10, int(horizon)))
+        limit = DEFAULT_PLANNING_HORIZON
+        if source == "volume_api":
+            # 卷规划是单次长输出：长输出模型（Gemini 4）可一次覆盖更大窗口
+            limit = max_planning_horizon(
+                build_project_config(project_id, self._db_path(conn), conn)
+            )
+        horizon = max(1, min(limit, int(horizon)))
         if start_chapter < 1:
             raise ValueError("start_chapter must be positive")
         if source == "volume_api":

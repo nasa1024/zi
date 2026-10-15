@@ -37,9 +37,11 @@ _SYSTEM = """\
 你是 NovelForge 的策划助手。根据提供的召回上下文和章节目标，
 生成本章节的 beat sheet。要求：
 - 4~8 条 beats
-- beat_type 限于 setup/turn/payoff_beat/tension_point/hook
+- beat_type 限于 setup/turn/payoff_beat/tension_point/aftermath/hook
+  （aftermath = 高潮后的平复与余韵，用在大爽点之后）
 - 末尾必须有一条 hook beat 作为章末悬念
-- 以 JSON 数组输出，每条字段: beat_type, summary, value_axis
+- 以 JSON 数组输出，每条字段: beat_type, summary, value_axis；
+  payoff_beat 另加 witnesses（必须对爽点作出可见反应的在场非主角角色名数组）
 - value_axis: 用一个词描述本 beat 的价值轴变化（如"希望↑"、"权力↓"）
 只输出 JSON 数组，不要任何额外说明。
 """
@@ -48,9 +50,11 @@ _SYSTEM_EN = """\
 You are zi's chapter planner. Build a beat sheet that follows the supplied
 world state, locked chapter contract, and writing profile.
 - Return a JSON array with 4-8 beats.
-- beat_type must be setup, turn, payoff_beat, tension_point, or hook.
+- beat_type must be setup, turn, payoff_beat, tension_point, aftermath, or hook
+  (aftermath = the cooldown/resonance right after a big payoff).
 - The final beat must be a hook, but its intensity and kind must fit the profile.
-- Each item has beat_type, summary, and value_axis.
+- Each item has beat_type, summary, and value_axis; a payoff_beat also lists
+  witnesses: the non-protagonist characters present who must visibly react.
 - Write every user-visible value in natural American English.
 - Do not force a power payoff into genres whose profile calls for clues,
   relationships, low-pressure rewards, or costly consequences.
@@ -94,10 +98,12 @@ class PlannerSkill:
         ) or ("(No recalled context)" if is_english else "(无召回上下文)")
         future_plan = ctx.workspace.get("future_plan_context", "")
 
+        craft_brief = ctx.workspace.get("craft_brief", "")  # v22 特性扩展动态提示
         if is_english:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{future_plan}\n\n" if future_plan else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + "## Planning Task\n"
                 + f"Chapter: {ctx.target_chapter}\n"
                 + f"Chapter goal: {chapter_goal or 'Advance the story naturally within the profile.'}"
@@ -106,6 +112,7 @@ class PlannerSkill:
             user_msg = (
                 f"{context_block}\n\n"
                 + (f"{future_plan}\n\n" if future_plan else "")
+                + (f"{craft_brief}\n\n" if craft_brief else "")
                 + f"## 规划任务\n"
                 f"当前章节：第 {ctx.target_chapter} 章\n"
                 f"章节目标：{chapter_goal or '按情节自然发展'}"
@@ -133,6 +140,7 @@ class PlannerSkill:
         beats = result.value if result.value is not None else _parse_beats(
             resp.text, content_language=profile["content_language"]
         )
+        _canonicalize_witnesses(beats)
         ctx.workspace["beats"] = beats
         ctx.workspace["planner_raw"] = resp.text
         ctx.workspace["planner_tier_used"] = result.tier_used
@@ -188,6 +196,19 @@ def _parse_beats_strict(
             " ".join(str(b.get("summary") or "") for b in beats), content_language
         ):
             return None
+    return _canonicalize_witnesses(beats)
+
+
+def _canonicalize_witnesses(beats: list) -> list:
+    """v22/F5：把 beat 的 witnesses 规整为名字列表（LLM 常回分隔字符串）。
+
+    仅处理带 witnesses 键的 dict beat，原地修改并返回同一列表。
+    """
+    from ..planning.contract_fields import normalize_witnesses
+
+    for b in beats or []:
+        if isinstance(b, dict) and "witnesses" in b:
+            b["witnesses"] = normalize_witnesses(b.get("witnesses"))
     return beats
 
 

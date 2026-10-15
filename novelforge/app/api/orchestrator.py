@@ -9,8 +9,10 @@ from fastapi.responses import StreamingResponse
 
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
+    BatchRunRequest, BatchRunResponse,
     BudgetSpent,
-    ChapterStat, NextChapterSuggestion,
+    ChapterStat, DraftBatchChapterInfo, DraftBatchDetail, DraftBatchInfo,
+    NextChapterSuggestion,
     PipelineRunDetail, PipelineRunRecord,
     PipelineRunRequest, PipelineRunResponse,
     PipelineStats, SelectCandidateRequest,
@@ -243,6 +245,254 @@ async def pipeline_run_stream(
     )
 
 
+# ── v22/F6 多章连写 ────────────────────────────────────────────────────────────
+
+def _batch_orchestrator_factory(cfg: NovelForgeConfig):
+    """make_orchestrator(budget_scale=1)：每次返回带全新 gateway/ledger 的编排器。
+
+    连写调用一次起草 N 章，熔断器按 max_tokens//2 预留，故单章预算 ×N。
+    ``_build_orch`` 在调用时解析（测试可 monkeypatch）。
+    """
+    import copy
+
+    def make(budget_scale: int = 1) -> Orchestrator:
+        local = copy.deepcopy(cfg)
+        scale = max(1, int(budget_scale or 1))
+        if scale > 1:
+            local.budget.max_tokens_per_chapter = int(local.budget.max_tokens_per_chapter * scale)
+            local.budget.max_usd_per_chapter = float(local.budget.max_usd_per_chapter * scale)
+        return _build_orch(local)
+
+    return make
+
+
+def _batch_params(conn, project_id: str, req: BatchRunRequest,
+                  cfg: NovelForgeConfig) -> tuple[int, int, dict[str, str]]:
+    from ..chapter_suggest import next_chapter_no
+    from ..security import sanitize_user_text
+
+    start = req.start_chapter or next_chapter_no(conn, project_id)[0]
+    count = req.chapters or max(1, int(cfg.batch.max_chapters))
+    goals = {
+        str(int(k)): sanitize_user_text(v)
+        for k, v in (req.chapter_goals or {}).items()
+        if str(k).strip().isdigit() and (v or "").strip()
+    }
+    return start, count, goals
+
+
+def _batch_error_response(start: int, error: str) -> BatchRunResponse:
+    return BatchRunResponse(mode="sequential", status="failed", next_chapter=start, error=error)
+
+
+@router.post("/{project_id}/pipeline/batch", response_model=BatchRunResponse)
+def pipeline_batch(
+    project_id: str,
+    req: BatchRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """多章连写（同步）：长输出模型一次起草 N 章再逐章校验提交；否则逐章顺序写。"""
+    from ...control_plane.batch import run_batch
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    cfg = _make_cfg(project_id, req, registry)
+    conn = registry.open_conn(project_id)
+    start = req.start_chapter or 1
+    try:
+        start, count, goals = _batch_params(conn, project_id, req, cfg)
+        outcome = run_batch(
+            conn,
+            start_chapter=start,
+            count=count,
+            make_orchestrator=_batch_orchestrator_factory(cfg),
+            chapter_goals=goals,
+            origin="api",
+            interaction_mode=req.interaction_mode,
+        )
+        return BatchRunResponse(**outcome.to_summary())
+    except HTTPException:
+        # 404/409 等协议错误照常以 HTTP 状态返回，不包装成 200 + status=failed
+        raise
+    except Exception as e:
+        return _batch_error_response(start, str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/{project_id}/pipeline/batch/stream")
+async def pipeline_batch_stream(
+    project_id: str,
+    req: BatchRunRequest,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """多章连写 SSE：batch_start → [batch_draft] → stage(带 chapter)… → chapter_done …
+    → [batch_discarded → batch_regenerate …] → batch_done，随后关流。异常推 error。
+
+    客户端断开（停止/关页）→ 当前章完成后停止，剩余章作废（status=canceled）；
+    需要后台长跑请用 autopilot。
+    """
+    import asyncio
+    import threading
+
+    from ...control_plane.batch import run_batch
+
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    client_gone = threading.Event()
+
+    def _enqueue(item) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            pass    # 事件循环已关闭（服务停机）：丢弃进度，不影响连写收尾
+
+    def _push(data: dict) -> None:
+        _enqueue(f"data: {_json.dumps(data, ensure_ascii=False, default=str)}\n\n")
+
+    def run_sync() -> None:
+        conn = None
+        try:
+            cfg = _make_cfg(project_id, req, registry)
+            conn = registry.open_conn(project_id)
+            start, count, goals = _batch_params(conn, project_id, req, cfg)
+            run_batch(
+                conn,
+                start_chapter=start,
+                count=count,
+                make_orchestrator=_batch_orchestrator_factory(cfg),
+                chapter_goals=goals,
+                origin="api",
+                progress_cb=_push,
+                cancel_cb=client_gone.is_set,
+                interaction_mode=req.interaction_mode,
+            )
+        except CircuitTripped as e:
+            _push({"event": "error", "message": str(e), "type": "circuit_broken"})
+        except Exception as e:
+            _push({"event": "error", "message": str(e)})
+        finally:
+            if conn is not None:
+                conn.close()
+            _enqueue(None)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.run_in_executor(executor, run_sync)
+    executor.shutdown(wait=False)
+
+    async def event_gen():
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            client_gone.set()   # 正常结束时 run_batch 已返回，置位无副作用
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _draft_batch_info(conn, row) -> dict:
+    counts: dict[str, int] = {}
+    try:
+        for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM draft_batch_chapters WHERE batch_id=?"
+            " GROUP BY status", (row["id"],),
+        ).fetchall():
+            counts[r["status"]] = r["n"]
+    except Exception:
+        pass
+    try:
+        detail = _json.loads(row["detail_json"] or "{}")
+    except Exception:
+        detail = {}
+    return {
+        "batch_id": row["id"],
+        "start_chapter": row["start_chapter"],
+        "end_chapter": row["end_chapter"],
+        "status": row["status"],
+        "origin": row["origin"],
+        "model_id": row["model_id"],
+        "tokens_spent": row["tokens_spent"] or 0,
+        "usd_spent": row["usd_spent"] or 0.0,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "detail": detail if isinstance(detail, dict) else {},
+        "counts": counts,
+    }
+
+
+@router.get("/{project_id}/pipeline/batches", response_model=list[DraftBatchInfo])
+def list_draft_batches(
+    project_id: str,
+    limit: int = 20,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """最近的多章连写批次（每次长输出调用一行，含重写批次）。"""
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM draft_batches ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (max(1, min(200, limit)),),
+            ).fetchall()
+        except Exception:
+            return []
+        return [DraftBatchInfo(**_draft_batch_info(conn, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pipeline/batches/{batch_id}", response_model=DraftBatchDetail)
+def get_draft_batch(
+    project_id: str,
+    batch_id: str,
+    include_text: bool = False,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """单个连写批次：逐章状态（pending/accepted/rejected/discarded）、对应 run 与原因。"""
+    if registry.get(project_id) is None:
+        raise HTTPException(404, f"项目不存在: {project_id}")
+    conn = registry.open_conn(project_id)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT * FROM draft_batches WHERE id=?", (batch_id,),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is None:
+            raise HTTPException(404, f"批次不存在: {batch_id}")
+        chapters = [
+            DraftBatchChapterInfo(
+                chapter=r["chapter"],
+                seq=r["seq"],
+                status=r["status"],
+                run_id=r["run_id"],
+                reason=r["reason"],
+                length=len(r["draft_text"] or ""),
+                draft_text=r["draft_text"] if include_text else None,
+                updated_at=r["updated_at"],
+            )
+            for r in conn.execute(
+                "SELECT * FROM draft_batch_chapters WHERE batch_id=? ORDER BY seq",
+                (batch_id,),
+            ).fetchall()
+        ]
+        return DraftBatchDetail(**_draft_batch_info(conn, row), chapters=chapters)
+    finally:
+        conn.close()
+
+
 @router.get("/{project_id}/pipeline/next", response_model=NextChapterSuggestion)
 def pipeline_next(
     project_id: str,
@@ -293,22 +543,69 @@ def _payoff_closed_chapters(conn) -> set[int]:
     return closed
 
 
+# v22/F4：看板只需 detail_json 的三个子字段；在 SQL 里抽取，避免逐章 json.loads 整个
+# detail_json（含全部候选正文，多候选长篇每次刷新要解析数十 MB）。非法 JSON → NULL。
+_STAT_DETAIL_COLUMNS = (
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_extract(pr.detail_json, '$.quality_gate') END AS gate_json,"
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_extract(pr.detail_json, '$.quality_dimensions') END AS dims_json,"
+    "       CASE WHEN json_valid(pr.detail_json)"
+    "            THEN json_type(pr.detail_json, '$.judge_disagreement') END AS judge_type"
+)
+
+
+def _json_fragment(raw):
+    """json_extract 抽出的对象/数组是 JSON 文本；解析失败或非文本 → None。"""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _stat_signals(gate_json, dims_json, judge_type, score, default_qcfg) -> tuple:
+    """v22/F4：从 detail_json 子字段复算本章质量门结论 + 读取评委两序一致性。
+
+    质量门按该 run 落库的阈值（detail_json["quality_gate"]）复算，换稿后分数/维度
+    更新也随之生效；旧数据无 quality_gate 时用默认 QualityConfig（无维度分 → 旧口径
+    score < min_score）。入参为 ``_STAT_DETAIL_COLUMNS`` 抽出的三列。
+    Returns (quality_low|None, reasons, judge_disagreement|None)。
+    """
+    from ...craft.quality_gate import MODE_UNSCORED, evaluate_quality
+
+    gate_cfg = _json_fragment(gate_json)
+    if not isinstance(gate_cfg, dict):
+        gate_cfg = default_qcfg
+    verdict = evaluate_quality(score, _json_fragment(dims_json), gate_cfg)
+    quality_low = None if verdict.mode == MODE_UNSCORED else verdict.low
+    disagreement = {"true": True, "false": False}.get(judge_type)
+    return quality_low, list(verdict.reasons), disagreement
+
+
 @router.get("/{project_id}/pipeline/stats", response_model=PipelineStats)
 def pipeline_stats(
     project_id: str,
     registry: ProjectRegistry = Depends(get_registry),
 ):
-    """M6 质量趋势：逐章序列（每章取最新 completed run）+ 汇总指标。"""
+    """M6 质量趋势：逐章序列（每章取最新 completed run）+ 汇总指标。
+
+    v22/F4：low_quality_count 按分维度质量门统计；judge_* 为评委正反两序不一致率
+    （分母只计做过两序校验的章）。
+    """
     from ...config import QualityConfig
 
     if registry.get(project_id) is None:
         raise HTTPException(404, f"项目不存在: {project_id}")
-    threshold = QualityConfig().min_score
+    default_qcfg = QualityConfig()
+    threshold = default_qcfg.min_score
     conn = registry.open_conn(project_id)
     try:
         rows = conn.execute(
             "SELECT pr.chapter, pr.quality_score, pr.finished_at, di.word_count,"
-            "       pr.tokens_spent, pr.usd_spent"
+            "       pr.tokens_spent, pr.usd_spent,"
+            + _STAT_DETAIL_COLUMNS +
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id=? AND pr.status='completed'"
@@ -321,24 +618,40 @@ def pipeline_stats(
         ).fetchall()
 
         closed = _payoff_closed_chapters(conn)
-        series = [ChapterStat(
-            chapter=r["chapter"], word_count=r["word_count"],
-            quality_score=r["quality_score"], finished_at=r["finished_at"],
-            tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
-            payoff_closed=r["chapter"] in closed,
-        ) for r in rows]
+        series = []
+        for r in rows:
+            quality_low, gate_reasons, judge_disagreement = _stat_signals(
+                r["gate_json"], r["dims_json"], r["judge_type"],
+                r["quality_score"], default_qcfg,
+            )
+            series.append(ChapterStat(
+                chapter=r["chapter"], word_count=r["word_count"],
+                quality_score=r["quality_score"], finished_at=r["finished_at"],
+                tokens_spent=r["tokens_spent"], usd_spent=r["usd_spent"],
+                payoff_closed=r["chapter"] in closed,
+                quality_low=quality_low,
+                quality_gate_reasons=gate_reasons,
+                judge_disagreement=judge_disagreement,
+            ))
         scores = [s.quality_score for s in series if s.quality_score is not None]
+        judge_runs = sum(1 for s in series if s.judge_disagreement is not None)
+        judge_disagreements = sum(1 for s in series if s.judge_disagreement)
         return PipelineStats(
             series=series,
             chapters_completed=len(series),
             total_words=sum(s.word_count or 0 for s in series),
             avg_quality_score=round(sum(scores) / len(scores), 2) if scores else None,
-            low_quality_count=sum(1 for s in scores if s < threshold),
+            low_quality_count=sum(1 for s in series if s.quality_low),
             min_score_threshold=threshold,
             total_tokens_spent=sum(s.tokens_spent or 0 for s in series),
             total_usd_spent=round(sum(s.usd_spent or 0.0 for s in series), 4),
             payoff_loop_rate=(round(sum(1 for s in series if s.payoff_closed)
                                     / len(series), 3) if series else None),
+            judge_runs=judge_runs,
+            judge_disagreements=judge_disagreements,
+            judge_disagreement_rate=(
+                round(judge_disagreements / judge_runs, 3) if judge_runs else None
+            ),
         )
     finally:
         conn.close()
@@ -355,7 +668,8 @@ def list_pipeline_runs(
     try:
         rows = conn.execute(
             "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
-            "       pr.quality_score, pr.tokens_spent, pr.usd_spent, di.word_count"
+            "       pr.quality_score, pr.tokens_spent, pr.usd_spent, pr.batch_id,"
+            "       di.word_count"
             " FROM pipeline_run pr"
             " LEFT JOIN draft_index di ON di.id = pr.draft_id"
             " WHERE pr.project_id = ?"
@@ -373,6 +687,7 @@ def list_pipeline_runs(
                 quality_score=r["quality_score"],
                 tokens_spent=r["tokens_spent"],
                 usd_spent=r["usd_spent"],
+                batch_id=r["batch_id"],
             )
             for r in rows
         ]
@@ -402,7 +717,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     row = conn.execute(
         "SELECT pr.run_id, pr.chapter, pr.status, pr.started_at, pr.finished_at,"
         "       pr.quality_score, pr.tokens_spent, pr.usd_spent, pr.detail_json,"
-        "       di.word_count, di.file_path"
+        "       pr.batch_id, di.word_count, di.file_path"
         " FROM pipeline_run pr"
         " LEFT JOIN draft_index di ON di.id = pr.draft_id"
         " WHERE pr.run_id = ? AND pr.project_id = ?",
@@ -429,6 +744,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
     plan_reconcile = None
     alignment_report = None
     recommended_plan_action = None
+    quality_gate = None
+    judge_disagreement = None
     if row["detail_json"]:
         try:
             detail = _json.loads(row["detail_json"])
@@ -441,6 +758,10 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
             plan_reconcile = detail.get("plan_reconcile")
             alignment_report = detail.get("alignment_report")
             recommended_plan_action = detail.get("recommended_plan_action")
+            if isinstance(detail.get("quality_gate"), dict):
+                quality_gate = detail["quality_gate"]
+            if isinstance(detail.get("judge_disagreement"), bool):
+                judge_disagreement = detail["judge_disagreement"]
             scores = detail.get("scores") or []
             hard_blocks = detail.get("hard_blocks") or []
             continuity_blocks = detail.get("continuity_blocks") or []
@@ -486,6 +807,7 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         quality_score=row["quality_score"],
         tokens_spent=row["tokens_spent"],
         usd_spent=row["usd_spent"],
+        batch_id=row["batch_id"],
         draft_text=draft_text,
         candidates=candidates,
         winner_index=winner_index,
@@ -497,6 +819,8 @@ def _load_run_detail(conn, registry: ProjectRegistry, project_id: str, run_id: s
         plan_reconcile=plan_reconcile,
         alignment_report=alignment_report,
         recommended_plan_action=recommended_plan_action,
+        quality_gate=quality_gate,
+        judge_disagreement=judge_disagreement,
     )
 
 
@@ -522,7 +846,9 @@ def select_candidate(
     )
     from ...control_plane.skill_base import SkillContext
     from ...control_plane.skill_registry import SkillRegistry
+    from ...craft.extensions import settle_steps
     from ...craft.pacing import PacingController
+    from ...craft.quality_gate import evaluate_quality, verdict_detail
     from ...memory.l1_atoms import persist_proposal_atoms
     from ...memory.recall import gather_hard_context
     from ...planning.alignment import (
@@ -822,10 +1148,38 @@ def select_candidate(
                 "recommended_plan_action"
             ]
             detail["chapter_actuals_id"] = alignment.actuals_id
+            # v22：特性扩展的确定性结算随换稿重跑（极性/游标按新稿 actuals 重算、
+            # 爽点反应覆盖率与承诺提醒按新稿重报）。各步均为按章 upsert/只读，可重复；
+            # 单步失败只记入报告，不影响已落袋的换稿。
+            settle_workspace = {
+                "draft_text": chosen_text,
+                "beats": validation_beats,
+                "plan_context": plan_context,
+                "chapter_actuals": alignment.actuals,
+                "writing_profile": writing_profile,
+            }
+            extensions: dict = {}
+            for ext_name, ext_settle in settle_steps():
+                try:
+                    extensions[ext_name] = ext_settle(
+                        conn, chapter, settle_workspace, gateway=gateway, cfg=cfg,
+                    ) or {}
+                except Exception as e:
+                    extensions[ext_name] = {"error": f"{type(e).__name__}: {e}"}
+            detail["extensions"] = extensions
             if validation.get("quality_score") is not None:
                 detail["quality_dimensions"] = (
                     validation.get("quality") or {}
                 ).get("dimensions") or {}
+                # v22/F4：门控结论随换稿复算（沿用该 run 落库时的阈值）
+                gate_cfg = detail.get("quality_gate")
+                if not isinstance(gate_cfg, dict):
+                    gate_cfg = cfg.quality
+                detail["quality_gate"] = verdict_detail(
+                    evaluate_quality(validation["quality_score"],
+                                     detail["quality_dimensions"], gate_cfg),
+                    gate_cfg,
+                )
 
         detail["winner"] = idx
         detail["selected_by"] = "human"

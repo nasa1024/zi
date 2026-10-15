@@ -19,6 +19,7 @@ from ..ids import new_id
 _OPEN_STATES = ("planted", "reinforced", "misled", "overdue")
 _MAP_THRESHOLD = 0.5      # ≥ 此值：映射为既有伏笔的 mention
 _NEW_THRESHOLD = 0.25     # ≤ 此值：自动建档；(0.25, 0.5) 拒绝（疑似重述）
+_MAX_EVALUATED = 20       # 每章交给结算员评估的未解伏笔上限
 
 _SETTLE_SYSTEM = """\
 你是 NovelForge 的伏笔结算员。对照「未解伏笔列表」审读本章终稿，判定每条伏笔在本章的遭遇：
@@ -26,6 +27,8 @@ _SETTLE_SYSTEM = """\
 - advance：有实质推进（新线索浮现/逼近真相/相关冲突升级）
 - payoff：完全兑现回收（真相揭开/承诺兑现/反转落地）
 未在本章出现的伏笔不要输出。advance/payoff 必须给 evidence（逐字摘自终稿原文，10-80字）。
+列表标签仅供参考：长线/短线/微线=承诺跨度；读者可见=读者已知的悬问，仅作者知=暗线；
+父承诺=外层承诺（后开先关：内层未收时，外层通常还不是 payoff）。
 另外：若本章埋下了列表之外的新伏笔（明示的未解之谜/预言/反常细节），列入 new_hooks
 （label ≤20字、description ≤80字、entity=关联角色名可空）；没有则空数组。
 输出 JSON 对象（不要其他说明）：
@@ -44,12 +47,7 @@ def settle_foreshadow(
     """
     report = {"mentions": 0, "advances": 0, "payoffs": 0,
               "new_created": [], "rejected": [], "dropped_no_evidence": 0}
-    open_rows = [dict(r) for r in conn.execute(
-        "SELECT f.id, f.label, f.description, f.state, f.due_chapter,"
-        "       e.canonical_name AS entity_name"
-        " FROM foreshadow f LEFT JOIN entities e ON e.id = f.related_entity_id"
-        f" WHERE f.state IN ({','.join('?' * len(_OPEN_STATES))})"
-        " ORDER BY f.planted_chapter LIMIT 20", _OPEN_STATES).fetchall()]
+    open_rows = _evaluated_open_rows(conn, draft_text)
 
     data = _call_settler(gateway, tier, open_rows, chapter, draft_text)
     if data is None:
@@ -96,6 +94,63 @@ def settle_foreshadow(
     return report
 
 
+def _evaluated_open_rows(conn: sqlite3.Connection, draft_text: str) -> list[dict]:
+    """The ≤20 open promises the settler evaluates this chapter (v22/F1).
+
+    Priority: promises the final draft visibly references (label/short
+    description, see ``promise_ledger.DraftMatcher``) → reader-visible before
+    hidden → longest untouched first (so dormant long lines that the drafter
+    was reminded about are never starved by the cap) → oldest → id.
+    """
+    from .promise_ledger import DraftMatcher, last_touch_chapter
+
+    ph = ",".join("?" * len(_OPEN_STATES))
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT f.id, f.label, f.description, f.state, f.due_chapter, f.planted_chapter,"
+            "       f.last_mentioned_chapter, f.last_advanced_chapter,"
+            "       f.line_type, f.visibility, p.label AS parent_label,"
+            "       e.canonical_name AS entity_name"
+            " FROM foreshadow f LEFT JOIN entities e ON e.id = f.related_entity_id"
+            " LEFT JOIN foreshadow p ON p.id = f.parent_id"
+            f" WHERE f.state IN ({ph})", _OPEN_STATES).fetchall()]
+    except sqlite3.OperationalError:   # v22 之前的库：无承诺列，保留旧口径
+        return [dict(r) for r in conn.execute(
+            "SELECT f.id, f.label, f.description, f.state, f.due_chapter,"
+            "       e.canonical_name AS entity_name"
+            " FROM foreshadow f LEFT JOIN entities e ON e.id = f.related_entity_id"
+            f" WHERE f.state IN ({ph})"
+            f" ORDER BY f.planted_chapter LIMIT {_MAX_EVALUATED}", _OPEN_STATES).fetchall()]
+    matcher = DraftMatcher(draft_text)
+    rows.sort(key=lambda r: (
+        not matcher.mentions(r["label"], r["description"]),
+        r.get("visibility") != "reader",
+        last_touch_chapter(r),
+        r.get("planted_chapter") or 0,
+        str(r["id"]),
+    ))
+    return rows[:_MAX_EVALUATED]
+
+
+_LINE_TAGS = {"long": "长线", "short": "短线", "micro": "微线"}
+_VISIBILITY_TAGS = {"reader": "读者可见", "hidden": "仅作者知"}
+
+
+def _fs_line(r: dict) -> str:
+    line = f"- id={r['id']} label={r['label']} 描述={r['description']}"
+    tags = [t for t in (_LINE_TAGS.get(r.get("line_type") or ""),
+                        _VISIBILITY_TAGS.get(r.get("visibility") or "")) if t]
+    if tags:
+        line += f"［{'·'.join(tags)}］"
+    if r.get("due_chapter"):
+        line += f"（第{r['due_chapter']}章到期）"
+    if r.get("entity_name"):
+        line += f"（角色：{r['entity_name']}）"
+    if r.get("parent_label"):
+        line += f"（父承诺：{r['parent_label']}）"
+    return line
+
+
 # ── LLM 调用与解析 ────────────────────────────────────────────────────────────
 
 def _parse_settle_json(text: str) -> Optional[dict]:
@@ -116,11 +171,7 @@ def _call_settler(gateway, tier: str, open_rows: list[dict],
         mt = ModelTier(tier)
     except ValueError:
         mt = ModelTier.FAST
-    fs_lines = "\n".join(
-        f"- id={r['id']} label={r['label']} 描述={r['description']}"
-        + (f"（第{r['due_chapter']}章到期）" if r["due_chapter"] else "")
-        + (f"（角色：{r['entity_name']}）" if r.get("entity_name") else "")
-        for r in open_rows) or "（当前没有未解伏笔）"
+    fs_lines = "\n".join(_fs_line(r) for r in open_rows) or "（当前没有未解伏笔）"
     # 头 2500 + 尾 3500 字采样：回收/钩子多在章尾。不加 stable 前缀——
     # 结算 system prompt 独有，加了永远不会命中前缀缓存（同 dedup 仲裁的取舍）。
     if len(draft_text) > 6000:
@@ -173,11 +224,19 @@ def _create_foreshadow(conn, label: str, desc: str, chapter: int, entity) -> Non
             (str(entity), str(entity))).fetchone()
         entity_id = row["id"] if row else None
     fs_id = new_id("fs")
-    conn.execute(
-        "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
-        " related_entity_id, importance, origin)"
-        " VALUES(?,?,?,'planted',?,?,2,'settle')",
-        (fs_id, label, desc, chapter, entity_id))
+    try:
+        # v22/F1：结算新发现的钩子默认是读者可见的短线（几章内应有回应）
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
+            " related_entity_id, importance, origin, line_type, visibility)"
+            " VALUES(?,?,?,'planted',?,?,2,'settle','short','reader')",
+            (fs_id, label, desc, chapter, entity_id))
+    except sqlite3.OperationalError:   # v22 之前的库
+        conn.execute(
+            "INSERT INTO foreshadow(id, label, description, state, planted_chapter,"
+            " related_entity_id, importance, origin)"
+            " VALUES(?,?,?,'planted',?,?,2,'settle')",
+            (fs_id, label, desc, chapter, entity_id))
     conn.execute(
         "INSERT INTO foreshadow_log(id, foreshadow_id, chapter, action, evidence)"
         " VALUES(?,?,?,'plant',NULL)", (new_id("fsl"), fs_id, chapter))

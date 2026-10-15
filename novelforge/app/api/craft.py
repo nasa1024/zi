@@ -12,18 +12,23 @@
   DELETE /{project_id}/foreshadow/{foreshadow_id}  → 204
 
   GET    /{project_id}/foreshadow/overdue          → list[ForeshadowResponse]（到期未兑现）
+  GET    /{project_id}/foreshadow/dormant          → list[ForeshadowDormantResponse]（v22 休眠承诺）
+  GET    /{project_id}/foreshadow/health           → ForeshadowHealth
+
+  GET    /{project_id}/pacing                      → PacingOverview（v22/F3 节奏游标 + 近 20 章转向）
 """
 from __future__ import annotations
 
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from ..deps import ProjectRegistry, get_registry
 from ..models import (
     ExemptionCreateRequest, ExemptionResponse,
-    ForeshadowCreateRequest, ForeshadowResponse, ForeshadowUpdateRequest,
+    ForeshadowCreateRequest, ForeshadowDormantResponse, ForeshadowResponse,
+    ForeshadowUpdateRequest,
     StyleAnchorCreate, StyleAnchorResponse, StyleAnchorUpdate,
 )
 
@@ -53,8 +58,13 @@ def _row_to_exemption(row) -> ExemptionResponse:
     )
 
 
-def _row_to_foreshadow(row) -> ForeshadowResponse:
-    return ForeshadowResponse(
+def _foreshadow_fields(row) -> dict:
+    keys = set(row.keys())
+
+    def col(name: str, default=None):
+        return row[name] if name in keys and row[name] is not None else default
+
+    return dict(
         id=row["id"],
         label=row["label"],
         description=row["description"],
@@ -69,7 +79,35 @@ def _row_to_foreshadow(row) -> ForeshadowResponse:
         advance_count=row["advance_count"],
         last_advanced_chapter=row["last_advanced_chapter"],
         origin=row["origin"],
+        # v22/F1：老库无这些列时按 schema 默认值回填
+        promise_kind=col("promise_kind"),
+        line_type=col("line_type", "long"),
+        visibility=col("visibility", "reader"),
+        parent_id=col("parent_id"),
+        remind_every=col("remind_every"),
     )
+
+
+def _row_to_foreshadow(row) -> ForeshadowResponse:
+    return ForeshadowResponse(**_foreshadow_fields(row))
+
+
+def _validate_parent(conn, foreshadow_id: str | None, parent_id: str) -> None:
+    """v22/F1 嵌套校验：父承诺必须存在、不能是自身、不能成环。"""
+    if foreshadow_id is not None and parent_id == foreshadow_id:
+        raise HTTPException(422, "parent_id 不能指向自身")
+    if conn.execute("SELECT 1 FROM foreshadow WHERE id=?", (parent_id,)).fetchone() is None:
+        raise HTTPException(422, f"父承诺 parent_id={parent_id} 不存在")
+    if foreshadow_id is None:
+        return
+    seen: set[str] = set()
+    cursor: str | None = parent_id
+    while cursor and cursor not in seen:
+        if cursor == foreshadow_id:
+            raise HTTPException(422, "parent_id 会形成嵌套环")
+        seen.add(cursor)
+        row = conn.execute("SELECT parent_id FROM foreshadow WHERE id=?", (cursor,)).fetchone()
+        cursor = row["parent_id"] if row else None
 
 
 # ── Exemptions ────────────────────────────────────────────────────────────────
@@ -153,16 +191,23 @@ def create_foreshadow(
     registry: ProjectRegistry = Depends(get_registry),
 ) -> ForeshadowResponse:
     """埋下一条伏笔（planted 状态）。"""
+    from ...craft.promise_ledger import normalize_promise_kind
+
     conn = registry.open_conn(project_id)
     try:
+        if req.parent_id:
+            _validate_parent(conn, None, req.parent_id)
         fs_id = str(uuid.uuid4())
         conn.execute(
             """INSERT INTO foreshadow
                (id, label, description, planted_chapter, due_chapter,
-                related_entity_id, importance)
-               VALUES (?,?,?,?,?,?,?)""",
+                related_entity_id, importance,
+                promise_kind, line_type, visibility, parent_id, remind_every)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (fs_id, req.label, req.description, req.planted_chapter,
-             req.due_chapter, req.related_entity_id, req.importance),
+             req.due_chapter, req.related_entity_id, req.importance,
+             normalize_promise_kind(req.promise_kind), req.line_type, req.visibility,
+             req.parent_id or None, req.remind_every),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM foreshadow WHERE id=?", (fs_id,)).fetchone()
@@ -193,12 +238,41 @@ def list_overdue_foreshadow(
         conn.close()
 
 
+@router.get("/{project_id}/foreshadow/dormant")
+def list_dormant_foreshadow(
+    project_id: str,
+    as_of_chapter: int | None = Query(None, ge=1),
+    registry: ProjectRegistry = Depends(get_registry),
+) -> list[ForeshadowDormantResponse]:
+    """v22/F1：休眠承诺——读者可见、未兑现的长/短线，超过 remind_every × dormant_factor
+    章未被提及/推进（默认按下一章计算），最久休眠的在前。"""
+    from ...craft.promise_ledger import dormant_promises
+    from ..chapter_suggest import next_chapter_no
+
+    conn = registry.open_conn(project_id)
+    try:
+        chapter = as_of_chapter or next_chapter_no(conn, project_id)[0]
+        return [
+            ForeshadowDormantResponse(
+                **_foreshadow_fields(row),
+                last_touch_chapter=row["last_touch_chapter"],
+                chapters_since_touch=row["chapters_since_touch"],
+                effective_remind_every=row["effective_remind_every"],
+                dormant_after=row["dormant_after"],
+            )
+            for row in dormant_promises(conn, chapter)
+        ]
+    finally:
+        conn.close()
+
+
 @router.get("/{project_id}/foreshadow/health")
 def foreshadow_health(
     project_id: str,
     registry: ProjectRegistry = Depends(get_registry),
 ):
     """M5-⑧ 伏笔回收健康度（inkos hookAgenda 思路）：逾期堆积全局视图。"""
+    from ...craft.promise_ledger import dormant_promises
     from ..chapter_suggest import next_chapter_no
     from ..models import ForeshadowHealth
 
@@ -234,6 +308,80 @@ def foreshadow_health(
             oldest_overdue_chapter=overdue_rows[0]["due_chapter"] if overdue_rows else None,
             due_soon=[dict(r) for r in due_soon],
             status=status,
+            dormant_count=len(dormant_promises(conn, next_ch)),
+        )
+    finally:
+        conn.close()
+
+
+@router.get("/{project_id}/pacing")
+def pacing_overview(
+    project_id: str,
+    registry: ProjectRegistry = Depends(get_registry),
+):
+    """v22/F3 节奏游标 + 最近 20 章的实际转向与张力（只读，按章号升序）。"""
+    import logging
+    import sqlite3
+
+    from ...config import PolarityConfig
+    from ...control_plane.llm.runtime import build_project_config
+    from ...craft.pacing import PacingController, PacingState
+    from ..models import PacingChapterView, PacingCursorView, PacingOverview
+
+    conn = registry.open_conn(project_id)
+    try:
+        project = registry.get(project_id)
+        try:   # 项目实际生效的阈值（与流水线同源）；配置读取失败时退回默认值
+            limits = build_project_config(
+                project_id, project.db_path if project else "novel.db", conn,
+            ).polarity
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "pacing overview: project config unavailable, using defaults", exc_info=True,
+            )
+            limits = PolarityConfig()
+        try:
+            state = PacingController().get_state(conn, max_low_streak=limits.max_low_streak)
+        except sqlite3.OperationalError:   # 极旧库没有 pacing_cursor
+            state = PacingState(max_low_streak=limits.max_low_streak)
+        try:
+            rows = conn.execute(
+                "SELECT chapter, tension_level, pace, polarity, turning_point, notes"
+                " FROM pacing_state ORDER BY chapter DESC LIMIT 20"
+            ).fetchall()
+        except sqlite3.OperationalError:   # 未迁移到 v22 的库
+            rows = []
+        chapters = []
+        for row in reversed(rows):
+            try:
+                detail = json.loads(row["notes"]) if row["notes"] else {}
+            except (json.JSONDecodeError, TypeError):
+                detail = None
+            chapters.append(PacingChapterView(
+                chapter=row["chapter"],
+                tension_level=row["tension_level"],
+                pace=row["pace"],
+                polarity=row["polarity"],
+                turning_point=row["turning_point"],
+                detail=detail if isinstance(detail, dict) else {"text": str(row["notes"])},
+            ))
+        return PacingOverview(
+            cursor=PacingCursorView(
+                chapters_since_big_payoff=state.chapters_since_big_payoff,
+                kchars_since_small_payoff=state.kchars_since_small_payoff,
+                buildup=state.buildup,
+                recent_high_streak=state.recent_high_streak,
+                low_streak=state.low_streak,
+                polarity_streak=state.polarity_streak,
+                last_polarity=state.last_polarity,
+                needs_turn=state.needs_turn,
+                needs_cooldown=state.needs_cooldown,
+                needs_small_payoff=state.needs_small_payoff,
+                needs_big_payoff=state.needs_big_payoff,
+            ),
+            chapters=chapters,
+            max_same_polarity_streak=limits.max_same_polarity_streak,
+            max_low_streak=limits.max_low_streak,
         )
     finally:
         conn.close()
@@ -280,6 +428,9 @@ def get_foreshadow(
         conn.close()
 
 
+_CLEARABLE_FORESHADOW_FIELDS = frozenset({"promise_kind", "parent_id", "remind_every"})
+
+
 @router.patch("/{project_id}/foreshadow/{foreshadow_id}")
 def update_foreshadow(
     project_id: str,
@@ -287,7 +438,12 @@ def update_foreshadow(
     req: ForeshadowUpdateRequest,
     registry: ProjectRegistry = Depends(get_registry),
 ) -> ForeshadowResponse:
-    """更新伏笔状态（state / paid_off_chapter / due_chapter / importance）。"""
+    """更新伏笔（state / paid_off_chapter / due_chapter / importance / 承诺字段）。
+
+    未传或传 null 的字段保持不变；v22 的 promise_kind / parent_id / remind_every
+    显式传 null 表示清空。"""
+    from ...craft.promise_ledger import normalize_promise_kind
+
     conn = registry.open_conn(project_id)
     try:
         row = conn.execute(
@@ -296,7 +452,16 @@ def update_foreshadow(
         if not row:
             raise HTTPException(404, f"foreshadow_id={foreshadow_id} 不存在")
 
-        updates = {k: v for k, v in req.model_dump().items() if v is not None}
+        updates = {
+            k: v for k, v in req.model_dump(exclude_unset=True).items()
+            if v is not None or k in _CLEARABLE_FORESHADOW_FIELDS
+        }
+        if "promise_kind" in updates:
+            updates["promise_kind"] = normalize_promise_kind(updates["promise_kind"])
+        if "parent_id" in updates:
+            updates["parent_id"] = updates["parent_id"] or None
+            if updates["parent_id"]:
+                _validate_parent(conn, foreshadow_id, updates["parent_id"])
         if not updates:
             return _row_to_foreshadow(row)
 
@@ -328,6 +493,10 @@ def delete_foreshadow(
 ):
     conn = registry.open_conn(project_id)
     try:
+        # v22/F1：内层承诺脱离被删的外层（否则外键阻止删除）
+        conn.execute(
+            "UPDATE foreshadow SET parent_id=NULL WHERE parent_id=?", (foreshadow_id,)
+        )
         result = conn.execute(
             "DELETE FROM foreshadow WHERE id=?", (foreshadow_id,)
         )
